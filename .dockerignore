@@ -1,0 +1,30 @@
+# Test data
+test-openvpn-data/
+test-openvpn-config/
+test-client.ovpn
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+SECURITY-ISSUES-OLD.md
+
+# Docker
+docker-compose.yml
+Dockerfile
+
+# Build artifacts
+openvpn-auth-daemon
+mgmt-mock
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# LocalStack
+localstack-init/

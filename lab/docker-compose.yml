@@ -1,0 +1,77 @@
+services:
+  localstack:
+    image: localstack/localstack:4.14.0
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=dynamodb
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./localstack-init:/etc/localstack/init/ready.d"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  openvpn:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile.openvpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "1194:1194/udp"
+    volumes:
+      - ./openvpn-data:/etc/openvpn
+      - openvpn-run:/run/openvpn
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/openvpn/management.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  daemon:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      localstack:
+        condition: service_healthy
+    volumes:
+      - openvpn-run:/run/openvpn
+      - ./openvpn-data:/etc/openvpn:ro
+    environment:
+      - VPN_AUTH_LOCAL_IDENTITY=true
+      - VPN_AUTH_HMAC_SECRET=test-secret
+      - VPN_AUTH_API_GATEWAY_URL=http://localhost:8080
+      - VPN_AUTH_MANAGEMENT_SOCKET=/run/openvpn/management.sock
+      - VPN_AUTH_MANAGEMENT_PASSWORD_FILE=/etc/openvpn/management-pw
+      - AWS_REGION=eu-west-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_ENDPOINT_URL_DYNAMODB=http://localstack:4566
+    command: /app/openvpn-auth-daemon
+
+  lambda-mock:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile.lambda-mock
+    depends_on:
+      localstack:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      - VPN_AUTH_HMAC_SECRET=test-secret
+      - AWS_ENDPOINT_URL_DYNAMODB=http://localstack:4566
+      - DYNAMODB_TABLE=vpn-sessions
+      - AWS_REGION=eu-west-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+
+volumes:
+  openvpn-run:
