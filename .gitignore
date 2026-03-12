@@ -24,12 +24,6 @@ go.work.sum
 /mgmt-mock
 /lambda-mock
 
-# Custom
-.env
-*.log
-notes/
-test-openvpn-config/
-
 # Lab — generated files (certs, client config)
 lab/openvpn-data/
 lab/client.ovpn
@@ -37,3 +31,33 @@ lab/client.ovpn
 # Editor/IDE
 .idea/
 .vscode/
+.kiro/specs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+*.egg-info/
+.ruff_cache/
+.python-version
+python/
+
+# Pytest
+.coverage
+.pytest_cache/
+htmlcov/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+terraform.tfvars
+
+# Custom
+.env
+*.log
+notes/
+*.zip

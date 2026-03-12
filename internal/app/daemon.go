@@ -2,20 +2,27 @@ package app
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"openvpn-auth-aws/internal/auth"
+	"openvpn-auth-aws/internal/callback"
 	"openvpn-auth-aws/internal/config"
 	"openvpn-auth-aws/internal/mgmt"
 )
 
 type Daemon struct {
-	cfg     config.Config
-	handler *auth.Handler
-	metrics auth.Metrics
+	cfg            config.Config
+	handler        *auth.Handler
+	metrics        auth.Metrics
+	callbackServer *callback.Server
+
+	// cmdCh lives at daemon level so the callback server can write decisions
+	// to the management socket even across reconnections.
+	cmdCh chan string
 
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -29,39 +36,102 @@ type decisionSink struct {
 }
 
 func (s decisionSink) Send(d auth.Decision) {
-	var cmd string
 	switch d.Type {
 	case auth.DecisionAllow:
-		cmd = mgmt.ClientAuth(d.CID, d.KID)
+		lines := mgmt.ClientAuth(d.CID, d.KID)
+		for _, line := range lines {
+			select {
+			case s.cmdCh <- line:
+			case <-s.done:
+				return
+			}
+		}
 	case auth.DecisionAllowNT:
-		cmd = mgmt.ClientAuthNT(d.CID, d.KID)
+		s.sendOne(mgmt.ClientAuthNT(d.CID, d.KID))
 	case auth.DecisionDeny:
-		cmd = mgmt.ClientDeny(d.CID, d.KID, d.Reason)
+		s.sendOne(mgmt.ClientDeny(d.CID, d.KID, d.Reason))
 	case auth.DecisionPending:
-		cmd = mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout)
-	default:
-		return
+		s.sendOne(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
+	case auth.DecisionKill:
+		s.sendOne(mgmt.ClientKill(d.CID))
 	}
+}
+
+func (s decisionSink) sendOne(cmd string) {
 	select {
 	case s.cmdCh <- cmd:
 	case <-s.done:
 	}
 }
 
-func New(cfg config.Config, handler *auth.Handler, metrics auth.Metrics) *Daemon {
+// DaemonSink is the DecisionSink backed by the daemon-level cmdCh.
+// It never blocks on a "done" channel — the daemon manages its own lifecycle.
+type DaemonSink struct {
+	CmdCh chan<- string
+}
+
+func (s DaemonSink) Send(d auth.Decision) {
+	switch d.Type {
+	case auth.DecisionAllow:
+		lines := mgmt.ClientAuth(d.CID, d.KID)
+		for _, line := range lines {
+			s.trySend(line)
+		}
+	case auth.DecisionAllowNT:
+		s.trySend(mgmt.ClientAuthNT(d.CID, d.KID))
+	case auth.DecisionDeny:
+		s.trySend(mgmt.ClientDeny(d.CID, d.KID, d.Reason))
+	case auth.DecisionPending:
+		s.trySend(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
+	case auth.DecisionKill:
+		s.trySend(mgmt.ClientKill(d.CID))
+	}
+}
+
+func (s DaemonSink) trySend(cmd string) {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case s.CmdCh <- cmd:
+	case <-timer.C:
+		slog.Warn("daemon cmdCh full, dropping command", "cmd", cmd)
+	}
+}
+
+func New(cfg config.Config, handler *auth.Handler, callbackServer *callback.Server, metrics auth.Metrics) *Daemon {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	return &Daemon{
 		cfg:            cfg,
 		handler:        handler,
 		metrics:        metrics,
+		callbackServer: callbackServer,
+		cmdCh:          make(chan string, 256),
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
 	}
 }
 
+// CmdCh returns the daemon-level command channel for constructing sinks.
+func (d *Daemon) CmdCh() chan string {
+	return d.cmdCh
+}
+
+// SetCallbackServer sets the callback server after daemon construction.
+func (d *Daemon) SetCallbackServer(srv *callback.Server) {
+	d.callbackServer = srv
+}
+
 func (d *Daemon) Run(ctx context.Context) error {
 	defer d.shutdownCancel()
 	go d.heartbeatLoop(ctx)
+
+	// Start callback server
+	callbackAddr := fmt.Sprintf(":%d", d.cfg.CallbackPort)
+	go func() {
+		if err := d.callbackServer.Start(callbackAddr); err != nil {
+			slog.Error("callback server error", "error", err)
+		}
+	}()
 
 	for {
 		if ctx.Err() != nil {
@@ -80,13 +150,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.gracefulShutdown()
 			d.socketConnected.Store(false)
 			_ = client.Close()
+			// Shutdown callback server
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = d.callbackServer.Shutdown(shutdownCtx)
+			cancel()
 			return ctx.Err()
 		}
 
 		d.socketConnected.Store(false)
 		_ = client.Close()
 		if err != nil {
-			log.Printf("management connection lost: %v", err)
+			slog.Warn("management connection lost", "error", err)
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
@@ -102,23 +176,20 @@ func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) erro
 	}()
 
 	cmdDone := make(chan struct{})
-	cmdCh := make(chan string, 256)
 	go func() {
 		defer close(cmdDone)
-		d.commandWriter(d.shutdownCtx, client, cmdCh)
+		d.commandWriter(d.shutdownCtx, client)
 	}()
 
-	// Send hold release immediately — required when OpenVPN is configured with
-	// management-hold. OpenVPN will not accept any client connections until it
-	// receives this command. Safe to send even without management-hold.
+	// Send hold release immediately
 	select {
-	case cmdCh <- "hold release":
+	case d.cmdCh <- "hold release":
 	case <-cmdDone:
 		return nil
 	}
 
 	scanner := client.Scanner()
-	sink := decisionSink{cmdCh: cmdCh, done: cmdDone}
+	sink := decisionSink{cmdCh: d.cmdCh, done: cmdDone}
 	for scanner.Scan() {
 		line := scanner.Text()
 		switch {
@@ -129,9 +200,8 @@ func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) erro
 			}
 			d.handler.HandleEvent(d.shutdownCtx, event, sink)
 		case strings.HasPrefix(line, ">HOLD:"):
-			// OpenVPN is waiting — release the hold
 			select {
-			case cmdCh <- "hold release":
+			case d.cmdCh <- "hold release":
 			case <-cmdDone:
 				return nil
 			}
@@ -140,14 +210,14 @@ func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) erro
 	return scanner.Err()
 }
 
-func (d *Daemon) commandWriter(ctx context.Context, client *mgmt.Client, cmdCh <-chan string) {
+func (d *Daemon) commandWriter(ctx context.Context, client *mgmt.Client) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case cmd := <-cmdCh:
+		case cmd := <-d.cmdCh:
 			if err := client.WriteLine(cmd); err != nil {
-				log.Printf("management write failed: %v", err)
+				slog.Error("management write failed", "error", err)
 				return
 			}
 		}
@@ -155,7 +225,10 @@ func (d *Daemon) commandWriter(ctx context.Context, client *mgmt.Client, cmdCh <
 }
 
 func (d *Daemon) heartbeatLoop(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
+	if !d.cfg.EMFMetrics || d.cfg.EMFInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(d.cfg.EMFInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -164,7 +237,6 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 		case <-ticker.C:
 			d.metrics.Heartbeat(
 				d.socketConnected.Load(),
-				d.handler.DynamoReachable(),
 				d.handler.InFlight(),
 			)
 		}
@@ -172,22 +244,25 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 }
 
 func (d *Daemon) gracefulShutdown() {
+	// Wait for in-flight REAUTH goroutines (bounded by ReauthTimeout).
+	d.handler.WaitReauth()
+
 	n := d.handler.InFlight()
 	if n == 0 {
 		return
 	}
-	log.Printf("graceful shutdown: waiting for %d in-flight sessions (max %v)", n, d.cfg.ShutdownGracePeriod)
+	slog.Info("graceful shutdown", "in_flight", n, "grace_period", d.cfg.ShutdownGracePeriod)
 	deadline := time.After(d.cfg.ShutdownGracePeriod)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-deadline:
-			log.Printf("grace period expired, %d sessions still in-flight", d.handler.InFlight())
+			slog.Warn("grace period expired", "in_flight", d.handler.InFlight())
 			return
 		case <-ticker.C:
 			if d.handler.InFlight() == 0 {
-				log.Printf("all in-flight sessions completed")
+				slog.Info("all in-flight sessions completed")
 				return
 			}
 		}

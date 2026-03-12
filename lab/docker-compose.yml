@@ -1,20 +1,4 @@
 services:
-  localstack:
-    image: localstack/localstack:4.14.0
-    ports:
-      - "4566:4566"
-    environment:
-      - SERVICES=dynamodb
-      - DOCKER_HOST=unix:///var/run/docker.sock
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock"
-      - "./localstack-init:/etc/localstack/init/ready.d"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   openvpn:
     build:
       context: ..
@@ -39,39 +23,32 @@ services:
       context: ..
       dockerfile: Dockerfile
     depends_on:
-      localstack:
+      openvpn:
         condition: service_healthy
+    ports:
+      - "8081:8081"
     volumes:
       - openvpn-run:/run/openvpn
       - ./openvpn-data:/etc/openvpn:ro
     environment:
-      - VPN_AUTH_LOCAL_IDENTITY=true
+      - VPN_AUTH_USE_LOCAL_MOCKS=true
+      - VPN_AUTH_CN_CROSS_CHECK=false
       - VPN_AUTH_HMAC_SECRET=test-secret
       - VPN_AUTH_API_GATEWAY_URL=http://localhost:8080
       - VPN_AUTH_MANAGEMENT_SOCKET=/run/openvpn/management.sock
       - VPN_AUTH_MANAGEMENT_PASSWORD_FILE=/etc/openvpn/management-pw
-      - AWS_REGION=eu-west-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - AWS_ENDPOINT_URL_DYNAMODB=http://localstack:4566
+      - VPN_AUTH_CALLBACK_PORT=8081
+      - VPN_AUTH_INSTANCE_IP=daemon
     command: /app/openvpn-auth-daemon
 
   lambda-mock:
     build:
       context: ..
       dockerfile: lab/Dockerfile.lambda-mock
-    depends_on:
-      localstack:
-        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
       - VPN_AUTH_HMAC_SECRET=test-secret
-      - AWS_ENDPOINT_URL_DYNAMODB=http://localstack:4566
-      - DYNAMODB_TABLE=vpn-sessions
-      - AWS_REGION=eu-west-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
 
 volumes:
   openvpn-run:

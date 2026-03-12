@@ -1,6 +1,6 @@
 // mgmt-mock simulates the OpenVPN management interface on a Unix socket.
-// It accepts daemon connections, handles password auth, and lets you
-// send CLIENT events interactively from stdin.
+// It accepts daemon connections, handles password auth, sends >HOLD:
+// notification, and lets you send CLIENT events interactively from stdin.
 //
 // Usage:
 //
@@ -8,10 +8,14 @@
 //
 // Then type commands like:
 //
-//	connect 3 john@example.com        — send CLIENT:CONNECT for CID=3
-//	reauth  3 john@example.com        — send CLIENT:REAUTH  for CID=3
-//	disconnect 3                       — send CLIENT:DISCONNECT for CID=3
-//	quit                               — exit
+//	connect 3 john@example.com             — CLIENT:CONNECT with IV_SSO=webauth
+//	connect 3 john@example.com openurl     — CLIENT:CONNECT with IV_SSO=openurl
+//	connect 3 john@example.com webauth token123 — CLIENT:CONNECT with password field
+//	reauth  3 john@example.com             — CLIENT:REAUTH event
+//	disconnect 3                           — CLIENT:DISCONNECT event
+//	sso openurl                            — change default IV_SSO for next events
+//	hold                                   — send >HOLD: notification
+//	quit                                   — exit
 package main
 
 import (
@@ -22,12 +26,32 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
 	socketPath   = "/tmp/openvpn-mgmt.sock"
 	passwordFile = "/tmp/mgmt-pw"
 )
+
+// nextKID auto-increments per CID to simulate TLS renegotiation.
+var (
+	cidKID   = make(map[string]int)
+	cidKIDMu sync.Mutex
+)
+
+func nextKID(cid string) string {
+	cidKIDMu.Lock()
+	defer cidKIDMu.Unlock()
+	cidKID[cid]++
+	return fmt.Sprintf("%d", cidKID[cid])
+}
+
+func resetKID(cid string) {
+	cidKIDMu.Lock()
+	defer cidKIDMu.Unlock()
+	delete(cidKID, cid)
+}
 
 func main() {
 	// Read expected password, create file with default if missing.
@@ -70,10 +94,6 @@ func main() {
 	scanner := bufio.NewScanner(conn)
 
 	// --- Password handshake ---
-	// Mock acts as OpenVPN management interface server:
-	// 1. Send "ENTER PASSWORD:" prompt (no newline, exactly 15 bytes)
-	// 2. Read password from daemon
-	// 3. Send SUCCESS or ERROR
 	if expectedPw != "" {
 		if _, err := fmt.Fprintf(conn, "ENTER PASSWORD:"); err != nil {
 			log.Fatalf("write prompt: %v", err)
@@ -84,9 +104,7 @@ func main() {
 		got := scanner.Text()
 		if got != expectedPw {
 			_, _ = fmt.Fprintf(conn, "ERROR: bad password\r\n")
-			if err := conn.Close(); err != nil {
-				log.Printf("conn.Close: %v", err)
-			}
+			_ = conn.Close()
 			log.Fatalf("bad password: got %q", got)
 		}
 		if _, err := fmt.Fprintf(conn, "SUCCESS: password is correct\r\n"); err != nil {
@@ -95,22 +113,64 @@ func main() {
 		log.Println("Auth OK")
 	}
 
+	// --- Send >HOLD: notification ---
+	// Real OpenVPN sends this when management-hold is configured.
+	// Daemon should respond with "hold release".
+	_, _ = fmt.Fprintf(conn, ">HOLD:Waiting for hold release:0\r\n")
+	log.Println(">> sent >HOLD: notification")
+
 	// --- Read daemon responses in background ---
+	var disconnected atomic.Bool
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for scanner.Scan() {
-			log.Printf("<< daemon: %s", scanner.Text())
+			line := scanner.Text()
+			log.Printf("<< daemon: %s", line)
+
+			// When daemon sends client-auth or client-auth-nt, simulate OpenVPN
+			// sending >CLIENT:ESTABLISHED and >CLIENT:ADDRESS automatically.
+			if strings.HasPrefix(line, "client-auth ") || strings.HasPrefix(line, "client-auth-nt ") {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 {
+					cid := fields[1]
+					// Drain the text block for client-auth (ends with "END")
+					if strings.HasPrefix(line, "client-auth ") {
+						for scanner.Scan() {
+							inner := scanner.Text()
+							log.Printf("<< daemon (auth-block): %s", inner)
+							if inner == "END" {
+								break
+							}
+						}
+					}
+					// Simulate OpenVPN sending ESTABLISHED + ADDRESS
+					_, _ = fmt.Fprintf(conn, ">CLIENT:ESTABLISHED,%s\r\n", cid)
+					_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,time_unix=1234567890\r\n")
+					_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,END\r\n")
+					_, _ = fmt.Fprintf(conn, ">CLIENT:ADDRESS,%s,10.8.0.2,1\r\n", cid)
+					log.Printf(">> auto ESTABLISHED+ADDRESS cid=%s", cid)
+				}
+			}
 		}
+		disconnected.Store(true)
 		log.Println("Daemon disconnected")
 	}()
+
+	// Default IV_SSO value for connect events.
+	defaultSSO := "webauth"
 
 	// --- Interactive prompt ---
 	printHelp()
 	stdin := bufio.NewScanner(os.Stdin)
 	fmt.Print("> ")
 	for stdin.Scan() {
+		if disconnected.Load() {
+			log.Println("Daemon disconnected, exiting")
+			return
+		}
+
 		line := strings.TrimSpace(stdin.Text())
 		if line == "" {
 			fmt.Print("> ")
@@ -120,19 +180,48 @@ func main() {
 		cmd := strings.ToLower(parts[0])
 
 		switch cmd {
-		case "connect", "reauth":
+		case "connect":
 			if len(parts) < 3 {
-				log.Printf("usage: %s <CID> <username>", cmd)
+				log.Println("usage: connect <CID> <username> [sso] [password] [KID]")
 				fmt.Print("> ")
 				continue
 			}
 			cid := parts[1]
 			username := parts[2]
-			kid := "1"
+			sso := defaultSSO
+			password := ""
+			kid := ""
+			// Parse optional args: sso, password, KID
+			if len(parts) >= 4 {
+				sso = parts[3]
+			}
+			if len(parts) >= 5 {
+				password = parts[4]
+			}
+			if len(parts) >= 6 {
+				kid = parts[5]
+			}
+			if kid == "" {
+				kid = nextKID(cid)
+			}
+			sendConnect(conn, cid, kid, username, sso, password)
+
+		case "reauth":
+			if len(parts) < 3 {
+				log.Println("usage: reauth <CID> <username> [KID]")
+				fmt.Print("> ")
+				continue
+			}
+			cid := parts[1]
+			username := parts[2]
+			kid := ""
 			if len(parts) >= 4 {
 				kid = parts[3]
 			}
-			sendClientEvent(conn, cmd, cid, kid, username)
+			if kid == "" {
+				kid = nextKID(cid)
+			}
+			sendReauth(conn, cid, kid, username)
 
 		case "disconnect":
 			if len(parts) < 2 {
@@ -141,19 +230,29 @@ func main() {
 				continue
 			}
 			cid := parts[1]
-			_, _ = fmt.Fprintf(conn, ">CLIENT:DISCONNECT,%s\n", cid)
-			_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,time_duration=120\n")
-			_, _ = fmt.Fprintf(conn, ">CLIENT:END\n")
-			log.Printf(">> sent DISCONNECT cid=%s", cid)
+			sendDisconnect(conn, cid)
+			resetKID(cid)
+
+		case "sso":
+			if len(parts) < 2 {
+				log.Printf("current IV_SSO default: %s", defaultSSO)
+				log.Println("usage: sso <webauth|openurl|openurl,webauth|crtext>")
+				fmt.Print("> ")
+				continue
+			}
+			defaultSSO = parts[1]
+			log.Printf("IV_SSO default set to: %s", defaultSSO)
+
+		case "hold":
+			_, _ = fmt.Fprintf(conn, ">HOLD:Waiting for hold release:0\r\n")
+			log.Println(">> sent >HOLD: notification")
 
 		case "help":
 			printHelp()
 
 		case "quit", "exit":
 			log.Println("Closing connection")
-			if err := conn.Close(); err != nil {
-				log.Printf("conn.Close: %v", err)
-			}
+			_ = conn.Close()
 			wg.Wait()
 			return
 
@@ -163,31 +262,70 @@ func main() {
 		fmt.Print("> ")
 	}
 
-	if err := conn.Close(); err != nil {
-		log.Printf("conn.Close: %v", err)
-	}
+	_ = conn.Close()
 	wg.Wait()
 }
 
-func sendClientEvent(conn net.Conn, cmd, cid, kid, username string) {
-	eventType := "CONNECT"
-	if cmd == "reauth" {
-		eventType = "REAUTH"
+func sendConnect(conn net.Conn, cid, kid, username, sso, password string) {
+	_, _ = fmt.Fprintf(conn, ">CLIENT:CONNECT,%s,%s\r\n", cid, kid)
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,username=%s\r\n", username)
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,common_name=%s\r\n", username)
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,IV_SSO=%s\r\n", sso)
+	if password != "" {
+		_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,password=%s\r\n", password)
 	}
-	_, _ = fmt.Fprintf(conn, ">CLIENT:%s,%s,%s\n", eventType, cid, kid)
-	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,username=%s\n", username)
-	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,common_name=%s\n", username)
-	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,IV_SSO=webauth\n")
-	_, _ = fmt.Fprintf(conn, ">CLIENT:END\n")
-	log.Printf(">> sent %s cid=%s kid=%s user=%s", eventType, cid, kid, username)
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,untrusted_ip=10.0.0.2\r\n")
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,untrusted_port=51234\r\n")
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,IV_VER=2.6.12\r\n")
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,IV_PLAT=linux\r\n")
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,END\r\n")
+	extra := ""
+	if password != "" {
+		extra = fmt.Sprintf(" password=%s", password)
+	}
+	log.Printf(">> CONNECT cid=%s kid=%s user=%s sso=%s%s", cid, kid, username, sso, extra)
+}
+
+func sendReauth(conn net.Conn, cid, kid, username string) {
+	_, _ = fmt.Fprintf(conn, ">CLIENT:REAUTH,%s,%s\r\n", cid, kid)
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,username=%s\r\n", username)
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,common_name=%s\r\n", username)
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,IV_SSO=webauth\r\n")
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,END\r\n")
+	log.Printf(">> REAUTH cid=%s kid=%s user=%s", cid, kid, username)
+}
+
+func sendDisconnect(conn net.Conn, cid string) {
+	_, _ = fmt.Fprintf(conn, ">CLIENT:DISCONNECT,%s\r\n", cid)
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,time_duration=120\r\n")
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,END\r\n")
+	log.Printf(">> DISCONNECT cid=%s", cid)
 }
 
 func printHelp() {
 	fmt.Println(`
 Commands:
-  connect    <CID> <username> [KID]  — CLIENT:CONNECT event (KID defaults to 1)
-  reauth     <CID> <username> [KID]  — CLIENT:REAUTH event
-  disconnect <CID>                   — CLIENT:DISCONNECT event
-  help                               — show this help
-  quit                               — close connection and exit`)
+  connect    <CID> <user> [sso] [password] [KID]
+             — CLIENT:CONNECT event
+               sso: webauth (default), openurl, openurl,webauth, crtext
+               password: auth-gen-token value (omit for WebAuth flow)
+               KID: auto-increments per CID if omitted
+
+  reauth     <CID> <user> [KID]
+             — CLIENT:REAUTH event (TLS renegotiation)
+
+  disconnect <CID>
+             — CLIENT:DISCONNECT event (resets KID counter)
+
+  sso <value>  — set default IV_SSO for future connect events
+  hold         — send >HOLD: notification (daemon responds with "hold release")
+  help         — show this help
+  quit         — close connection and exit
+
+Examples:
+  connect 1 alice@example.com                  — standard WebAuth connect
+  connect 2 bob@example.com openurl            — connect with IV_SSO=openurl
+  connect 1 alice@example.com webauth mytoken  — token reconnect (password field)
+  reauth 1 alice@example.com                   — TLS reauth for CID=1
+  disconnect 1                                 — client disconnected`)
 }

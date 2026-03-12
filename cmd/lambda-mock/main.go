@@ -1,106 +1,146 @@
-// lambda-mock simulates the Lambda /auth endpoint for local development.
-// It verifies the HMAC signature, writes SUCCESS to DynamoDB (LocalStack),
-// and returns an HTML confirmation page — exactly what the real Lambda /callback
-// would do after a successful Cognito login.
+// lambda-mock simulates the Lambda /auth and /callback endpoints for local development.
+// In stateless mode: /auth verifies HMAC on state blob, extracts agent IP,
+// and POSTs a fake code directly to the agent's callback endpoint.
 //
-// Usage (via docker compose):
+// Usage (via docker compose or standalone):
 //
 //	VPN_AUTH_HMAC_SECRET=test-secret
-//	DYNAMODB_ENDPOINT=http://localstack:4566
-//	DYNAMODB_TABLE=vpn-sessions
-//	AWS_REGION=eu-west-1
+//	LISTEN_ADDR=:8080
 package main
 
 import (
-	"context"
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 func main() {
 	hmacSecret := mustEnv("VPN_AUTH_HMAC_SECRET")
-	tableName := getenv("DYNAMODB_TABLE", "vpn-sessions")
-	region := getenv("AWS_REGION", "eu-west-1")
 	addr := getenv("LISTEN_ADDR", ":8080")
 
-	ctx := context.Background()
-
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
-	if err != nil {
-		log.Fatalf("aws config: %v", err)
-	}
-
-	db := dynamodb.NewFromConfig(awsCfg)
-
 	mux := http.NewServeMux()
-	mux.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
-		state := strings.Trim(r.URL.Query().Get("state"), "'")
-		sig := strings.Trim(r.URL.Query().Get("sig"), "'")
-		if state == "" || sig == "" {
-			http.Error(w, "missing state or sig", http.StatusBadRequest)
+	mux.HandleFunc("/auth", handleAuth(hmacSecret))
+
+	log.Printf("Lambda mock (stateless) listening on %s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatalf("server: %v", err)
+	}
+}
+
+func handleAuth(hmacSecret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		stateBlob := strings.Trim(r.URL.Query().Get("state"), "'")
+		if stateBlob == "" {
+			http.Error(w, "missing state", http.StatusBadRequest)
 			return
 		}
 
-		// Verify HMAC signature (same as daemon StaticSigner.Sign)
-		expected := sign(hmacSecret, state)
-		if sig != expected {
-			log.Printf("/auth: invalid sig for state=%s", state)
+		// Verify HMAC on state blob (format: base64payload.mac)
+		parts := strings.SplitN(stateBlob, ".", 2)
+		if len(parts) != 2 {
+			http.Error(w, "invalid state format", http.StatusBadRequest)
+			return
+		}
+		encoded, mac := parts[0], parts[1]
+
+		expectedMAC := sign(hmacSecret, encoded)
+		if mac != expectedMAC {
+			log.Printf("/auth: invalid HMAC for state")
 			http.Error(w, "invalid signature", http.StatusForbidden)
 			return
 		}
 
-		// Generate auth_token = HMAC(state|SUCCESS) — matches poller.verifyAuthToken
-		authToken := sign(hmacSecret, state+"|SUCCESS")
-
-		_, err := db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-			TableName: aws.String(tableName),
-			Key: map[string]types.AttributeValue{
-				"state": &types.AttributeValueMemberS{Value: state},
-			},
-			UpdateExpression: aws.String("SET #s = :s, auth_token = :t, #ttl = :ttl"),
-			ExpressionAttributeNames: map[string]string{
-				"#s":   "status",
-				"#ttl": "ttl",
-			},
-			ExpressionAttributeValues: map[string]types.AttributeValue{
-				":s":   &types.AttributeValueMemberS{Value: "SUCCESS"},
-				":t":   &types.AttributeValueMemberS{Value: authToken},
-				":ttl": &types.AttributeValueMemberN{Value: strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)},
-			},
-		})
+		// Decode payload
+		data, err := base64.RawURLEncoding.DecodeString(encoded)
 		if err != nil {
-			log.Printf("/auth: dynamodb update error: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			http.Error(w, "decode state failed", http.StatusBadRequest)
 			return
 		}
 
-		log.Printf("/auth: approved state=%s", state)
+		var payload struct {
+			SID string `json:"sid"`
+			IP  string `json:"ip"`
+			IAT int64  `json:"iat"`
+			EXP int64  `json:"exp"`
+		}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			http.Error(w, "unmarshal state failed", http.StatusBadRequest)
+			return
+		}
+
+		if time.Now().Unix() > payload.EXP {
+			http.Error(w, "state expired", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("/auth: state OK, sid=%s, agent=%s", payload.SID, payload.IP)
+
+		// POST callback to agent
+		callbackReq := map[string]any{
+			"code":       "mock-auth-code",
+			"session_id": payload.SID,
+			"ts":         time.Now().Unix(),
+		}
+		body, _ := json.Marshal(callbackReq)
+		bodyMAC := sign(hmacSecret, string(body))
+
+		agentURL := fmt.Sprintf("http://%s/callback", payload.IP)
+		req, err := http.NewRequest(http.MethodPost, agentURL, bytes.NewReader(body))
+		if err != nil {
+			log.Printf("/auth: build callback request: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Token", bodyMAC)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Printf("/auth: callback POST failed: %v", err)
+			http.Error(w, "callback failed", http.StatusBadGateway)
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		respBody, _ := io.ReadAll(resp.Body)
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("/auth: agent returned %d: %s", resp.StatusCode, respBody)
+			w.Header().Set("Content-Type", "text/html")
+			if resp.StatusCode == http.StatusConflict {
+				// 409 — session already processed (double-click or replay).
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
+<html><body>
+<h1>Already authenticated</h1>
+<p>This link has already been used. You can close this window.</p>
+</body></html>`)
+			} else {
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
+<html><body>
+<h1>Authentication failed</h1>
+<p>Please close this window and reconnect.</p>
+</body></html>`)
+			}
+			return
+		}
+
+		log.Printf("/auth: callback accepted for sid=%s", payload.SID)
 		w.Header().Set("Content-Type", "text/html")
-		if _, err := fmt.Fprintf(w, `<!DOCTYPE html>
+		_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html><body>
 <h1>Authentication successful</h1>
 <p>You can close this window and return to your VPN client.</p>
-</body></html>`); err != nil {
-			log.Printf("/auth: write response: %v", err)
-		}
-	})
-
-	log.Printf("Lambda mock listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("server: %v", err)
+</body></html>`)
 	}
 }
 

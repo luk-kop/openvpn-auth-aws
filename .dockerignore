@@ -1,30 +1,31 @@
-# Test data
-test-openvpn-data/
-test-openvpn-config/
-test-client.ovpn
-
 # Git
 .git/
 .gitignore
+.gitattributes
 
 # Documentation
 *.md
-SECURITY-ISSUES-OLD.md
+LICENSE
 
-# Docker
-docker-compose.yml
-Dockerfile
-
-# Build artifacts
-openvpn-auth-daemon
-mgmt-mock
-
-# IDE
+# IDE / tooling
 .idea/
 .vscode/
+.kiro/
+.pre-commit-config.yaml
 
 # Logs
 *.log
 
-# LocalStack
-localstack-init/
+# Build artifacts (local)
+openvpn-auth-daemon
+mgmt-mock
+lambda-mock
+
+# Lab environment (certs, configs, Docker files — not needed in image)
+lab/
+
+# Notes
+notes/
+
+# Makefile
+Makefile

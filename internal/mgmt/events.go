@@ -3,9 +3,12 @@ package mgmt
 type EventType string
 
 const (
-	EventConnect    EventType = "CONNECT"
-	EventReauth     EventType = "REAUTH"
-	EventDisconnect EventType = "DISCONNECT"
+	EventConnect     EventType = "CONNECT"
+	EventReauth      EventType = "REAUTH"
+	EventDisconnect  EventType = "DISCONNECT"
+	EventEstablished EventType = "ESTABLISHED"
+	EventIgnored     EventType = "IGNORED"
+	EventUnknown     EventType = "UNKNOWN"
 )
 
 type Event struct {

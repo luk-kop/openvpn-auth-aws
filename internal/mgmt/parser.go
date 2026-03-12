@@ -18,6 +18,20 @@ func ParseHeader(line string) (EventType, string, string, error) {
 			return "", "", "", fmt.Errorf("disconnect missing cid")
 		}
 		return EventDisconnect, cid, "", nil
+	case strings.HasPrefix(line, ">CLIENT:ESTABLISHED,"):
+		cid := strings.TrimSpace(strings.TrimPrefix(line, ">CLIENT:ESTABLISHED,"))
+		if cid == "" {
+			return "", "", "", fmt.Errorf("established missing cid")
+		}
+		return EventEstablished, cid, "", nil
+	case strings.HasPrefix(line, ">CLIENT:ADDRESS,"):
+		// Single-line notification: >CLIENT:ADDRESS,{CID},{ADDR},{PRI}
+		// No ENV block follows — ignore silently.
+		return EventIgnored, "", "", nil
+	case strings.HasPrefix(line, ">CLIENT:"):
+		// Unknown future CLIENT notification — consume any ENV block that
+		// may follow to keep the stream synchronized.
+		return EventUnknown, "", "", nil
 	default:
 		return "", "", "", fmt.Errorf("unsupported event header: %s", line)
 	}
@@ -34,9 +48,16 @@ func ReadEvent(scanner *bufio.Scanner, headerLine string) (Event, error) {
 		KID:  kid,
 		Env:  map[string]string{},
 	}
+	// Single-line events (ADDRESS) have no ENV block.
+	if typ == EventIgnored {
+		return event, nil
+	}
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == ">CLIENT:ENV,END" {
+			if event.Type == EventUnknown {
+				event.Type = EventIgnored
+			}
 			return event, nil
 		}
 		if !strings.HasPrefix(line, ">CLIENT:ENV,") {

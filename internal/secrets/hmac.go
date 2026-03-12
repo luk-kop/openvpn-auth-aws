@@ -34,10 +34,15 @@ func NewSigner(cfg aws.Config, secretARN string) (*Signer, error) {
 	}, nil
 }
 
-func (s *Signer) Sign(state string) string {
+func (s *Signer) Sign(data string) string {
 	sum := hmac.New(sha256.New, s.secret)
-	sum.Write([]byte(state))
+	sum.Write([]byte(data))
 	return base64.RawURLEncoding.EncodeToString(sum.Sum(nil))
+}
+
+func (s *Signer) Verify(data, mac string) bool {
+	expected := s.Sign(data)
+	return hmac.Equal([]byte(expected), []byte(mac))
 }
 
 // StaticSigner for testing
@@ -49,8 +54,13 @@ func NewStaticSigner(secret string) *StaticSigner {
 	return &StaticSigner{secret: []byte(secret)}
 }
 
-func (s *StaticSigner) Sign(state string) string {
+func (s *StaticSigner) Sign(data string) string {
 	sum := hmac.New(sha256.New, s.secret)
-	sum.Write([]byte(state))
+	sum.Write([]byte(data))
 	return base64.RawURLEncoding.EncodeToString(sum.Sum(nil))
+}
+
+func (s *StaticSigner) Verify(data, mac string) bool {
+	expected := s.Sign(data)
+	return hmac.Equal([]byte(expected), []byte(mac))
 }

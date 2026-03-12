@@ -5,17 +5,18 @@ import (
 	"time"
 )
 
-type Status string
+type SessionStatus int
 
 const (
-	StatusPending    Status = "PENDING"
-	StatusProcessing Status = "PROCESSING"
-	StatusSuccess    Status = "SUCCESS"
-	StatusFailed     Status = "FAILED"
+	SessionPending SessionStatus = iota
+	SessionProcessing
+	SessionDone
+	SessionFailed
 )
 
 type PendingSession struct {
-	State         string
+	SessionID     string
+	CodeVerifier  string
 	Nonce         string
 	CommonName    string
 	CID           string
@@ -23,18 +24,25 @@ type PendingSession struct {
 	Username      string
 	CNCrossCheck  bool
 	RequiredGroup string
+	Status        SessionStatus
 	CreatedAt     time.Time
 	ExpiresAt     time.Time
 }
 
-type SessionStore interface {
-	PutPending(context.Context, PendingSession) error
-	GetStatus(context.Context, string) (StatusResult, error)
+type CallbackRequest struct {
+	Code      string `json:"code"`
+	SessionID string `json:"session_id"`
+	Timestamp int64  `json:"ts"`
 }
 
-type StatusResult struct {
-	Status    Status
-	AuthToken string // HMAC signature for verification
+type TokenExchanger interface {
+	Exchange(ctx context.Context, code, codeVerifier, redirectURI string) (*IDTokenClaims, error)
+}
+
+type IDTokenClaims struct {
+	Email  string
+	Nonce  string
+	Groups []string
 }
 
 type IdentityResult struct {
@@ -50,17 +58,20 @@ type IdentityChecker interface {
 }
 
 type StateSigner interface {
-	Sign(string) string
+	Sign(data string) string
+	Verify(data, mac string) bool
 }
 
 type Metrics interface {
-	Heartbeat(socketConnected bool, dynamoReachable bool, inFlight int)
+	Heartbeat(socketConnected bool, inFlight int)
 	AuthAttempt(reason string)
 	AuthSuccess()
 	AuthDenied(reason string)
 	ReauthSuccess()
 	ReauthDenied(reason string)
 	ReauthCacheHit()
+	CallbackReceived()
+	TokenExchangeError(reason string)
 }
 
 type DecisionType int
@@ -70,6 +81,7 @@ const (
 	DecisionAllowNT                     // REAUTH success → client-auth-nt
 	DecisionDeny                        // any denial → client-deny
 	DecisionPending                     // WebAuth started → client-pending-auth
+	DecisionKill                        // kill established session → client-kill
 )
 
 type Decision struct {

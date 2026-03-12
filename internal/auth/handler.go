@@ -5,10 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"net/url"
+	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"openvpn-auth-aws/internal/config"
@@ -16,35 +15,49 @@ import (
 )
 
 type Handler struct {
-	cfg      config.Config
-	store    SessionStore
-	identity IdentityChecker
-	signer   StateSigner
-	metrics  Metrics
-	cache    *ReauthCache
+	cfg        config.Config
+	sessions   *SessionStore
+	identity   IdentityChecker
+	signer     StateSigner
+	metrics    Metrics
+	cache      *ReauthCache
+	instanceIP string
 
-	mu       sync.Mutex
-	inFlight map[string]context.CancelFunc
+	mu            sync.Mutex
+	inFlight      map[string]context.CancelFunc // CID → cancel
+	cidToSID      map[string]string             // CID → session ID
+	cidToCN       map[string]string             // CID → common_name (for cleanup)
+	cidToKID      map[string]string             // CID → KID (for client-deny on eviction)
+	cnToActiveCID map[string]string             // common_name → CID (one active session per user)
 
-	dynamoOK atomic.Bool
+	reauthWG sync.WaitGroup
 }
 
-func NewHandler(cfg config.Config, store SessionStore, identity IdentityChecker, signer StateSigner, metrics Metrics) *Handler {
+func NewHandler(cfg config.Config, sessions *SessionStore, identity IdentityChecker, signer StateSigner, metrics Metrics) *Handler {
 	var cache *ReauthCache
 	if cfg.ReauthCache {
 		cache = NewReauthCache(cfg.RenegInterval + 10*time.Minute)
 	}
-	h := &Handler{
-		cfg:      cfg,
-		store:    store,
-		identity: identity,
-		signer:   signer,
-		metrics:  metrics,
-		cache:    cache,
-		inFlight: make(map[string]context.CancelFunc),
+
+	instanceIP := cfg.InstanceIP
+	if instanceIP == "" {
+		instanceIP = "127.0.0.1"
 	}
-	h.dynamoOK.Store(true)
-	return h
+
+	return &Handler{
+		cfg:           cfg,
+		sessions:      sessions,
+		identity:      identity,
+		signer:        signer,
+		metrics:       metrics,
+		cache:         cache,
+		instanceIP:    instanceIP,
+		inFlight:      make(map[string]context.CancelFunc),
+		cidToSID:      make(map[string]string),
+		cidToCN:       make(map[string]string),
+		cidToKID:      make(map[string]string),
+		cnToActiveCID: make(map[string]string),
+	}
 }
 
 func (h *Handler) InFlight() int {
@@ -53,8 +66,9 @@ func (h *Handler) InFlight() int {
 	return len(h.inFlight)
 }
 
-func (h *Handler) DynamoReachable() bool {
-	return h.dynamoOK.Load()
+// WaitReauth blocks until all in-flight REAUTH goroutines complete.
+func (h *Handler) WaitReauth() {
+	h.reauthWG.Wait()
 }
 
 func (h *Handler) HandleEvent(ctx context.Context, event mgmt.Event, sink DecisionSink) {
@@ -62,39 +76,76 @@ func (h *Handler) HandleEvent(ctx context.Context, event mgmt.Event, sink Decisi
 	case mgmt.EventConnect:
 		h.handleConnect(ctx, event, sink)
 	case mgmt.EventReauth:
-		go h.handleReauth(ctx, event, sink)
+		h.reauthWG.Go(func() {
+			h.handleReauth(ctx, event, sink)
+		})
 	case mgmt.EventDisconnect:
+		slog.Info("disconnect", "cid", event.CID)
 		h.handleDisconnect(event)
+	case mgmt.EventEstablished:
+		slog.Info("established", "cid", event.CID)
+		h.cancelSession(event.CID)
 	}
 }
 
 func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink DecisionSink) {
-	if !strings.EqualFold(event.Env["IV_SSO"], "webauth") {
+	sso := strings.ToLower(event.Env["IV_SSO"])
+	if !strings.Contains(sso, "webauth") && !strings.Contains(sso, "openurl") {
 		h.metrics.AuthDenied("no_webauth")
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "client does not support WebAuth"})
 		return
 	}
 	if event.CommonName() == "" {
+		slog.Warn("connect denied", "cid", event.CID, "reason", "missing common name")
 		h.metrics.AuthDenied("missing_common_name")
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "missing common name"})
 		return
 	}
 
-	state, err := randomToken()
+	slog.Info("connect", "cid", event.CID, "kid", event.KID, "cn", event.CommonName())
+
+	// Enforce one active session per user: if a session already exists for this
+	// common name (e.g. DISCONNECT was lost), evict it and deny/kill it on the
+	// management interface so OpenVPN drops the stale connection immediately.
+	if h.cfg.SingleSessionPerUser {
+		h.mu.Lock()
+		existingCID, active := h.cnToActiveCID[event.CommonName()]
+		h.mu.Unlock()
+		if active && existingCID != event.CID {
+			if d, evicted := h.evictSession(existingCID); evicted {
+				action := "client-deny"
+				if d.Type == DecisionKill {
+					action = "client-kill"
+				}
+				slog.Info("evict", "cn", event.CommonName(), "old_cid", existingCID, "new_cid", event.CID, "action", action)
+				sink.Send(d)
+			}
+		}
+	}
+
+	sessionID, err := generateRandomToken(16)
 	if err != nil {
 		h.metrics.AuthDenied("internal_error")
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "internal error"})
 		return
 	}
-	nonce, err := randomToken()
+	codeVerifier, err := generateRandomToken(32)
+	if err != nil {
+		h.metrics.AuthDenied("internal_error")
+		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "internal error"})
+		return
+	}
+	nonce, err := generateRandomToken(16)
 	if err != nil {
 		h.metrics.AuthDenied("internal_error")
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "internal error"})
 		return
 	}
 
-	session := PendingSession{
-		State:         state,
+	now := time.Now().UTC()
+	session := &PendingSession{
+		SessionID:     sessionID,
+		CodeVerifier:  codeVerifier,
 		Nonce:         nonce,
 		CommonName:    event.CommonName(),
 		CID:           event.CID,
@@ -102,39 +153,72 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 		Username:      event.Username(),
 		CNCrossCheck:  h.cfg.CNCrossCheck,
 		RequiredGroup: h.cfg.RequiredGroup,
-		CreatedAt:     time.Now().UTC(),
-		ExpiresAt:     time.Now().UTC().Add(2 * h.cfg.HandWindow),
+		Status:        SessionPending,
+		CreatedAt:     now,
+		ExpiresAt:     now.Add(2 * h.cfg.HandWindow),
 	}
-	if err := h.store.PutPending(ctx, session); err != nil {
-		h.dynamoOK.Store(false)
-		h.metrics.AuthDenied("store_error")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "session store unavailable"})
-		return
-	}
+	h.sessions.Put(session)
 
-	authURL := buildAuthURL(h.cfg.APIGatewayURL, state, h.signer.Sign(state))
+	callbackAddr := fmt.Sprintf("%s:%d", h.instanceIP, h.cfg.CallbackPort)
+	stateBlob := EncodeState(StatePayload{
+		SID: sessionID,
+		IP:  callbackAddr,
+		IAT: now.Unix(),
+		EXP: now.Add(h.cfg.AuthTimeout).Unix(),
+	}, h.signer)
+
+	authURL := fmt.Sprintf("%s/auth?state=%s", strings.TrimRight(h.cfg.APIGatewayURL, "/"), stateBlob)
+
+	slog.Info("connect pending auth", "cid", event.CID, "cn", event.CommonName(), "timeout", h.cfg.AuthTimeout)
 	h.metrics.AuthAttempt("")
+	timeout := int(h.cfg.HandWindow.Seconds())
 	sink.Send(Decision{
 		Type:    DecisionPending,
 		CID:     event.CID,
 		KID:     event.KID,
 		URL:     authURL,
-		Timeout: int(h.cfg.HandWindow.Seconds()),
+		Timeout: timeout,
 	})
 
-	pollCtx, cancel := context.WithCancel(ctx)
-	h.setInFlight(event.CID, cancel)
-	go h.pollSession(pollCtx, session, sink)
+	// Timeout goroutine: deny + cleanup if callback doesn't arrive in time
+	timeoutCtx, cancel := context.WithCancel(ctx)
+	h.setInFlight(event.CID, sessionID, event.CommonName(), event.KID, cancel)
+	go h.authTimeout(timeoutCtx, session, sink)
+}
+
+func (h *Handler) authTimeout(ctx context.Context, session *PendingSession, sink DecisionSink) {
+	defer h.clearInFlight(session.CID)
+
+	timer := time.NewTimer(h.cfg.AuthTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		// Only deny if session is still PENDING (not already processed by callback)
+		_, err := h.sessions.TryProcess(session.SessionID)
+		if err != nil {
+			// Already processed or gone — nothing to do
+			return
+		}
+		h.sessions.MarkFailed(session.SessionID)
+		slog.Warn("connect auth timeout", "cid", session.CID, "cn", session.CommonName)
+		h.metrics.AuthDenied("timeout")
+		sink.Send(Decision{Type: DecisionDeny, CID: session.CID, KID: session.KID, Reason: "auth timeout"})
+	}
 }
 
 func (h *Handler) handleReauth(ctx context.Context, event mgmt.Event, sink DecisionSink) {
 	lookup := event.CommonName()
 	if lookup == "" {
+		slog.Warn("reauth denied", "cid", event.CID, "reason", "missing common name")
 		h.metrics.ReauthDenied("missing_common_name")
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "missing common name"})
 		return
 	}
 
+	slog.Info("reauth", "cid", event.CID, "cn", lookup)
 	checkCtx, cancel := context.WithTimeout(ctx, h.cfg.ReauthTimeout)
 	defer cancel()
 
@@ -149,41 +233,115 @@ func (h *Handler) handleReauth(ctx context.Context, event mgmt.Event, sink Decis
 
 	if h.cache != nil {
 		if cached, ok := h.cache.Get(lookup); ok && cached.Exists && cached.Enabled && (!h.cfg.CheckGroupsOnReauth || cached.InGroup) {
+			slog.Info("reauth allowed", "cid", event.CID, "cn", lookup, "source", "cache", "cognito_error", err)
 			h.metrics.ReauthCacheHit()
 			sink.Send(Decision{Type: DecisionAllowNT, CID: event.CID, KID: event.KID})
 			return
 		}
 	}
 
+	slog.Warn("reauth denied", "cid", event.CID, "cn", lookup, "reason", "cognito unavailable", "error", err)
 	h.metrics.ReauthDenied("cognito_error")
 	sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "cognito unavailable"})
 }
 
 func (h *Handler) finishReauth(event mgmt.Event, result IdentityResult, sink DecisionSink) {
 	if !result.Exists {
+		slog.Warn("reauth denied", "cid", event.CID, "cn", event.CommonName(), "reason", "user not found")
 		h.metrics.ReauthDenied("user_not_found")
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "user not found"})
 		return
 	}
 	if !result.Enabled {
+		slog.Warn("reauth denied", "cid", event.CID, "cn", event.CommonName(), "reason", "user disabled")
 		h.metrics.ReauthDenied("user_disabled")
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "user disabled"})
 		return
 	}
 	if h.cfg.CheckGroupsOnReauth && !result.InGroup {
+		slog.Warn("reauth denied", "cid", event.CID, "cn", event.CommonName(), "reason", "group denied", "group", h.cfg.RequiredGroup)
 		h.metrics.ReauthDenied("group_denied")
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: fmt.Sprintf("not in required group: %s", h.cfg.RequiredGroup)})
 		return
 	}
+	slog.Info("reauth allowed", "cid", event.CID, "cn", event.CommonName())
 	h.metrics.ReauthSuccess()
 	sink.Send(Decision{Type: DecisionAllowNT, CID: event.CID, KID: event.KID})
+}
+
+// evictSession forcibly removes a session for a CID.
+// For in-flight sessions (pending auth) it cancels the goroutine and returns
+// DecisionDeny so the caller can send client-deny.
+// For established sessions (auth already done) it returns DecisionKill so the
+// caller can send client-kill.
+// Returns the decision type and whether an eviction actually happened.
+func (h *Handler) evictSession(cid string) (Decision, bool) {
+	h.mu.Lock()
+	cancel, inFlight := h.inFlight[cid]
+	sid := h.cidToSID[cid]
+	cn := h.cidToCN[cid]
+	kid := h.cidToKID[cid]
+	// Clean up all tracking for this CID.
+	delete(h.inFlight, cid)
+	delete(h.cidToSID, cid)
+	delete(h.cidToCN, cid)
+	delete(h.cidToKID, cid)
+	if cn != "" && h.cnToActiveCID[cn] == cid {
+		delete(h.cnToActiveCID, cn)
+	}
+	h.mu.Unlock()
+
+	if inFlight {
+		cancel()
+	}
+	if sid != "" {
+		h.sessions.Delete(sid)
+	}
+
+	// Nothing tracked at all — nothing to evict.
+	if !inFlight && cn == "" {
+		return Decision{}, false
+	}
+
+	if inFlight {
+		// Still pending auth — use client-deny (requires KID).
+		return Decision{Type: DecisionDeny, CID: cid, KID: kid, Reason: "replaced by new connection"}, true
+	}
+	// Already established — use client-kill (no KID needed).
+	return Decision{Type: DecisionKill, CID: cid}, true
 }
 
 func (h *Handler) handleDisconnect(event mgmt.Event) {
 	h.mu.Lock()
 	cancel, ok := h.inFlight[event.CID]
+	sid := h.cidToSID[event.CID]
+	cn := h.cidToCN[event.CID]
+	delete(h.inFlight, event.CID)
+	delete(h.cidToSID, event.CID)
+	delete(h.cidToCN, event.CID)
+	delete(h.cidToKID, event.CID)
+	if cn != "" && h.cnToActiveCID[cn] == event.CID {
+		delete(h.cnToActiveCID, cn)
+	}
+	h.mu.Unlock()
 	if ok {
-		delete(h.inFlight, event.CID)
+		cancel()
+	}
+	if sid != "" {
+		h.sessions.Delete(sid)
+	}
+}
+
+// cancelSession cancels the timeout goroutine for a CID without deleting the
+// session record or the CN→CID tracking. Used when CLIENT:ESTABLISHED confirms
+// the auth completed — the session is now active until DISCONNECT.
+func (h *Handler) cancelSession(cid string) {
+	h.mu.Lock()
+	cancel, ok := h.inFlight[cid]
+	if ok {
+		delete(h.inFlight, cid)
+		delete(h.cidToSID, cid)
+		// Keep cidToCN and cnToActiveCID — session is established, not gone.
 	}
 	h.mu.Unlock()
 	if ok {
@@ -191,29 +349,28 @@ func (h *Handler) handleDisconnect(event mgmt.Event) {
 	}
 }
 
-func (h *Handler) setInFlight(cid string, cancel context.CancelFunc) {
+func (h *Handler) setInFlight(cid, sid, cn, kid string, cancel context.CancelFunc) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.inFlight[cid] = cancel
+	h.cidToSID[cid] = sid
+	h.cidToCN[cid] = cn
+	h.cidToKID[cid] = kid
+	if h.cfg.SingleSessionPerUser {
+		h.cnToActiveCID[cn] = cid
+	}
 }
 
 func (h *Handler) clearInFlight(cid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.inFlight, cid)
+	delete(h.cidToSID, cid)
+	// Leave cidToCN, cidToKID, cnToActiveCID — DISCONNECT will clean those up.
 }
 
-func buildAuthURL(baseURL, state, sig string) string {
-	u, _ := url.Parse(strings.TrimRight(baseURL, "/") + "/auth")
-	q := u.Query()
-	q.Set("state", state)
-	q.Set("sig", sig)
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
-func randomToken() (string, error) {
-	b := make([]byte, 16)
+func generateRandomToken(n int) (string, error) {
+	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate token: %w", err)
 	}
