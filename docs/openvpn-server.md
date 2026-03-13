@@ -10,6 +10,7 @@ management-client-auth
 management-hold
 auth-user-pass-optional
 setenv IV_SSO webauth
+hand-window 300
 ```
 
 | Directive | Purpose |
@@ -19,6 +20,7 @@ setenv IV_SSO webauth
 | `management-hold` | Holds OpenVPN startup until daemon sends `hold release` |
 | `auth-user-pass-optional` | Allows connection without username/password — identity comes from TLS certificate CN |
 | `setenv IV_SSO webauth` | Announces WebAuth support to clients via `IV_SSO` environment variable |
+| `hand-window` | Time (seconds) allowed for the full TLS handshake including browser-based auth. Must match `--hand-window` on the daemon. Default is 60s which is too short for browser auth — set to 300s or more |
 
 ## Recommended Settings
 

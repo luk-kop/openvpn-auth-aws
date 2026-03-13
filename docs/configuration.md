@@ -19,8 +19,8 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--cognito-redirect-uri` | `VPN_AUTH_COGNITO_REDIRECT_URI` | — | OAuth2 redirect URI registered in Cognito |
 | `--required-group` | `VPN_AUTH_REQUIRED_GROUP` | — | Required Cognito group for VPN access |
 | `--use-local-mocks` | `VPN_AUTH_USE_LOCAL_MOCKS` | `false` | In-memory store + static identity (no AWS) |
-| `--hand-window` | `VPN_AUTH_HAND_WINDOW` | `5m` | OpenVPN hand-window — must be ≥ `--auth-timeout` |
-| `--auth-timeout` | `VPN_AUTH_AUTH_TIMEOUT` | `5m` | How long the daemon waits for the browser auth callback |
+| `--hand-window` | `VPN_AUTH_HAND_WINDOW` | `5m` | OpenVPN `hand-window` — time allowed for the full TLS handshake including auth. Must match the OpenVPN server config |
+| `--auth-timeout` | `VPN_AUTH_AUTH_TIMEOUT` | `4m30s` | How long the daemon waits for the browser auth callback. Must be less than `--hand-window` so `AUTH_FAILED` reaches the client before it self-restarts |
 | `--cn-cross-check` | `VPN_AUTH_CN_CROSS_CHECK` | `true` | Require token email claim to match the certificate CN |
 | `--check-groups-on-reauth` | `VPN_AUTH_CHECK_GROUPS_ON_REAUTH` | `false` | Check required group during `CLIENT:REAUTH` |
 | `--reauth-cache` | `VPN_AUTH_REAUTH_CACHE` | `false` | Allow cached reauth decisions during IdP outage |

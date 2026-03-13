@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec > >(tee /var/log/user-data.log) 2>&1
+
+echo "=== Starting OpenVPN + auth daemon setup ==="
+
+# --- System updates ---
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get upgrade -y
+
+# --- Add official OpenVPN apt repository (pinned to 2.6) ---
+apt-get install -y curl gnupg
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://swupdate.openvpn.net/repos/repo-public.gpg \
+  | gpg --dearmor > /etc/apt/keyrings/openvpn-repo-public.gpg
+
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/openvpn-repo-public.gpg] https://build.openvpn.net/debian/openvpn/release/2.6 noble main" \
+  > /etc/apt/sources.list.d/openvpn-aptrepo.list
+
+apt-get update -y
+
+# --- Install OpenVPN 2.6.x + easy-rsa ---
+apt-get install -y openvpn=2.6.* easy-rsa awscli
+
+# --- Enable IP forwarding ---
+cat > /etc/sysctl.d/99-openvpn.conf <<'SYSCTL'
+net.ipv4.ip_forward = 1
+SYSCTL
+sysctl --system
+
+# --- PKI setup ---
+make-cadir /etc/openvpn/easy-rsa
+cd /etc/openvpn/easy-rsa
+
+cat > vars <<'VARS'
+set_var EASYRSA_ALGO      ec
+set_var EASYRSA_CURVE     secp384r1
+set_var EASYRSA_DIGEST    sha384
+set_var EASYRSA_CA_EXPIRE 3650
+set_var EASYRSA_CERT_EXPIRE 825
+set_var EASYRSA_REQ_CN    "OpenVPN-CA"
+VARS
+
+./easyrsa --batch init-pki
+./easyrsa --batch build-ca nopass
+./easyrsa --batch gen-req server nopass
+./easyrsa --batch sign-req server server
+./easyrsa --batch gen-dh
+openvpn --genkey tls-auth /etc/openvpn/server/ta.key
+
+# Copy certs to server dir
+cp pki/ca.crt pki/issued/server.crt pki/private/server.key pki/dh.pem /etc/openvpn/server/
+
+# --- Management password ---
+echo '${management_password}' > /etc/openvpn/management-pw
+chmod 600 /etc/openvpn/management-pw
+
+# --- OpenVPN server config ---
+cat > /etc/openvpn/server/server.conf <<'OVPN'
+port ${openvpn_port}
+proto ${openvpn_protocol}
+dev tun
+
+ca      /etc/openvpn/server/ca.crt
+cert    /etc/openvpn/server/server.crt
+key     /etc/openvpn/server/server.key
+dh      /etc/openvpn/server/dh.pem
+tls-auth /etc/openvpn/server/ta.key 0
+
+server ${cidrhost(openvpn_cidr, 0)} ${cidrnetmask(openvpn_cidr)}
+
+topology subnet
+keepalive 10 120
+cipher AES-256-GCM
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+
+persist-key
+persist-tun
+
+user nobody
+group nogroup
+
+status      /var/log/openvpn/status.log
+log-append  /var/log/openvpn/server.log
+verb 3
+
+# Management socket for auth daemon
+management ${management_socket} unix /etc/openvpn/management-pw
+management-client-auth
+management-hold
+
+auth-user-pass-optional
+
+# Tell OpenVPN to advertise SSO support — without this, clients won't
+# send IV_SSO and the daemon will reject them as "no webauth".
+setenv IV_SSO webauth
+
+# Time allowed for browser-based auth to complete.
+# MUST match daemon --hand-window (default 300s). If these differ, the shorter
+# side will time out and kill the session before auth completes.
+# Kept in sync with daemon --hand-window via Terraform variable.
+hand-window ${hand_window}
+OVPN
+
+mkdir -p /var/log/openvpn
+mkdir -p "$(dirname '${management_socket}')"
+
+# --- Enable and start OpenVPN ---
+systemctl enable openvpn-server@server
+systemctl start openvpn-server@server
+
+# --- Download daemon binary ---
+%{ if daemon_binary_s3_uri != "" ~}
+aws s3 cp '${daemon_binary_s3_uri}' /usr/local/bin/openvpn-auth-daemon --region '${aws_region}'
+chmod +x /usr/local/bin/openvpn-auth-daemon
+%{ endif ~}
+
+# --- Daemon systemd service ---
+cat > /etc/systemd/system/openvpn-auth-daemon.service <<'UNIT'
+[Unit]
+Description=OpenVPN Auth Daemon
+After=network-online.target openvpn-server@server.service
+Wants=network-online.target
+Requires=openvpn-server@server.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/openvpn-auth-daemon \
+    --management-socket=${management_socket} \
+    --management-password-file=/etc/openvpn/management-pw \
+    ${daemon_flags}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openvpn-auth-daemon
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/openvpn
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+%{ if daemon_binary_s3_uri != "" ~}
+systemctl enable openvpn-auth-daemon
+systemctl start openvpn-auth-daemon
+%{ endif ~}
+
+echo "=== Setup complete ==="

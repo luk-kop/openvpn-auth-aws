@@ -71,8 +71,14 @@ management-hold
 # Allow connection without username/password — identity comes from TLS certificate CN
 auth-user-pass-optional
 
-# WebAuth support
+# Tell OpenVPN to advertise SSO support — without this, clients won't
+# send IV_SSO and the daemon will reject them as "no webauth".
 setenv IV_SSO webauth
+
+# Time allowed for browser-based auth to complete.
+# MUST match daemon --hand-window (default 300s). If these differ, the shorter
+# side will time out and kill the session before auth completes.
+hand-window 300
 
 # Use ECDH instead of DH (faster)
 dh none

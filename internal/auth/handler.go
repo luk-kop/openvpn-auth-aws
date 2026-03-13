@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -159,6 +160,10 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 	}
 	h.sessions.Put(session)
 
+	// PKCE S256: code_challenge = base64url(sha256(code_verifier))
+	ccHash := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(ccHash[:])
+
 	callbackAddr := fmt.Sprintf("%s:%d", h.instanceIP, h.cfg.CallbackPort)
 	stateBlob := EncodeState(StatePayload{
 		SID: sessionID,
@@ -168,6 +173,7 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 	}, h.signer)
 
 	authURL := fmt.Sprintf("%s/auth?state=%s", strings.TrimRight(h.cfg.APIGatewayURL, "/"), stateBlob)
+	_ = codeChallenge // TODO: re-enable PKCE once WEB_AUTH delivery is confirmed
 
 	slog.Info("connect pending auth", "cid", event.CID, "cn", event.CommonName(), "timeout", h.cfg.AuthTimeout)
 	h.metrics.AuthAttempt("")
@@ -332,12 +338,15 @@ func (h *Handler) handleDisconnect(event mgmt.Event) {
 	}
 }
 
-// cancelSession cancels the timeout goroutine for a CID without deleting the
-// session record or the CN→CID tracking. Used when CLIENT:ESTABLISHED confirms
-// the auth completed — the session is now active until DISCONNECT.
+// cancelSession cancels the timeout goroutine for a CID and removes the
+// session record from the store. Used when CLIENT:ESTABLISHED confirms the
+// auth completed — the PKCE/nonce data is no longer needed.
+// CN→CID tracking is kept so single-session-per-user eviction still works
+// until DISCONNECT cleans it up.
 func (h *Handler) cancelSession(cid string) {
 	h.mu.Lock()
 	cancel, ok := h.inFlight[cid]
+	sid := h.cidToSID[cid]
 	if ok {
 		delete(h.inFlight, cid)
 		delete(h.cidToSID, cid)
@@ -346,6 +355,9 @@ func (h *Handler) cancelSession(cid string) {
 	h.mu.Unlock()
 	if ok {
 		cancel()
+	}
+	if sid != "" {
+		h.sessions.Delete(sid)
 	}
 }
 

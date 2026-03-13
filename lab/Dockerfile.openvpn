@@ -10,10 +10,10 @@ RUN apt-get update && \
     iptables && \
     curl -fsSL https://swupdate.openvpn.net/repos/repo-public.gpg \
       | gpg --dearmor > /etc/apt/keyrings/openvpn-repo-public.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/openvpn-repo-public.gpg] http://build.openvpn.net/debian/openvpn/stable bookworm main" \
+    echo "deb [signed-by=/etc/apt/keyrings/openvpn-repo-public.gpg] http://build.openvpn.net/debian/openvpn/release/2.6 bookworm main" \
       > /etc/apt/sources.list.d/openvpn.list && \
     apt-get update && \
-    apt-get install -y --no-install-recommends openvpn && \
+    apt-get install -y --no-install-recommends openvpn=2.6.* && \
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /etc/openvpn /run/openvpn

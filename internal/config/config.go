@@ -39,8 +39,8 @@ type Config struct {
 	CognitoIssuerURL     string
 
 	// AWS configuration
-	AWSRegion         string
-	CognitoUserPoolID string
+	AWSRegion            string
+	CognitoUserPoolID    string
 	UseLocalMocks        bool
 	LocalIdentity        bool
 	SingleSessionPerUser bool
@@ -60,7 +60,7 @@ func Parse() (Config, error) {
 	flag.StringVar(&cfg.HMACSecretARN, "hmac-secret-arn", getenv("VPN_AUTH_HMAC_SECRET_ARN", ""), "AWS Secrets Manager ARN for HMAC secret (overrides --hmac-secret)")
 	flag.StringVar(&cfg.RequiredGroup, "required-group", getenv("VPN_AUTH_REQUIRED_GROUP", ""), "required Cognito group for VPN access")
 	flag.BoolVar(&cfg.CNCrossCheck, "cn-cross-check", getBool("VPN_AUTH_CN_CROSS_CHECK", true), "enable CN cross-check in Lambda callback")
-	flag.DurationVar(&cfg.HandWindow, "hand-window", getDurationOrCollect("VPN_AUTH_HAND_WINDOW", 300*time.Second, &envErrors), "pending auth timeout")
+	flag.DurationVar(&cfg.HandWindow, "hand-window", getDurationOrCollect("VPN_AUTH_HAND_WINDOW", 300*time.Second, &envErrors), "pending auth timeout (must match OpenVPN server hand-window)")
 	flag.DurationVar(&cfg.ReconnectMaxInterval, "reconnect-max-interval", getDurationOrCollect("VPN_AUTH_RECONNECT_MAX_INTERVAL", 5*time.Second, &envErrors), "max backoff between management socket reconnect attempts")
 	flag.DurationVar(&cfg.ShutdownGracePeriod, "shutdown-grace-period", getDurationOrCollect("VPN_AUTH_SHUTDOWN_GRACE_PERIOD", 300*time.Second, &envErrors), "grace period for shutdown")
 	flag.BoolVar(&cfg.CheckGroupsOnReauth, "check-groups-on-reauth", getBool("VPN_AUTH_CHECK_GROUPS_ON_REAUTH", false), "check required group during CLIENT:REAUTH")
@@ -70,7 +70,7 @@ func Parse() (Config, error) {
 	flag.StringVar(&cfg.InstanceID, "instance-id", getenv("VPN_AUTH_INSTANCE_ID", "local-dev"), "instance identifier used in EMF metrics")
 
 	// Auth timeout and callback
-	flag.DurationVar(&cfg.AuthTimeout, "auth-timeout", getDurationOrCollect("VPN_AUTH_AUTH_TIMEOUT", 300*time.Second, &envErrors), "timeout for WebAuth callback flow")
+	flag.DurationVar(&cfg.AuthTimeout, "auth-timeout", getDurationOrCollect("VPN_AUTH_AUTH_TIMEOUT", 270*time.Second, &envErrors), "timeout for WebAuth callback flow (should be hand-window minus ~30s)")
 	flag.IntVar(&cfg.CallbackPort, "callback-port", getIntOrCollect("VPN_AUTH_CALLBACK_PORT", 8080, &envErrors), "port for callback HTTP server")
 	flag.StringVar(&cfg.InstanceIP, "instance-ip", getenv("VPN_AUTH_INSTANCE_IP", ""), "instance IP for callback URL (auto-detect from EC2 metadata if empty)")
 
@@ -142,8 +142,8 @@ func (c Config) Validate() error {
 	if c.LogFormat != "text" && c.LogFormat != "json" {
 		problems = append(problems, fmt.Sprintf("log-format must be 'text' or 'json', got %q", c.LogFormat))
 	}
-	if c.AuthTimeout > c.HandWindow {
-		slog.Warn("auth-timeout exceeds hand-window", "auth_timeout", c.AuthTimeout, "hand_window", c.HandWindow)
+	if c.AuthTimeout >= c.HandWindow {
+		slog.Warn("auth-timeout should be less than hand-window to ensure AUTH_FAILED reaches the client before it self-restarts", "auth_timeout", c.AuthTimeout, "hand_window", c.HandWindow)
 	}
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))

@@ -1,4 +1,7 @@
-.PHONY: test test-local setup stack-up stack-down stack-rebuild build clean
+.PHONY: test setup build clean \
+	stack-up stack-down stack-rebuild \
+	stack-aws-up stack-aws-down stack-aws-rebuild \
+	run-daemon run-lambda-mock run-mgmt-mock
 
 # Unit tests (fast, no AWS)
 test:
@@ -55,6 +58,35 @@ stack-down:
 stack-rebuild:
 	docker compose -f lab/docker-compose.yml build --no-cache
 	docker compose -f lab/docker-compose.yml up -d
+
+# Start stack with real AWS Cognito (requires lab/aws.env from terraform output)
+stack-aws-up:
+	@if [ ! -f lab/aws.env ]; then \
+		echo "ERROR: lab/aws.env not found. Copy lab/aws.env.example and fill in values from terraform output."; \
+		exit 1; \
+	fi
+	@if [ ! -f lab/openvpn-data/openvpn.conf ] || [ ! -f lab/client.ovpn ]; then \
+		echo "==> PKI not found, running setup..."; \
+		cd lab && ./setup.sh; \
+	fi
+	docker compose -f lab/docker-compose.yml -f lab/docker-compose.aws.yml up -d
+	@echo ""
+	@echo "==> AWS Cognito stack ready!"
+	@echo "    OpenVPN:     udp://localhost:1194"
+	@echo "    Lambda:      http://localhost:8080"
+	@echo "    daemon cb:   http://localhost:8081"
+	@echo ""
+	@echo "Connect: sudo openvpn --config lab/client.ovpn"
+	@echo "Logs:    docker compose -f lab/docker-compose.yml -f lab/docker-compose.aws.yml logs -f daemon"
+
+# Stop AWS Cognito stack
+stack-aws-down:
+	docker compose -f lab/docker-compose.yml -f lab/docker-compose.aws.yml down
+
+# Rebuild and restart AWS Cognito stack
+stack-aws-rebuild:
+	docker compose -f lab/docker-compose.yml -f lab/docker-compose.aws.yml build --no-cache
+	docker compose -f lab/docker-compose.yml -f lab/docker-compose.aws.yml up -d
 
 # Build all binaries
 build:

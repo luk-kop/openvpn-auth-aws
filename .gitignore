@@ -27,6 +27,7 @@ go.work.sum
 # Lab — generated files (certs, client config)
 lab/openvpn-data/
 lab/client.ovpn
+lab/aws.env
 
 # Editor/IDE
 .idea/
@@ -55,6 +56,7 @@ htmlcov/
 *.tfstate.*
 .terraform.lock.hcl
 terraform.tfvars
+terraform/.build/
 
 # Custom
 .env

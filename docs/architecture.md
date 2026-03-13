@@ -51,16 +51,34 @@ OpenVPN auth daemon that orchestrates browser-based OIDC flows with AWS Cognito.
 ## Session Lifecycle
 
 ```
-SessionPending ──► SessionProcessing ──► SessionDone
+SessionPending ──► SessionProcessing ──► SessionDone ──► (deleted on ESTABLISHED)
                                     └──► SessionFailed
 ```
 
 - **SessionPending** — created on `>CLIENT:CONNECT`, waiting for browser callback
 - **SessionProcessing** — callback received, token exchange in progress (atomic transition prevents double-processing)
-- **SessionDone** — auth successful, `client-auth` sent
+- **SessionDone** — auth successful, `client-auth` sent; session is deleted from the store when `>CLIENT:ESTABLISHED` is received
 - **SessionFailed** — auth failed (timeout, token exchange error, claim validation failed), `client-deny` sent
 
-Sessions have a TTL of `2 × hand-window` and are reaped automatically.
+Sessions that never reach `ESTABLISHED` (e.g. timeout, denial) have a TTL of `2 × hand-window` and are reaped automatically.
+
+## Auth Timeout vs Hand-Window
+
+Two timers govern how long a pending auth can take:
+
+- `hand-window` (OpenVPN server directive) — total time OpenVPN allows for the TLS handshake including auth. If no `client-auth` or `client-deny` arrives within this window, OpenVPN drops the connection itself.
+- `--auth-timeout` (daemon flag) — how long the daemon waits for the browser callback before sending `client-deny`.
+
+`auth-timeout` must be **less than** `hand-window`. If they are equal, the daemon's `client-deny` races with OpenVPN's own timeout — the client may receive a `no-push-reply` soft restart instead of `AUTH_FAILED`, causing it to retry indefinitely (given `resolv-retry infinite`).
+
+Recommended values:
+
+```
+hand-window 300        # OpenVPN server config
+--auth-timeout 270s    # daemon (hand-window minus ~30s)
+```
+
+The 30s gap ensures `AUTH_FAILED` reaches the client before it self-restarts.
 
 ## Session Eviction
 
