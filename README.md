@@ -50,7 +50,6 @@ In mgmt-mock terminal: `connect 3 john@example.com`, `reauth 3 john@example.com`
 ```bash
 make build          # build all binaries
 make test           # unit tests (go test -v -short ./...)
-make test-integration  # integration tests with LocalStack
 ```
 
 ## Layout

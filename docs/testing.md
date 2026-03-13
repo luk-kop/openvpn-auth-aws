@@ -43,21 +43,6 @@ go test -v -short ./...
 
 Uses in-memory mocks. No external dependencies.
 
-### Integration Tests (LocalStack)
-
-```bash
-# Start LocalStack
-make localstack-up
-
-# Run integration tests
-make test-integration
-
-# Stop LocalStack
-make localstack-down
-```
-
-Tests against real AWS API calls (Cognito, Secrets Manager) running in LocalStack.
-
 ### Manual Testing
 
 #### With mocks (three terminals):
@@ -93,16 +78,6 @@ export VPN_AUTH_HMAC_SECRET_ARN=arn:aws:secretsmanager:...
   --management-password-file "/etc/openvpn/management-pw"
 ```
 
-## LocalStack Setup
-
-LocalStack provides:
-
-- Cognito User Pool with test user `john@example.com` (password: `Test123!`)
-- Cognito group `vpn-users`
-- Secrets Manager with HMAC secret
-
-See `localstack-init/init.sh` for initialization details.
-
 ## Test Coverage
 
 Current coverage:
@@ -113,7 +88,7 @@ Current coverage:
 - ✅ Callback server (token exchange, claim validation)
 - ✅ Session store (TTL reaper, atomic state transitions)
 - ✅ State blob signing/verification
-- ⏳ Cognito integration (integration test only)
+- ❌ Cognito integration (not yet implemented)
 - ❌ Full auth flow end-to-end (requires Docker stack)
 
 ## Adding New Tests
@@ -148,14 +123,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: go test -v -short ./...
-
-  integration-tests:
-    runs-on: ubuntu-latest
-    services:
-      localstack:
-        image: localstack/localstack
-        ports:
-          - 4566:4566
-    steps:
-      - run: make test-integration
 ```

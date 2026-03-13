@@ -9,8 +9,8 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--management-socket` | `VPN_AUTH_MANAGEMENT_SOCKET` | `/run/openvpn/management.sock` | Path to OpenVPN management socket |
 | `--management-password-file` | `VPN_AUTH_MANAGEMENT_PASSWORD_FILE` | `/etc/openvpn/management-pw` | File containing management password |
 | `--api-gateway-url` | `VPN_AUTH_API_GATEWAY_URL` | — | Public API Gateway base URL (no trailing slash) |
-| `--callback-port` | `VPN_AUTH_CALLBACK_PORT` | `8081` | Port the daemon listens on for Lambda POST /callback |
-| `--instance-ip` | `VPN_AUTH_INSTANCE_IP` | `127.0.0.1` | Private IP embedded in the signed state blob so Lambda can reach this instance |
+| `--callback-port` | `VPN_AUTH_CALLBACK_PORT` | `8080` | Port the daemon listens on for Lambda POST /callback |
+| `--instance-ip` | `VPN_AUTH_INSTANCE_IP` | — | Private IP embedded in the signed state blob so Lambda can reach this instance. Auto-detected from EC2 IMDS if empty; must be set explicitly in local/Docker environments |
 | `--hmac-secret` | `VPN_AUTH_HMAC_SECRET` | — | HMAC secret for signing state values (local dev) |
 | `--hmac-secret-arn` | `VPN_AUTH_HMAC_SECRET_ARN` | — | Secrets Manager ARN for HMAC secret (production) |
 | `--aws-region` | `AWS_REGION` | `eu-west-1` | AWS region |

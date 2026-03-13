@@ -7,7 +7,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make build                  # Build all binaries (openvpn-auth-daemon, mgmt-mock, lambda-mock)
 make test                   # Unit tests: go test -v -short ./...
-make test-integration       # Integration tests with LocalStack
 go test -v -short ./internal/auth/...  # Run tests for a single package
 go vet ./...                # Static analysis
 golangci-lint run           # Linter (also runs via pre-commit)

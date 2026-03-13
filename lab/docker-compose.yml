@@ -25,6 +25,8 @@ services:
     depends_on:
       openvpn:
         condition: service_healthy
+      lambda-mock:
+        condition: service_healthy
     ports:
       - "8081:8081"
     volumes:
@@ -34,7 +36,7 @@ services:
       - VPN_AUTH_USE_LOCAL_MOCKS=true
       - VPN_AUTH_CN_CROSS_CHECK=false
       - VPN_AUTH_HMAC_SECRET=test-secret
-      - VPN_AUTH_API_GATEWAY_URL=http://localhost:8080
+      - VPN_AUTH_API_GATEWAY_URL=http://lambda-mock:8080
       - VPN_AUTH_MANAGEMENT_SOCKET=/run/openvpn/management.sock
       - VPN_AUTH_MANAGEMENT_PASSWORD_FILE=/etc/openvpn/management-pw
       - VPN_AUTH_CALLBACK_PORT=8081
@@ -49,6 +51,11 @@ services:
       - "8080:8080"
     environment:
       - VPN_AUTH_HMAC_SECRET=test-secret
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/auth 2>&1 | grep -q 'missing state'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   openvpn-run:

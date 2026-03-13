@@ -58,6 +58,11 @@ persist-key
 persist-tun
 verb 3
 
+# TLS renegotiation interval — triggers CLIENT:REAUTH on management interface.
+# Daemon re-checks user identity in Cognito on each renegotiation.
+# Default is 3600s (1h). Lower value for faster testing of reauth flow.
+reneg-sec 600
+
 # Management interface for auth daemon
 management /run/openvpn/management.sock unix /etc/openvpn/management-pw
 management-client-auth

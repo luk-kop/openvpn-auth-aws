@@ -83,101 +83,138 @@ func main() {
 		}
 	}()
 	log.Printf("Listening on %s (password from %s)", socketPath, passwordFile)
-	log.Println("Waiting for daemon to connect...")
 
-	conn, err := ln.Accept()
-	if err != nil {
-		log.Fatalf("accept: %v", err)
-	}
-	log.Println("Daemon connected")
-
-	scanner := bufio.NewScanner(conn)
-
-	// --- Password handshake ---
-	if expectedPw != "" {
-		if _, err := fmt.Fprintf(conn, "ENTER PASSWORD:"); err != nil {
-			log.Fatalf("write prompt: %v", err)
-		}
-		if !scanner.Scan() {
-			log.Fatal("daemon disconnected before sending password")
-		}
-		got := scanner.Text()
-		if got != expectedPw {
-			_, _ = fmt.Fprintf(conn, "ERROR: bad password\r\n")
-			_ = conn.Close()
-			log.Fatalf("bad password: got %q", got)
-		}
-		if _, err := fmt.Fprintf(conn, "SUCCESS: password is correct\r\n"); err != nil {
-			log.Fatalf("write success: %v", err)
-		}
-		log.Println("Auth OK")
-	}
-
-	// --- Send >HOLD: notification ---
-	// Real OpenVPN sends this when management-hold is configured.
-	// Daemon should respond with "hold release".
-	_, _ = fmt.Fprintf(conn, ">HOLD:Waiting for hold release:0\r\n")
-	log.Println(">> sent >HOLD: notification")
-
-	// --- Read daemon responses in background ---
-	var disconnected atomic.Bool
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for scanner.Scan() {
-			line := scanner.Text()
-			log.Printf("<< daemon: %s", line)
-
-			// When daemon sends client-auth or client-auth-nt, simulate OpenVPN
-			// sending >CLIENT:ESTABLISHED and >CLIENT:ADDRESS automatically.
-			if strings.HasPrefix(line, "client-auth ") || strings.HasPrefix(line, "client-auth-nt ") {
-				fields := strings.Fields(line)
-				if len(fields) >= 3 {
-					cid := fields[1]
-					// Drain the text block for client-auth (ends with "END")
-					if strings.HasPrefix(line, "client-auth ") {
-						for scanner.Scan() {
-							inner := scanner.Text()
-							log.Printf("<< daemon (auth-block): %s", inner)
-							if inner == "END" {
-								break
-							}
-						}
-					}
-					// Simulate OpenVPN sending ESTABLISHED + ADDRESS
-					_, _ = fmt.Fprintf(conn, ">CLIENT:ESTABLISHED,%s\r\n", cid)
-					_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,time_unix=1234567890\r\n")
-					_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,END\r\n")
-					_, _ = fmt.Fprintf(conn, ">CLIENT:ADDRESS,%s,10.8.0.2,1\r\n", cid)
-					log.Printf(">> auto ESTABLISHED+ADDRESS cid=%s", cid)
-				}
-			}
-		}
-		disconnected.Store(true)
-		log.Println("Daemon disconnected")
-	}()
-
-	// Default IV_SSO value for connect events.
+	// Default IV_SSO value for connect events — shared across reconnections.
 	defaultSSO := "webauth"
 
-	// --- Interactive prompt ---
+	// --- Interactive prompt runs in the foreground; connections are handled in background ---
 	printHelp()
 	stdin := bufio.NewScanner(os.Stdin)
+
+	// connMu guards the active conn so the stdin loop can write to it safely.
+	var connMu sync.Mutex
+	var activeConn net.Conn
+	var disconnected atomic.Bool
+
+	// Accept loop: re-accepts after each daemon reconnect.
+	go func() {
+		for {
+			log.Println("Waiting for daemon to connect...")
+			conn, err := ln.Accept()
+			if err != nil {
+				log.Printf("accept: %v", err)
+				return
+			}
+			log.Println("Daemon connected")
+			disconnected.Store(false)
+
+			connMu.Lock()
+			activeConn = conn
+			connMu.Unlock()
+
+			scanner := bufio.NewScanner(conn)
+
+			// Password handshake
+			if expectedPw != "" {
+				if _, err := fmt.Fprintf(conn, "ENTER PASSWORD:"); err != nil {
+					log.Printf("write prompt: %v", err)
+					_ = conn.Close()
+					continue
+				}
+				if !scanner.Scan() {
+					log.Println("daemon disconnected before sending password")
+					_ = conn.Close()
+					continue
+				}
+				got := scanner.Text()
+				if got != expectedPw {
+					_, _ = fmt.Fprintf(conn, "ERROR: bad password\r\n")
+					_ = conn.Close()
+					log.Printf("bad password: got %q", got)
+					continue
+				}
+				if _, err := fmt.Fprintf(conn, "SUCCESS: password is correct\r\n"); err != nil {
+					log.Printf("write success: %v", err)
+					_ = conn.Close()
+					continue
+				}
+				log.Println("Auth OK")
+			}
+
+			// Send >HOLD: notification
+			_, _ = fmt.Fprintf(conn, ">HOLD:Waiting for hold release:0\r\n")
+			log.Println(">> sent >HOLD: notification")
+
+			// Read daemon responses
+			for scanner.Scan() {
+				line := scanner.Text()
+				log.Printf("<< daemon: %s", line)
+
+				if strings.HasPrefix(line, "client-auth ") || strings.HasPrefix(line, "client-auth-nt ") {
+					fields := strings.Fields(line)
+					if len(fields) >= 3 {
+						cid := fields[1]
+						if strings.HasPrefix(line, "client-auth ") {
+							for scanner.Scan() {
+								inner := scanner.Text()
+								log.Printf("<< daemon (auth-block): %s", inner)
+								if inner == "END" {
+									break
+								}
+							}
+						}
+						_, _ = fmt.Fprintf(conn, ">CLIENT:ESTABLISHED,%s\r\n", cid)
+						_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,time_unix=1234567890\r\n")
+						_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,END\r\n")
+						_, _ = fmt.Fprintf(conn, ">CLIENT:ADDRESS,%s,10.8.0.2,1\r\n", cid)
+						log.Printf(">> auto ESTABLISHED+ADDRESS cid=%s", cid)
+					}
+				}
+			}
+
+			disconnected.Store(true)
+			connMu.Lock()
+			activeConn = nil
+			connMu.Unlock()
+			_ = conn.Close()
+			log.Println("Daemon disconnected — waiting for reconnect...")
+		}
+	}()
+
 	fmt.Print("> ")
 	for stdin.Scan() {
-		if disconnected.Load() {
-			log.Println("Daemon disconnected, exiting")
-			return
-		}
-
 		line := strings.TrimSpace(stdin.Text())
 		if line == "" {
 			fmt.Print("> ")
 			continue
 		}
+
+		connMu.Lock()
+		conn := activeConn
+		connMu.Unlock()
+
 		parts := strings.Fields(line)
 		cmd := strings.ToLower(parts[0])
+
+		// quit/help don't need an active connection
+		switch cmd {
+		case "help":
+			printHelp()
+			fmt.Print("> ")
+			continue
+		case "quit", "exit":
+			log.Println("Exiting")
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return
+		}
+
+		if conn == nil {
+			log.Println("no daemon connected yet")
+			fmt.Print("> ")
+			continue
+		}
 
 		switch cmd {
 		case "connect":
@@ -191,7 +228,6 @@ func main() {
 			sso := defaultSSO
 			password := ""
 			kid := ""
-			// Parse optional args: sso, password, KID
 			if len(parts) >= 4 {
 				sso = parts[3]
 			}
@@ -247,23 +283,11 @@ func main() {
 			_, _ = fmt.Fprintf(conn, ">HOLD:Waiting for hold release:0\r\n")
 			log.Println(">> sent >HOLD: notification")
 
-		case "help":
-			printHelp()
-
-		case "quit", "exit":
-			log.Println("Closing connection")
-			_ = conn.Close()
-			wg.Wait()
-			return
-
 		default:
 			log.Printf("unknown command: %s (type 'help')", cmd)
 		}
 		fmt.Print("> ")
 	}
-
-	_ = conn.Close()
-	wg.Wait()
 }
 
 func sendConnect(conn net.Conn, cid, kid, username, sso, password string) {

@@ -63,7 +63,7 @@ if pw := event.Env["password"]; pw != "" {
 - Sessions remain for AuthTimeout duration (default 5 minutes) even after disconnect
 
 **Mitigating factors:**
-- `--single-session-per-user=true` (default) evicts existing sessions on new connect, limiting to one active session per CN
+- `--single-session-per-user=true` (default, configurable) evicts existing sessions on new connect, limiting to one active session per CN
 - OpenVPN's TLS handshake requirement limits pre-connection spam
 
 **Remaining attack vectors:**

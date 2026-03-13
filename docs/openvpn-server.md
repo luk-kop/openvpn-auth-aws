@@ -54,13 +54,34 @@ time=2026-03-13T12:05:00Z level=INFO msg=disconnect cid=3
 
 If you don't see a disconnect log after a client disappears, wait for the `ping-restart` timeout.
 
-### Renegotiation
+### Renegotiation and Reauth
 
 ```text
 reneg-sec 3600
 ```
 
-Controls how often OpenVPN renegotiates the TLS session. Each renegotiation triggers `CLIENT:REAUTH` on the management interface, which the daemon handles by checking the user's identity in Cognito.
+Controls how often OpenVPN renegotiates the TLS session. Each renegotiation triggers `>CLIENT:REAUTH` on the management interface. The daemon handles this by checking the user's identity in Cognito — **no browser interaction required**.
+
+The reauth flow:
+
+1. OpenVPN triggers TLS renegotiation after `reneg-sec` seconds
+2. Sends `>CLIENT:REAUTH,CID,KID` to management interface
+3. Daemon calls Cognito `AdminGetUser` to verify user still exists, is enabled, and (optionally) is in the required group
+4. Sends `client-auth-nt` (continue tunnel) or `client-deny` (disconnect user)
+
+This means:
+- **User disabled in Cognito** — disconnected at next renegotiation (within `reneg-sec`)
+- **User removed from required group** — disconnected if `--check-groups-on-reauth=true`
+- **Cognito unavailable** — denied by default, or allowed from cache if `--reauth-cache=true`
+
+Daemon logs for reauth:
+
+```
+time=...Z level=INFO msg=reauth cid=0 cn=john@example.com
+time=...Z level=INFO msg="reauth allowed" cid=0 cn=john@example.com
+```
+
+The lab setup uses `reneg-sec 600` (10 minutes) for faster testing. For production, `reneg-sec 3600` (1 hour) is typical.
 
 The daemon's `--reneg-interval` should match this value (used for reauth cache TTL calculation).
 
