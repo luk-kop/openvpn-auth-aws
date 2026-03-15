@@ -20,4 +20,7 @@ WORKDIR /app
 
 COPY --from=builder /build/openvpn-auth-daemon .
 
+RUN addgroup -S daemon && adduser -S -G daemon daemon
+USER daemon
+
 CMD ["/app/openvpn-auth-daemon"]

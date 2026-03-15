@@ -29,11 +29,11 @@ func newTestHandler(cfg config.Config) *Handler {
 
 func TestHandleConnectWithoutWebAuth(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    50 * time.Millisecond,
-		AuthTimeout:   50 * time.Millisecond,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   50 * time.Millisecond,
+		AuthTimeout:  50 * time.Millisecond,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -58,11 +58,11 @@ func TestHandleConnectWithoutWebAuth(t *testing.T) {
 
 func TestHandleConnectAcceptsOpenURL(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    50 * time.Millisecond,
-		AuthTimeout:   50 * time.Millisecond,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   50 * time.Millisecond,
+		AuthTimeout:  50 * time.Millisecond,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -94,11 +94,11 @@ func TestHandleConnectAcceptsOpenURL(t *testing.T) {
 
 func TestHandleConnectAcceptsCSVWebAuth(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    50 * time.Millisecond,
-		AuthTimeout:   50 * time.Millisecond,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   50 * time.Millisecond,
+		AuthTimeout:  50 * time.Millisecond,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -130,11 +130,11 @@ func TestHandleConnectAcceptsCSVWebAuth(t *testing.T) {
 
 func TestHandleConnectRejectsCrtext(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    50 * time.Millisecond,
-		AuthTimeout:   50 * time.Millisecond,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   50 * time.Millisecond,
+		AuthTimeout:  50 * time.Millisecond,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -159,11 +159,11 @@ func TestHandleConnectRejectsCrtext(t *testing.T) {
 
 func TestHandleConnectIgnoresPassword(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    50 * time.Millisecond,
-		AuthTimeout:   50 * time.Millisecond,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   50 * time.Millisecond,
+		AuthTimeout:  50 * time.Millisecond,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -200,12 +200,11 @@ func TestHandleConnectIgnoresPassword(t *testing.T) {
 
 func TestHandleConnectStateBlob(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    300 * time.Second,
-		AuthTimeout:   300 * time.Second,
-		CallbackPort:  9090,
-		InstanceIP:    "10.0.0.1",
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   300 * time.Second,
+		AuthTimeout:  300 * time.Second,
+		CallbackPort: 9090,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -243,13 +242,110 @@ func TestHandleConnectStateBlob(t *testing.T) {
 	}
 }
 
+// TestHandleConnectURLFormat verifies the WEB_AUTH URL is exactly
+// {callback-url}?state={blob} with no extra path assembly.
+// Requirements: 3.1
+func TestHandleConnectURLFormat(t *testing.T) {
+	callbackURL := "https://vpn-auth.example.com/callback/01/udp"
+	cfg := config.Config{
+		CallbackURL:  callbackURL,
+		HMACSecret:   "secret",
+		HandWindow:   300 * time.Second,
+		AuthTimeout:  300 * time.Second,
+		CallbackPort: 8080,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect,
+		CID:  "1",
+		KID:  "1",
+		Env: map[string]string{
+			"IV_SSO":      "webauth",
+			"common_name": "test@example.com",
+		},
+	}, sink)
+
+	time.Sleep(5 * time.Millisecond)
+	cancel()
+
+	if len(sink.decisions) < 1 {
+		t.Fatalf("expected at least 1 decision, got %d", len(sink.decisions))
+	}
+	d := sink.decisions[0]
+	if d.Type != DecisionPending {
+		t.Fatalf("expected DecisionPending, got %d", d.Type)
+	}
+
+	// URL must start with the exact callback URL followed by ?state=
+	expectedPrefix := callbackURL + "?state="
+	if !strings.HasPrefix(d.URL, expectedPrefix) {
+		t.Fatalf("URL must be %q + state blob, got: %s", expectedPrefix, d.URL)
+	}
+
+	// The state blob must be non-empty
+	stateBlob := strings.TrimPrefix(d.URL, expectedPrefix)
+	if stateBlob == "" {
+		t.Fatal("state blob must not be empty")
+	}
+
+	// State blob must contain a dot separator (base64payload.mac)
+	if !strings.Contains(stateBlob, ".") {
+		t.Fatalf("state blob must be base64payload.mac format, got: %s", stateBlob)
+	}
+}
+
+// TestHandleConnectURLTooLong verifies that a callback URL that would produce
+// a WEB_AUTH URL exceeding MaxWebAuthURLLen results in a deny with reason
+// "auth URL too long". Requirements: 3.3
+func TestHandleConnectURLTooLong(t *testing.T) {
+	// Construct a callback URL long enough that OPEN_URL: + url > MaxWebAuthURLLen.
+	// MaxWebAuthURLLen = 229; "OPEN_URL:" = 9 bytes; state blob ~128 bytes.
+	// So callback URL of 100 bytes will push total well over 229.
+	longCallbackURL := "https://vpn-auth.example.com/callback/" + strings.Repeat("x", 100)
+	cfg := config.Config{
+		CallbackURL:  longCallbackURL,
+		HMACSecret:   "secret",
+		HandWindow:   300 * time.Second,
+		AuthTimeout:  300 * time.Second,
+		CallbackPort: 8080,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+
+	handler.HandleEvent(context.Background(), mgmt.Event{
+		Type: mgmt.EventConnect,
+		CID:  "1",
+		KID:  "1",
+		Env: map[string]string{
+			"IV_SSO":      "webauth",
+			"common_name": "test@example.com",
+		},
+	}, sink)
+
+	if len(sink.decisions) != 1 {
+		t.Fatalf("expected 1 decision, got %d", len(sink.decisions))
+	}
+	d := sink.decisions[0]
+	if d.Type != DecisionDeny {
+		t.Fatalf("expected DecisionDeny, got %d", d.Type)
+	}
+	if d.Reason != "auth URL too long" {
+		t.Fatalf("expected reason %q, got %q", "auth URL too long", d.Reason)
+	}
+}
+
 func TestHandleConnectTimeoutCleanup(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    200 * time.Millisecond,
-		AuthTimeout:   20 * time.Millisecond,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   200 * time.Millisecond,
+		AuthTimeout:  20 * time.Millisecond,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -283,11 +379,11 @@ func TestHandleConnectTimeoutCleanup(t *testing.T) {
 
 func TestHandleConnectDisconnectCleanup(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    5 * time.Second,
-		AuthTimeout:   5 * time.Second,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   5 * time.Second,
+		AuthTimeout:  5 * time.Second,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -322,11 +418,11 @@ func TestHandleConnectDisconnectCleanup(t *testing.T) {
 
 func TestHandleConnectRejectsMissingCommonName(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    50 * time.Millisecond,
-		AuthTimeout:   50 * time.Millisecond,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   50 * time.Millisecond,
+		AuthTimeout:  50 * time.Millisecond,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -353,11 +449,11 @@ func TestHandleConnectRejectsMissingCommonName(t *testing.T) {
 
 func TestHandleEstablishedClearsInFlight(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    5 * time.Second,
-		AuthTimeout:   5 * time.Second,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   5 * time.Second,
+		AuthTimeout:  5 * time.Second,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -396,7 +492,7 @@ func TestHandleEstablishedClearsInFlight(t *testing.T) {
 
 func TestHandleConnectEvictsInFlightSessionOnReconnect(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL:        "https://vpn-auth.example.com",
+		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
 		HMACSecret:           "secret",
 		HandWindow:           5 * time.Second,
 		AuthTimeout:          5 * time.Second,
@@ -453,7 +549,7 @@ func TestHandleConnectEvictsInFlightSessionOnReconnect(t *testing.T) {
 
 func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL:        "https://vpn-auth.example.com",
+		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
 		HMACSecret:           "secret",
 		HandWindow:           5 * time.Second,
 		AuthTimeout:          5 * time.Second,
@@ -507,11 +603,11 @@ func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 
 func TestHandleConnectAllowsNewSessionAfterDisconnect(t *testing.T) {
 	cfg := config.Config{
-		APIGatewayURL: "https://vpn-auth.example.com",
-		HMACSecret:    "secret",
-		HandWindow:    5 * time.Second,
-		AuthTimeout:   5 * time.Second,
-		CallbackPort:  8080,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "secret",
+		HandWindow:   5 * time.Second,
+		AuthTimeout:  5 * time.Second,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}

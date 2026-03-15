@@ -4,23 +4,40 @@ variable "aws_region" {
   default     = "eu-west-1"
 }
 
-variable "cognito_only" {
-  description = "Create only Cognito resources (for local development). Skips Lambda, API GW, EC2, SGs, and Secrets Manager."
+variable "deploy_cognito" {
+  description = "Create Cognito User Pool and related resources."
   type        = bool
-  default     = false
+  default     = true
+}
+
+variable "deploy_compute" {
+  description = "Create ALB and VPN server EC2 instance. Requires deploy_cognito = true."
+  type        = bool
+  default     = true
+
+  validation {
+    condition     = !var.deploy_compute || var.deploy_cognito
+    error_message = "deploy_compute requires deploy_cognito = true."
+  }
 }
 
 variable "project_name" {
   description = "Project name used for resource naming"
   type        = string
-  default     = "penvpn-auth-aws"
+  default     = "openvpn-auth-aws"
 }
 
 # --- Cognito ---
 
 variable "cognito_domain_prefix" {
-  description = "Cognito hosted UI domain prefix (must be globally unique)"
+  description = "Cognito hosted UI domain prefix (must be globally unique). Required when deploy_cognito = true."
   type        = string
+  default     = ""
+
+  validation {
+    condition     = !var.deploy_cognito || var.cognito_domain_prefix != ""
+    error_message = "cognito_domain_prefix is required when deploy_cognito = true."
+  }
 }
 
 variable "cognito_user_pool_name" {
@@ -41,74 +58,79 @@ variable "cognito_additional_callback_urls" {
   default     = []
 }
 
+variable "cognito_alb_callback_urls" {
+  description = "OAuth2 callback URLs for the ALB (e.g. https://vpn-auth.example.com/oauth2/idpresponse)"
+  type        = list(string)
+  default     = []
+}
+
 # --- Networking ---
 
 variable "vpc_id" {
-  description = "VPC ID where the OpenVPN daemon EC2 instance runs. Not required when cognito_only = true."
+  description = "VPC ID for ALB and VPN server. Required when deploy_compute = true."
   type        = string
   default     = ""
 
   validation {
-    condition     = var.cognito_only || var.vpc_id != ""
-    error_message = "vpc_id is required when cognito_only = false."
+    condition     = !var.deploy_compute || var.vpc_id != ""
+    error_message = "vpc_id is required when deploy_compute = true."
   }
 }
 
 variable "daemon_subnet_ids" {
-  description = "Subnet IDs for the daemon EC2 instance (private subnets recommended). Not required when cognito_only = true."
+  description = "Subnet IDs for the daemon EC2 instance (public subnets with IGW route required — EIP needs internet connectivity). Required when deploy_compute = true."
   type        = list(string)
   default     = []
 
   validation {
-    condition     = var.cognito_only || length(var.daemon_subnet_ids) > 0
-    error_message = "daemon_subnet_ids is required when cognito_only = false."
+    condition     = !var.deploy_compute || length(var.daemon_subnet_ids) > 0
+    error_message = "daemon_subnet_ids is required when deploy_compute = true."
   }
 }
 
-variable "lambda_subnet_ids" {
-  description = "Subnet IDs for Lambda (needs route to daemon callback port). Leave empty for non-VPC Lambda."
+variable "alb_subnet_ids" {
+  description = "Public subnet IDs for the ALB (minimum 2 AZs). Required when deploy_compute = true."
   type        = list(string)
   default     = []
+
+  validation {
+    condition     = !var.deploy_compute || length(var.alb_subnet_ids) >= 2
+    error_message = "alb_subnet_ids requires at least 2 subnets (one per AZ) when deploy_compute = true."
+  }
 }
 
-variable "daemon_callback_port" {
-  description = "Port the daemon listens on for Lambda callbacks"
-  type        = number
-  default     = 8081
+variable "alb_domain_name" {
+  description = "Domain name for the ALB certificate (e.g. vpn-auth.example.com). Required when deploy_compute = true."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !var.deploy_compute || var.alb_domain_name != ""
+    error_message = "alb_domain_name is required when deploy_compute = true."
+  }
+}
+
+variable "route53_hosted_zone_id" {
+  description = "Route53 hosted zone ID for ACM DNS validation. Required when deploy_compute = true."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !var.deploy_compute || var.route53_hosted_zone_id != ""
+    error_message = "route53_hosted_zone_id is required when deploy_compute = true."
+  }
+}
+
+variable "server_name" {
+  description = "Unique server name used in ALB path routing (e.g. '01'). Required when deploy_compute = true."
+  type        = string
+  default     = "01"
 }
 
 variable "hand_window" {
   description = "Seconds allowed for browser-based auth. Applied to both OpenVPN server config and daemon --hand-window to keep them in sync."
   type        = number
   default     = 300
-}
-
-# --- API Gateway ---
-
-variable "apigw_throttle_burst_limit" {
-  description = "API Gateway throttle burst limit (max concurrent requests)"
-  type        = number
-  default     = 50
-}
-
-variable "apigw_throttle_rate_limit" {
-  description = "API Gateway throttle rate limit (requests per second)"
-  type        = number
-  default     = 10
-}
-
-# --- Lambda ---
-
-variable "lambda_memory_size" {
-  description = "Lambda function memory in MB"
-  type        = number
-  default     = 128
-}
-
-variable "lambda_timeout" {
-  description = "Lambda function timeout in seconds"
-  type        = number
-  default     = 30
 }
 
 # --- EC2 ---
@@ -137,35 +159,35 @@ variable "ec2_root_volume_size" {
   default     = 20
 }
 
-variable "ec2_create_eip" {
-  description = "Create and associate an Elastic IP with the OpenVPN instance"
-  type        = bool
-  default     = true
-}
-
 # --- OpenVPN ---
 
-variable "openvpn_port" {
-  description = "OpenVPN listening port"
+variable "openvpn_udp_port" {
+  description = "OpenVPN UDP listening port"
   type        = number
   default     = 1194
 }
 
-variable "openvpn_protocol" {
-  description = "OpenVPN protocol (udp or tcp)"
-  type        = string
-  default     = "udp"
+variable "openvpn_tcp_port" {
+  description = "OpenVPN TCP listening port"
+  type        = number
+  default     = 1195
 
   validation {
-    condition     = contains(["udp", "tcp"], var.openvpn_protocol)
-    error_message = "Protocol must be udp or tcp."
+    condition     = var.openvpn_tcp_port != var.openvpn_udp_port
+    error_message = "openvpn_tcp_port must be different from openvpn_udp_port."
   }
 }
 
-variable "openvpn_client_cidr" {
-  description = "VPN tunnel client CIDR (e.g. 10.8.0.0/24)"
+variable "openvpn_udp_client_cidr" {
+  description = "VPN tunnel client CIDR for the UDP server (e.g. 10.8.0.0/24)"
   type        = string
   default     = "10.8.0.0/24"
+}
+
+variable "openvpn_tcp_client_cidr" {
+  description = "VPN tunnel client CIDR for the TCP server (e.g. 10.8.1.0/24). Must not overlap with UDP CIDR."
+  type        = string
+  default     = "10.8.1.0/24"
 }
 
 variable "ssh_allowed_cidrs" {
@@ -180,8 +202,19 @@ variable "openvpn_allowed_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "ec2_associate_public_ip" {
+  description = "Assign a temporary public IP to the VPN instance at launch. The instance is in a public subnet (required by EIP) but launches without a public IP — the EIP is assigned after ALB health checks pass. Without this flag, cloud-init has no outbound internet access and cannot reach AWS APIs or install packages. The EIP replaces this temporary IP once assigned. Set to false only if using VPC Endpoints and an apt proxy."
+  type        = bool
+  default     = true
+}
+
 variable "daemon_binary_s3_uri" {
-  description = "S3 URI for the daemon binary (e.g. s3://bucket/openvpn-auth-daemon). Temporary — will switch to GitHub releases."
+  description = "S3 URI for the daemon binary (e.g. s3://bucket/openvpn-auth-daemon). Required when deploy_compute = true."
   type        = string
   default     = ""
+
+  validation {
+    condition     = !var.deploy_compute || var.daemon_binary_s3_uri != ""
+    error_message = "daemon_binary_s3_uri is required when deploy_compute = true."
+  }
 }

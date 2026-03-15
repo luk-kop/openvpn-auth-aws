@@ -8,11 +8,9 @@ import (
 func TestSessionStorePutAndProcess(t *testing.T) {
 	store := NewSessionStore()
 	sess := &PendingSession{
-		SessionID:    "sid-1",
-		CodeVerifier: "cv-1",
-		Nonce:        "nonce-1",
-		Status:       SessionPending,
-		ExpiresAt:    time.Now().Add(5 * time.Minute),
+		SessionID: "sid-1",
+		Status:    SessionPending,
+		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
 	store.Put(sess)
 
@@ -24,8 +22,8 @@ func TestSessionStorePutAndProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TryProcess: %v", err)
 	}
-	if got.CodeVerifier != "cv-1" {
-		t.Fatalf("expected code_verifier cv-1, got %s", got.CodeVerifier)
+	if got.SessionID != "sid-1" {
+		t.Fatalf("expected session id sid-1, got %s", got.SessionID)
 	}
 }
 

@@ -12,8 +12,6 @@ import (
 	"sync"
 
 	"github.com/golang-jwt/jwt/v5"
-
-	"openvpn-auth-aws/internal/auth"
 )
 
 type JWKSCache struct {
@@ -78,8 +76,7 @@ func (c *JWKSCache) refresh() error {
 		return fmt.Errorf("unmarshal JWKS: %w", err)
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	newKeys := make(map[string]*rsa.PublicKey, len(jwks.Keys))
 	for _, k := range jwks.Keys {
 		if k.Kty != "RSA" {
 			continue
@@ -88,8 +85,12 @@ func (c *JWKSCache) refresh() error {
 		if err != nil {
 			continue
 		}
-		c.keys[k.KID] = pub
+		newKeys[k.KID] = pub
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.keys = newKeys
 	return nil
 }
 
@@ -107,7 +108,15 @@ func parseRSAKey(nStr, eStr string) (*rsa.PublicKey, error) {
 	return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
 }
 
-func (c *JWKSCache) ValidateIDToken(tokenString, issuer, audience string) (*auth.IDTokenClaims, error) {
+// IDTokenClaims holds parsed claims from a Cognito ID token.
+// Retained for JWKS validation; TokenExchanger removed in v2.
+type IDTokenClaims struct {
+	Email  string
+	Nonce  string
+	Groups []string
+}
+
+func (c *JWKSCache) ValidateIDToken(tokenString, issuer, audience string) (*IDTokenClaims, error) {
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{"RS256"}),
 		jwt.WithIssuer(issuer),
@@ -130,7 +139,7 @@ func (c *JWKSCache) ValidateIDToken(tokenString, issuer, audience string) (*auth
 		return nil, fmt.Errorf("unexpected claims type")
 	}
 
-	result := &auth.IDTokenClaims{}
+	result := &IDTokenClaims{}
 	if email, ok := claims["email"].(string); ok {
 		result.Email = email
 	}

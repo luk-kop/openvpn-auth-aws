@@ -16,8 +16,6 @@ const (
 
 type PendingSession struct {
 	SessionID     string
-	CodeVerifier  string
-	Nonce         string
 	CommonName    string
 	CID           string
 	KID           string
@@ -29,20 +27,12 @@ type PendingSession struct {
 	ExpiresAt     time.Time
 }
 
-type CallbackRequest struct {
-	Code      string `json:"code"`
-	SessionID string `json:"session_id"`
-	Timestamp int64  `json:"ts"`
-}
-
-type TokenExchanger interface {
-	Exchange(ctx context.Context, code, codeVerifier, redirectURI string) (*IDTokenClaims, error)
-}
-
-type IDTokenClaims struct {
-	Email  string
-	Nonce  string
-	Groups []string
+// ALBClaims holds the parsed claims from the ALB-signed x-amzn-oidc-data JWT.
+type ALBClaims struct {
+	Sub   string `json:"sub"`
+	Email string `json:"email"`
+	Exp   int64  `json:"exp"`
+	Iss   string `json:"iss"`
 }
 
 type IdentityResult struct {

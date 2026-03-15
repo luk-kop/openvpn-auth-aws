@@ -243,6 +243,12 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 	}
 }
 
+// SocketConnected returns true if the management socket is currently connected.
+// This is injected into the callback server for /healthz reporting.
+func (d *Daemon) SocketConnected() bool {
+	return d.socketConnected.Load()
+}
+
 func (d *Daemon) gracefulShutdown() {
 	// Wait for in-flight REAUTH goroutines (bounded by ReauthTimeout).
 	d.handler.WaitReauth()

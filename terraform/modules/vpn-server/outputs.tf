@@ -8,12 +8,17 @@ output "private_ip" {
   value       = aws_instance.openvpn.private_ip
 }
 
-output "public_ip" {
-  description = "EC2 public IP (EIP if created, otherwise instance public IP)"
-  value       = var.ec2_create_eip ? aws_eip.openvpn[0].public_ip : aws_instance.openvpn.public_ip
-}
-
 output "instance_profile_name" {
   description = "IAM instance profile name"
   value       = aws_iam_instance_profile.daemon.name
+}
+
+output "tg_udp_arn" {
+  description = "ALB Target Group ARN for the UDP daemon (port 8080)"
+  value       = aws_lb_target_group.udp.arn
+}
+
+output "tg_tcp_arn" {
+  description = "ALB Target Group ARN for the TCP daemon (port 8081)"
+  value       = aws_lb_target_group.tcp.arn
 }

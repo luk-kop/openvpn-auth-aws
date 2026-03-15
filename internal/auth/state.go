@@ -10,7 +10,6 @@ import (
 
 type StatePayload struct {
 	SID string `json:"sid"`
-	IP  string `json:"ip"`
 	IAT int64  `json:"iat"`
 	EXP int64  `json:"exp"`
 }

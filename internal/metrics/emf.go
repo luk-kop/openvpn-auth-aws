@@ -26,13 +26,13 @@ func (e *Emitter) Heartbeat(socketConnected bool, inFlight int) {
 				"Dimensions": [][]string{{"InstanceId"}},
 				"Metrics": []any{
 					map[string]any{"Name": "SocketConnected", "Unit": "None"},
-					map[string]any{"Name": "InFlightSessions", "Unit": "Count"},
+					map[string]any{"Name": "StoredSessions", "Unit": "Count"},
 				},
 			}},
 		},
 		"InstanceId":       e.instanceID,
 		"SocketConnected":  boolToInt(socketConnected),
-		"InFlightSessions": inFlight,
+		"StoredSessions": inFlight,
 	})
 }
 

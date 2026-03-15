@@ -1,0 +1,25 @@
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o alb-mock ./cmd/alb-mock
+
+FROM alpine:3.23
+
+RUN apk --no-cache add ca-certificates wget
+
+WORKDIR /app
+
+COPY --from=builder /build/alb-mock .
+
+RUN addgroup -S daemon && adduser -S -G daemon daemon
+USER daemon
+
+EXPOSE 8080
+
+CMD ["/app/alb-mock"]

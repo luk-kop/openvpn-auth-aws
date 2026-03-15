@@ -13,14 +13,20 @@ output "client_id" {
   value       = aws_cognito_user_pool_client.this.id
 }
 
+output "client_secret" {
+  description = "Cognito User Pool Client secret (required by ALB authenticate-cognito action)"
+  value       = aws_cognito_user_pool_client.this.client_secret
+  sensitive   = true
+}
+
 output "domain_url" {
   description = "Cognito hosted UI domain URL"
   value       = "https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.aws_region}.amazoncognito.com"
 }
 
-output "token_endpoint" {
-  description = "Cognito OAuth2 token endpoint"
-  value       = "https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.aws_region}.amazoncognito.com/oauth2/token"
+output "domain_fqdn" {
+  description = "Cognito hosted UI domain FQDN (without https:// scheme, for ALB authenticate-cognito action)"
+  value       = "${aws_cognito_user_pool_domain.this.domain}.auth.${var.aws_region}.amazoncognito.com"
 }
 
 output "issuer_url" {

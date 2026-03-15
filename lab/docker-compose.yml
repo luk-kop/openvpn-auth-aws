@@ -25,7 +25,7 @@ services:
     depends_on:
       openvpn:
         condition: service_healthy
-      lambda-mock:
+      alb-mock:
         condition: service_healthy
     ports:
       - "8081:8081"
@@ -33,26 +33,31 @@ services:
       - openvpn-run:/run/openvpn
       - ./openvpn-data:/etc/openvpn:ro
     environment:
-      - VPN_AUTH_USE_LOCAL_MOCKS=true
       - VPN_AUTH_CN_CROSS_CHECK=false
       - VPN_AUTH_HMAC_SECRET=test-secret
-      - VPN_AUTH_API_GATEWAY_URL=http://lambda-mock:8080
+      - VPN_AUTH_CALLBACK_URL=http://localhost:8080/callback/01/udp
+      - VPN_AUTH_COGNITO_SKIP_REAUTH=true
+      - VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS=true
       - VPN_AUTH_MANAGEMENT_SOCKET=/run/openvpn/management.sock
       - VPN_AUTH_MANAGEMENT_PASSWORD_FILE=/etc/openvpn/management-pw
       - VPN_AUTH_CALLBACK_PORT=8081
-      - VPN_AUTH_INSTANCE_IP=daemon
+      # VPN_AUTH_ALB_ARN not set — absent = skip JWT signature validation in dev
     command: /app/openvpn-auth-daemon
 
-  lambda-mock:
+  alb-mock:
     build:
       context: ..
-      dockerfile: lab/Dockerfile.lambda-mock
+      dockerfile: lab/Dockerfile.alb-mock
     ports:
       - "8080:8080"
     environment:
       - VPN_AUTH_HMAC_SECRET=test-secret
+      - DAEMON_ADDR=daemon:8081
+      - MOCK_EMAIL=test@example.com
+      - MOCK_SUB=test-sub-123
+      - MOCK_GROUPS=vpn-users
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/auth 2>&1 | grep -q 'missing state'"]
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/healthz"]
       interval: 5s
       timeout: 3s
       retries: 10

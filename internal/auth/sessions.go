@@ -56,6 +56,15 @@ func (s *SessionStore) MarkFailed(sessionID string) {
 	}
 }
 
+// MarkPending resets a session back to PENDING (e.g. after a retryable failure).
+func (s *SessionStore) MarkPending(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[sessionID]; ok {
+		sess.Status = SessionPending
+	}
+}
+
 func (s *SessionStore) Delete(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -1,18 +1,29 @@
 package callback
 
 import (
-	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"openvpn-auth-aws/internal/auth"
 	"openvpn-auth-aws/internal/config"
 	"openvpn-auth-aws/internal/secrets"
+
+	"github.com/golang-jwt/jwt/v5"
 )
+
+// ---------------------------------------------------------------------------
+// Test fakes
+// ---------------------------------------------------------------------------
 
 type captureSink struct {
 	decisions []auth.Decision
@@ -22,272 +33,561 @@ func (c *captureSink) Send(d auth.Decision) {
 	c.decisions = append(c.decisions, d)
 }
 
-type fakeExchanger struct {
-	claims *auth.IDTokenClaims
-	err    error
-}
-
-func (e *fakeExchanger) Exchange(_ context.Context, _, _, _ string) (*auth.IDTokenClaims, error) {
-	return e.claims, e.err
-}
-
 type fakeMetrics struct{}
 
-func (fakeMetrics) Heartbeat(bool, int)        {}
-func (fakeMetrics) AuthAttempt(string)          {}
-func (fakeMetrics) AuthSuccess()                {}
-func (fakeMetrics) AuthDenied(string)           {}
-func (fakeMetrics) ReauthSuccess()              {}
-func (fakeMetrics) ReauthDenied(string)         {}
-func (fakeMetrics) ReauthCacheHit()             {}
-func (fakeMetrics) CallbackReceived()           {}
-func (fakeMetrics) TokenExchangeError(string)   {}
+func (fakeMetrics) Heartbeat(bool, int)       {}
+func (fakeMetrics) AuthAttempt(string)        {}
+func (fakeMetrics) AuthSuccess()              {}
+func (fakeMetrics) AuthDenied(string)         {}
+func (fakeMetrics) ReauthSuccess()            {}
+func (fakeMetrics) ReauthDenied(string)       {}
+func (fakeMetrics) ReauthCacheHit()           {}
+func (fakeMetrics) CallbackReceived()         {}
+func (fakeMetrics) TokenExchangeError(string) {}
 
-func newTestServer(exchanger auth.TokenExchanger) (*Server, *captureSink) {
+// fakeGroupsChecker implements GroupsChecker for tests.
+type fakeGroupsChecker struct {
+	inGroup bool
+	err     error
+}
+
+func (f *fakeGroupsChecker) CheckUser(_ context.Context, _, _ string, _ bool) (auth.IdentityResult, error) {
+	return auth.IdentityResult{InGroup: f.inGroup}, f.err
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+// newTestServer builds a Server with sensible defaults for unit tests.
+// albARN is empty by default (dev mode — skip JWT signature validation).
+func newTestServer(cfg config.Config, identity GroupsChecker) (*Server, *captureSink) {
 	sessions := auth.NewSessionStore()
 	signer := secrets.NewStaticSigner("test-secret")
 	sink := &captureSink{}
-	cfg := config.Config{CognitoRedirectURI: "https://example.com/callback"}
-	srv := NewServer(sessions, exchanger, signer, sink, cfg, fakeMetrics{})
+	srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, identity, func() bool { return true })
 	return srv, sink
 }
 
-func TestCallbackHappyPath(t *testing.T) {
-	exchanger := &fakeExchanger{
-		claims: &auth.IDTokenClaims{
-			Email: "user@example.com",
-			Nonce: "test-nonce",
-		},
+// newTestServerWithSessions builds a Server and returns the session store too.
+func newTestServerWithSessions(cfg config.Config, identity GroupsChecker) (*Server, *auth.SessionStore, *captureSink) {
+	sessions := auth.NewSessionStore()
+	signer := secrets.NewStaticSigner("test-secret")
+	sink := &captureSink{}
+	srv := &Server{
+		sessions:      sessions,
+		signer:        signer,
+		sink:          sink,
+		cfg:           cfg,
+		metrics:       fakeMetrics{},
+		identity:      identity,
+		albARN:        cfg.ALBARN,
+		awsRegion:     cfg.AWSRegion,
+		keyCache:      make(map[string]*ecdsa.PublicKey),
+		mgmtConnected: func() bool { return true },
+		startTime:     time.Now(),
 	}
-	srv, sink := newTestServer(exchanger)
+	return srv, sessions, sink
+}
 
-	// Put a pending session
-	srv.sessions.Put(&auth.PendingSession{
-		SessionID:    "sid-1",
-		CodeVerifier: "cv-1",
-		Nonce:        "test-nonce",
-		CommonName:   "user@example.com",
-		CID:          "1",
-		KID:          "1",
-		CNCrossCheck: true,
-		Status:       auth.SessionPending,
-		ExpiresAt:    time.Now().Add(5 * time.Minute),
+// validStateParam creates a valid HMAC-signed state blob for the given session ID.
+func validStateParam(t *testing.T, sid string) string {
+	t.Helper()
+	signer := secrets.NewStaticSigner("test-secret")
+	return auth.EncodeState(auth.StatePayload{
+		SID: sid,
+		IAT: time.Now().Unix(),
+		EXP: time.Now().Add(5 * time.Minute).Unix(),
+	}, signer)
+}
+
+// expiredStateParam creates an expired state blob.
+func expiredStateParam(t *testing.T, sid string) string {
+	t.Helper()
+	signer := secrets.NewStaticSigner("test-secret")
+	return auth.EncodeState(auth.StatePayload{
+		SID: sid,
+		IAT: time.Now().Add(-10 * time.Minute).Unix(),
+		EXP: time.Now().Add(-1 * time.Minute).Unix(),
+	}, signer)
+}
+
+// makeUnsignedJWT builds a minimal unsigned JWT (header.claims.) for dev-mode tests.
+func makeUnsignedJWT(email, sub string, groups []string, exp int64) string {
+	header := map[string]interface{}{
+		"alg": "none",
+		"kid": "test-kid",
+	}
+	claims := map[string]interface{}{
+		"email":          email,
+		"sub":            sub,
+		"iss":            "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_test",
+		"exp":            exp,
+		"cognito:groups": groups,
+	}
+	hBytes, _ := json.Marshal(header)
+	cBytes, _ := json.Marshal(claims)
+	h := base64.RawURLEncoding.EncodeToString(hBytes)
+	c := base64.RawURLEncoding.EncodeToString(cBytes)
+	return h + "." + c + "."
+}
+
+// makeSignedJWT builds a real ES256-signed JWT for ALB validation tests.
+func makeSignedJWT(t *testing.T, key *ecdsa.PrivateKey, kid, signerARN, email, sub string, exp int64) string {
+	t.Helper()
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
+		"email": email,
+		"sub":   sub,
+		"iss":   "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_test",
+		"exp":   exp,
 	})
-
-	body := mustJSON(auth.CallbackRequest{Code: "auth-code", SessionID: "sid-1", Timestamp: time.Now().Unix()})
-	signer := secrets.NewStaticSigner("test-secret")
-	mac := signer.Sign(string(body))
-
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
-	req.Header.Set("X-Internal-Token", mac)
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	token.Header["kid"] = kid
+	token.Header["signer"] = signerARN
+	signed, err := token.SignedString(key)
+	if err != nil {
+		t.Fatalf("sign JWT: %v", err)
 	}
-	if len(sink.decisions) != 1 || sink.decisions[0].Type != auth.DecisionAllow {
-		t.Fatalf("expected DecisionAllow, got %v", sink.decisions)
+	return signed
+}
+
+// addSessionPending adds a pending session to the store and returns it.
+func addSessionPending(sessions *auth.SessionStore, sid, cid, kid, cn string) *auth.PendingSession {
+	sess := &auth.PendingSession{
+		SessionID:  sid,
+		CommonName: cn,
+		CID:        cid,
+		KID:        kid,
+		Status:     auth.SessionPending,
+		CreatedAt:  time.Now(),
+		ExpiresAt:  time.Now().Add(5 * time.Minute),
+	}
+	sessions.Put(sess)
+	return sess
+}
+
+// defaultCfg returns a minimal config suitable for unit tests (dev mode: no ALBARN).
+func defaultCfg() config.Config {
+	return config.Config{
+		AWSRegion: "eu-west-1",
 	}
 }
 
-func TestCallbackBadHMAC(t *testing.T) {
-	srv, _ := newTestServer(&fakeExchanger{})
+// ---------------------------------------------------------------------------
+// handleCallback unit tests (subtask 5.4)
+// ---------------------------------------------------------------------------
 
-	body := mustJSON(auth.CallbackRequest{Code: "code", SessionID: "sid-1", Timestamp: time.Now().Unix()})
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
-	req.Header.Set("X-Internal-Token", "bad-mac")
+func TestHandleCallback_MissingState(t *testing.T) {
+	srv, _ := newTestServer(defaultCfg(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp", nil)
 	w := httptest.NewRecorder()
-
 	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", w.Code)
-	}
-}
-
-func TestCallbackExpiredTimestamp(t *testing.T) {
-	srv, _ := newTestServer(&fakeExchanger{})
-	signer := secrets.NewStaticSigner("test-secret")
-
-	body := mustJSON(auth.CallbackRequest{Code: "code", SessionID: "sid-1", Timestamp: time.Now().Add(-60 * time.Second).Unix()})
-	mac := signer.Sign(string(body))
-
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
-	req.Header.Set("X-Internal-Token", mac)
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, req)
-
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
 
-func TestCallbackSessionNotFound(t *testing.T) {
-	srv, _ := newTestServer(&fakeExchanger{})
-	signer := secrets.NewStaticSigner("test-secret")
+func TestHandleCallback_InvalidStateHMAC(t *testing.T) {
+	srv, _ := newTestServer(defaultCfg(), nil)
+	valid := validStateParam(t, "some-sid")
+	parts := strings.SplitN(valid, ".", 2)
+	tampered := parts[0] + ".AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
-	body := mustJSON(auth.CallbackRequest{Code: "code", SessionID: "nonexistent", Timestamp: time.Now().Unix()})
-	mac := signer.Sign(string(body))
-
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
-	req.Header.Set("X-Internal-Token", mac)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+tampered, nil)
 	w := httptest.NewRecorder()
-
 	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d", w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestCallbackSessionConflict(t *testing.T) {
-	exchanger := &fakeExchanger{
-		claims: &auth.IDTokenClaims{Email: "user@example.com", Nonce: "nonce"},
+func TestHandleCallback_ExpiredState(t *testing.T) {
+	srv, _ := newTestServer(defaultCfg(), nil)
+	state := expiredStateParam(t, "some-sid")
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
-	srv, _ := newTestServer(exchanger)
-	signer := secrets.NewStaticSigner("test-secret")
+}
 
-	srv.sessions.Put(&auth.PendingSession{
-		SessionID: "sid-1",
-		Status:    auth.SessionPending,
-		Nonce:     "nonce",
-		ExpiresAt: time.Now().Add(5 * time.Minute),
-	})
+func TestHandleCallback_SessionNotFound(t *testing.T) {
+	srv, _, _ := newTestServerWithSessions(defaultCfg(), nil)
+	state := validStateParam(t, "nonexistent-sid")
 
-	// First call should succeed (PENDING → PROCESSING)
-	body := mustJSON(auth.CallbackRequest{Code: "code", SessionID: "sid-1", Timestamp: time.Now().Unix()})
-	mac := signer.Sign(string(body))
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
 
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
-	req.Header.Set("X-Internal-Token", mac)
+func TestHandleCallback_SessionNotPending(t *testing.T) {
+	srv, sessions, _ := newTestServerWithSessions(defaultCfg(), nil)
+	sid := "already-processing"
+	addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	_, _ = sessions.TryProcess(sid)
+
+	state := validStateParam(t, sid)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleCallback_ALBJWTValidationFailure(t *testing.T) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const albARN = "arn:aws:elasticloadbalancing:eu-west-1:123456789012:loadbalancer/app/test/abc"
+	cfg := config.Config{
+		AWSRegion: "eu-west-1",
+		ALBARN:    albARN,
+	}
+
+	srv, sessions, sink := newTestServerWithSessions(cfg, nil)
+	// Cache the WRONG public key so signature verification fails.
+	srv.keyCache["test-kid"] = &wrongKey.PublicKey
+
+	sid := "jwt-fail-sid"
+	addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+
+	tokenStr := makeSignedJWT(t, privKey, "test-kid", albARN, "user@example.com", "sub123", time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", tokenStr)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
+		t.Fatalf("expected client-deny decision, got %+v", sink.decisions)
+	}
+}
+
+func TestHandleCallback_GroupCheckFailure(t *testing.T) {
+	cfg := defaultCfg()
+	identity := &fakeGroupsChecker{inGroup: false}
+	srv, sessions, sink := newTestServerWithSessions(cfg, identity)
+
+	sid := "group-fail-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = "vpn-users"
+
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", []string{"other-group"}, time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
+		t.Fatalf("expected client-deny decision, got %+v", sink.decisions)
+	}
+}
+
+func TestHandleCallback_GroupCheckFromClaims_Failure(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.CognitoGroupsClaims = true
+	srv, sessions, sink := newTestServerWithSessions(cfg, nil)
+
+	sid := "claims-group-fail-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = "vpn-users"
+
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", []string{"other-group"}, time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
+		t.Fatalf("expected client-deny, got %+v", sink.decisions)
+	}
+}
+
+func TestHandleCallback_Success_DevMode(t *testing.T) {
+	cfg := defaultCfg()
+	identity := &fakeGroupsChecker{inGroup: true}
+	srv, sessions, sink := newTestServerWithSessions(cfg, identity)
+
+	sid := "success-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = "vpn-users"
+
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", []string{"vpn-users"}, time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("first call: expected 200, got %d", w.Code)
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-
-	// Second call should fail (already DONE)
-	body2 := mustJSON(auth.CallbackRequest{Code: "code", SessionID: "sid-1", Timestamp: time.Now().Unix()})
-	mac2 := signer.Sign(string(body2))
-
-	req2 := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body2))
-	req2.Header.Set("X-Internal-Token", mac2)
-	w2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w2, req2)
-
-	if w2.Code != http.StatusConflict {
-		t.Fatalf("second call: expected 409, got %d", w2.Code)
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected client-auth decision, got %+v", sink.decisions)
 	}
 }
 
-func TestCallbackNonceMismatch(t *testing.T) {
-	exchanger := &fakeExchanger{
-		claims: &auth.IDTokenClaims{Email: "user@example.com", Nonce: "wrong-nonce"},
-	}
-	srv, sink := newTestServer(exchanger)
-	signer := secrets.NewStaticSigner("test-secret")
+func TestHandleCallback_Success_GroupFromClaims(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.CognitoGroupsClaims = true
+	srv, sessions, sink := newTestServerWithSessions(cfg, nil)
 
-	srv.sessions.Put(&auth.PendingSession{
-		SessionID: "sid-1",
-		Nonce:     "correct-nonce",
-		CID:       "1",
-		KID:       "1",
-		Status:    auth.SessionPending,
-		ExpiresAt: time.Now().Add(5 * time.Minute),
-	})
+	sid := "claims-success-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = "vpn-users"
 
-	body := mustJSON(auth.CallbackRequest{Code: "code", SessionID: "sid-1", Timestamp: time.Now().Unix()})
-	mac := signer.Sign(string(body))
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", []string{"vpn-users", "other"}, time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
 
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
-	req.Header.Set("X-Internal-Token", mac)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(sink.decisions) != 1 || sink.decisions[0].Type != auth.DecisionDeny {
-		t.Fatalf("expected DecisionDeny, got %v", sink.decisions)
-	}
-}
-
-func TestCallbackCNMismatch(t *testing.T) {
-	exchanger := &fakeExchanger{
-		claims: &auth.IDTokenClaims{Email: "other@example.com", Nonce: "nonce"},
-	}
-	srv, sink := newTestServer(exchanger)
-	signer := secrets.NewStaticSigner("test-secret")
-
-	srv.sessions.Put(&auth.PendingSession{
-		SessionID:    "sid-1",
-		Nonce:        "nonce",
-		CommonName:   "user@example.com",
-		CNCrossCheck: true,
-		CID:          "1",
-		KID:          "1",
-		Status:       auth.SessionPending,
-		ExpiresAt:    time.Now().Add(5 * time.Minute),
-	})
-
-	body := mustJSON(auth.CallbackRequest{Code: "code", SessionID: "sid-1", Timestamp: time.Now().Unix()})
-	mac := signer.Sign(string(body))
-
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
-	req.Header.Set("X-Internal-Token", mac)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", w.Code)
-	}
-	if len(sink.decisions) != 1 || sink.decisions[0].Type != auth.DecisionDeny {
-		t.Fatalf("expected DecisionDeny, got %v", sink.decisions)
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected client-auth decision, got %+v", sink.decisions)
 	}
 }
 
-func TestCallbackGroupCheckFailed(t *testing.T) {
-	exchanger := &fakeExchanger{
-		claims: &auth.IDTokenClaims{Email: "user@example.com", Nonce: "nonce", Groups: []string{"other-group"}},
-	}
-	srv, sink := newTestServer(exchanger)
-	signer := secrets.NewStaticSigner("test-secret")
-
-	srv.sessions.Put(&auth.PendingSession{
-		SessionID:     "sid-1",
-		Nonce:         "nonce",
-		CommonName:    "user@example.com",
-		RequiredGroup: "vpn-users",
-		CID:           "1",
-		KID:           "1",
-		Status:        auth.SessionPending,
-		ExpiresAt:     time.Now().Add(5 * time.Minute),
-	})
-
-	body := mustJSON(auth.CallbackRequest{Code: "code", SessionID: "sid-1", Timestamp: time.Now().Unix()})
-	mac := signer.Sign(string(body))
-
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
-	req.Header.Set("X-Internal-Token", mac)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", w.Code)
-	}
-	if len(sink.decisions) != 1 || sink.decisions[0].Type != auth.DecisionDeny {
-		t.Fatalf("expected DecisionDeny, got %v", sink.decisions)
-	}
-}
-
-func mustJSON(v any) []byte {
-	b, err := json.Marshal(v)
+func TestHandleCallback_Success_WithALBJWT(t *testing.T) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
-	return b
+
+	const albARN = "arn:aws:elasticloadbalancing:eu-west-1:123456789012:loadbalancer/app/test/abc"
+	cfg := config.Config{
+		AWSRegion: "eu-west-1",
+		ALBARN:    albARN,
+	}
+	identity := &fakeGroupsChecker{inGroup: true}
+	srv, sessions, sink := newTestServerWithSessions(cfg, identity)
+	srv.keyCache["test-kid"] = &privKey.PublicKey
+
+	sid := "alb-success-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = "vpn-users"
+
+	tokenStr := makeSignedJWT(t, privKey, "test-kid", albARN, "user@example.com", "sub123", time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", tokenStr)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected client-auth decision, got %+v", sink.decisions)
+	}
+}
+
+func TestHandleCallback_CNMismatch(t *testing.T) {
+	cfg := defaultCfg()
+	srv, sessions, sink := newTestServerWithSessions(cfg, nil)
+
+	sid := "cn-mismatch-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "cert-cn@example.com")
+	sess.CNCrossCheck = true
+
+	oidcJWT := makeUnsignedJWT("different@example.com", "sub123", nil, time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
+		t.Fatalf("expected client-deny, got %+v", sink.decisions)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleHealthz unit tests
+// ---------------------------------------------------------------------------
+
+func TestHandleHealthz_Connected(t *testing.T) {
+	sessions := auth.NewSessionStore()
+	signer := secrets.NewStaticSigner("test-secret")
+	sink := &captureSink{}
+	cfg := defaultCfg()
+	srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, nil, func() bool { return true })
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp healthzResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" {
+		t.Errorf("expected status ok, got %q", resp.Status)
+	}
+	if !resp.MgmtConnected {
+		t.Error("expected mgmt_connected true")
+	}
+}
+
+func TestHandleHealthz_Disconnected(t *testing.T) {
+	sessions := auth.NewSessionStore()
+	signer := secrets.NewStaticSigner("test-secret")
+	sink := &captureSink{}
+	cfg := defaultCfg()
+	srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, nil, func() bool { return false })
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp healthzResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "degraded" {
+		t.Errorf("expected status degraded, got %q", resp.Status)
+	}
+	if resp.MgmtConnected {
+		t.Error("expected mgmt_connected false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Property test: Healthz reflects socket state (subtask 5.5)
+// Validates: Requirements 6.2, 6.3
+// ---------------------------------------------------------------------------
+
+// TestHealthzReflectsSocketState is a property test verifying that GET /healthz
+// returns 200 iff mgmtConnected() is true at request time.
+//
+// Validates: Requirements 6.2, 6.3
+func TestHealthzReflectsSocketState(t *testing.T) {
+	cases := []struct {
+		connected      bool
+		wantStatus     int
+		wantStatusText string
+	}{
+		{connected: true, wantStatus: http.StatusOK, wantStatusText: "ok"},
+		{connected: false, wantStatus: http.StatusServiceUnavailable, wantStatusText: "degraded"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(fmt.Sprintf("connected=%v", tc.connected), func(t *testing.T) {
+			// Run many iterations to confirm the closure is evaluated at request time.
+			for i := 0; i < 50; i++ {
+				sessions := auth.NewSessionStore()
+				signer := secrets.NewStaticSigner("test-secret")
+				sink := &captureSink{}
+				cfg := defaultCfg()
+
+				connected := tc.connected
+				srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, nil, func() bool { return connected })
+
+				req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+				w := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(w, req)
+
+				if w.Code != tc.wantStatus {
+					t.Fatalf("iteration %d: connected=%v: expected %d, got %d",
+						i, tc.connected, tc.wantStatus, w.Code)
+				}
+
+				var resp healthzResponse
+				if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+					t.Fatalf("iteration %d: decode response: %v", i, err)
+				}
+				if resp.MgmtConnected != tc.connected {
+					t.Fatalf("iteration %d: mgmt_connected mismatch: got %v, want %v",
+						i, resp.MgmtConnected, tc.connected)
+				}
+				if resp.Status != tc.wantStatusText {
+					t.Fatalf("iteration %d: status mismatch: got %q, want %q",
+						i, resp.Status, tc.wantStatusText)
+				}
+			}
+		})
+	}
+}
+
+// TestHealthzReflectsSocketState_DynamicSwitch verifies that the healthz
+// response changes immediately when the mgmtConnected closure changes state.
+//
+// Validates: Requirements 6.2, 6.3
+func TestHealthzReflectsSocketState_DynamicSwitch(t *testing.T) {
+	sessions := auth.NewSessionStore()
+	signer := secrets.NewStaticSigner("test-secret")
+	sink := &captureSink{}
+	cfg := defaultCfg()
+
+	connected := true
+	srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, nil, func() bool { return connected })
+	handler := srv.Handler()
+
+	// Initially connected -> 200.
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 when connected, got %d", w.Code)
+	}
+
+	// Switch to disconnected -> 503.
+	connected = false
+	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when disconnected, got %d", w.Code)
+	}
+
+	// Switch back to connected -> 200.
+	connected = true
+	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after reconnect, got %d", w.Code)
+	}
 }

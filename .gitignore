@@ -23,6 +23,10 @@ go.work.sum
 /openvpn-auth-daemon
 /mgmt-mock
 /lambda-mock
+/alb-mock
+
+# PKI — generated offline, never committed
+pki/
 
 # Lab — generated files (certs, client config)
 lab/openvpn-data/

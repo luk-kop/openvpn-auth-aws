@@ -50,29 +50,34 @@ resource "aws_cognito_user_pool_domain" "this" {
   user_pool_id = aws_cognito_user_pool.this.id
 }
 
-# --- Cognito User Pool Client (public, PKCE) ---
+# --- Cognito User Pool Client (confidential, authorization code — required by ALB authenticate-cognito) ---
+
+locals {
+  all_callback_urls = compact(concat(
+    var.alb_callback_urls,
+    var.additional_callback_urls,
+  ))
+}
 
 resource "aws_cognito_user_pool_client" "this" {
   name         = "${var.project_name}-client"
   user_pool_id = aws_cognito_user_pool.this.id
 
-  # Public client — no client secret, uses PKCE
-  generate_secret = false
+  # Confidential client — ALB authenticate-cognito action requires a client secret
+  generate_secret = true
 
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_scopes                 = ["openid", "email"]
   supported_identity_providers         = ["COGNITO"]
 
-  callback_urls = compact(concat(
-    [var.lambda_redirect_uri],
-    var.additional_callback_urls,
-  ))
+  # At least one callback URL is required by Cognito
+  callback_urls = length(local.all_callback_urls) > 0 ? local.all_callback_urls : ["https://localhost/callback"]
+
   explicit_auth_flows = [
     "ALLOW_REFRESH_TOKEN_AUTH",
   ]
 
-  # Include groups in ID token
   token_validity_units {
     access_token  = "hours"
     id_token      = "hours"

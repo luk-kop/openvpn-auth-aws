@@ -1,51 +1,12 @@
 package secrets
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"fmt"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
-type Signer struct {
-	client    *secretsmanager.Client
-	secretARN string
-	secret    []byte
-}
-
-func NewSigner(cfg aws.Config, secretARN string) (*Signer, error) {
-	client := secretsmanager.NewFromConfig(cfg)
-
-	resp, err := client.GetSecretValue(context.Background(), &secretsmanager.GetSecretValueInput{
-		SecretId: aws.String(secretARN),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("get secret: %w", err)
-	}
-
-	return &Signer{
-		client:    client,
-		secretARN: secretARN,
-		secret:    []byte(*resp.SecretString),
-	}, nil
-}
-
-func (s *Signer) Sign(data string) string {
-	sum := hmac.New(sha256.New, s.secret)
-	sum.Write([]byte(data))
-	return base64.RawURLEncoding.EncodeToString(sum.Sum(nil))
-}
-
-func (s *Signer) Verify(data, mac string) bool {
-	expected := s.Sign(data)
-	return hmac.Equal([]byte(expected), []byte(mac))
-}
-
-// StaticSigner for testing
+// StaticSigner signs and verifies HMAC-SHA256 MACs using a static secret.
 type StaticSigner struct {
 	secret []byte
 }

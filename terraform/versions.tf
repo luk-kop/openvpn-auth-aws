@@ -10,8 +10,8 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.0"
     }
-    archive = {
-      source  = "hashicorp/archive"
+    cloudinit = {
+      source  = "hashicorp/cloudinit"
       version = "~> 2.0"
     }
   }

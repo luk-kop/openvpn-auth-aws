@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -79,7 +80,7 @@ func (c *Client) authenticate(passwordFile string) error {
 		return fmt.Errorf("set read deadline: %w", err)
 	}
 	buf := make([]byte, 15)
-	if _, err := c.conn.Read(buf); err != nil {
+	if _, err := io.ReadFull(c.conn, buf); err != nil {
 		return fmt.Errorf("read password prompt: %w", err)
 	}
 	if err := c.conn.SetReadDeadline(time.Time{}); err != nil {

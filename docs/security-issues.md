@@ -7,6 +7,10 @@
 | #1 | 🔴 High | Password bypass in handleConnect | ✅ FIXED |
 | #2 | 🔴 High | Missing HMAC verification for callback | ✅ FIXED |
 | #3 | 🟡 Medium | No rate limiting on CLIENT:CONNECT | ⚠️ OPEN |
+| #4 | 🔴 High | PKCE effectively disabled in WebAuth flow | ✅ FIXED (superseded in v2 — ALB handles PKCE) |
+| #5 | 🟡 Medium | JWKS cache never evicts rotated keys | ✅ FIXED (superseded in v2 — no JWKS cache, ALB keys fetched per-kid) |
+| #6 | 🟡 Medium | Unsafe stream read for mgmt socket auth | ✅ FIXED |
+| #7 | 🟡 Medium | Callback server missing timeouts and body limit | ✅ FIXED |
 
 ---
 
@@ -43,11 +47,80 @@ if pw := event.Env["password"]; pw != "" {
 
 **Impact:** Unauthorized VPN access if attacker can reach the callback endpoint.
 
+**Fix (v1):** Lambda `/callback` signed the request body with HMAC (`X-Internal-Token` header). Daemon verified HMAC before processing.
+
+**v2 status:** This issue is architecturally resolved. ALB `authenticate-cognito` action handles authentication. The daemon callback port is only reachable from the ALB security group (network isolation). ALB JWT `signer` field validation provides defense-in-depth against header spoofing.
+
+---
+
+### #4: PKCE effectively disabled in WebAuth flow ✅
+
+**Status:** FIXED (2026-03-14)
+
+**Problem:** The daemon computed `code_challenge` from `code_verifier` but discarded it (`_ = codeChallenge`). The auth URL sent to the client contained only `state`, so the Cognito authorization server was never given the challenge. When the daemon later exchanged the auth code with `code_verifier`, Cognito had nothing to verify it against.
+
+**Impact:** PKCE did not protect against authorization code interception. If an auth code leaked between browser, API Gateway, Lambda, and the callback handler, it could be replayed without the original `code_verifier`.
+
+**Why not in the URL:** OpenVPN CE clients have a 229-byte `INFOMSG` buffer limit (`alloc_buf_gc(256)` in `src/openvpn/push.c`, minus `>INFOMSG:` prefix). The WEB_AUTH URL with state blob already uses ~198 bytes. Adding `&code_challenge=<43 chars>&code_challenge_method=S256` (+73 bytes) would exceed the limit, causing the client to silently drop the URL.
+
+**Fix:** Daemon computes `code_challenge` at session creation and stores it in the `PendingSession`. A new `GET /challenge?sid=<session_id>` endpoint on the daemon's HTTP server allows Lambda `/auth` to fetch the challenge before redirecting to Cognito. The endpoint:
+
+- Requires `X-Internal-Token: HMAC(sid)` header (same auth model as `/callback`)
+- Only returns challenges for sessions in `PENDING` state
+- Returns `404` for unknown sessions, `409` for non-pending sessions
+
+Lambda `/auth` flow: verify HMAC on state → extract daemon IP → `GET /challenge` → build Cognito authorize URL with `code_challenge` and `code_challenge_method=S256` → 302 redirect.
+
+**v2 status:** This issue is architecturally resolved. ALB handles the full OIDC/PKCE flow internally — the daemon no longer performs token exchange or manages PKCE challenges.
+
+**Files changed (v1 fix):** `internal/auth/handler.go`, `internal/auth/types.go`, `internal/auth/sessions.go`, `internal/callback/server.go`
+
+---
+
+### #5: JWKS cache never evicts rotated keys ✅
+
+**Status:** FIXED (2026-03-14)
+
+**Problem:** `JWKSCache.refresh()` only added new keys to the map — it never removed keys absent from the JWKS response. If Cognito rotated signing keys (e.g., due to compromise), the old key remained trusted until process restart.
+
+**Impact:** Tokens signed by a revoked key would continue to validate as long as they were otherwise valid (correct issuer, audience, not expired).
+
+**Fix:** `refresh()` now builds a fresh key map from the JWKS response and atomically replaces the old map. Keys removed from Cognito's JWKS endpoint are immediately untrusted.
+
+**File changed:** `internal/cognito/jwks.go`
+
+---
+
+### #6: Unsafe stream read for mgmt socket auth ✅
+
+**Status:** FIXED (2026-03-14)
+
+**Problem:** Management socket authentication used `c.conn.Read(buf)` to read the 15-byte password prompt (`ENTER PASSWORD:`). On Unix sockets, `Read` may return fewer bytes than requested (short read). The returned byte count was discarded (`_`), so a short read would cause `string(buf) != "ENTER PASSWORD:"` to fail even when the socket was sending the correct prompt.
+
+**Impact:** Flaky daemon startup failures depending on how the kernel packetized the socket data.
+
+**Fix:** Replaced `c.conn.Read(buf)` with `io.ReadFull(c.conn, buf)`, which loops until all 15 bytes are received or an error occurs.
+
+**File changed:** `internal/mgmt/client.go`
+
+---
+
+### #7: Callback server missing timeouts and body limit ✅
+
+**Status:** FIXED (2026-03-14)
+
+**Problem:** The callback HTTP server had two robustness issues:
+
+1. `io.ReadAll(r.Body)` read the full request body with no size limit. A malicious or buggy client could send an arbitrarily large body, exhausting memory.
+2. `http.Server` was created without `ReadHeaderTimeout`, `ReadTimeout`, or `WriteTimeout`. Slow clients could hold connections indefinitely.
+
+**Impact:** DoS risk — resource exhaustion via large request bodies or slow connections.
+
 **Fix:**
-- Lambda `/callback` signs the request body with HMAC and sends it in `X-Internal-Token` header
-- Daemon verifies HMAC before processing the callback
-- Timestamp check (±30s) prevents replay attacks
-- See [lambda-auth-token.md](lambda-auth-token.md) for implementation details
+- Request body wrapped with `http.MaxBytesReader(w, r.Body, 64*1024)` (64 KB limit)
+- HTTP server configured with `ReadHeaderTimeout: 5s`, `ReadTimeout: 10s`, `WriteTimeout: 10s`
+
+**File changed:** `internal/callback/server.go`
 
 ---
 

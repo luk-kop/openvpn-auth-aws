@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -15,14 +14,22 @@ import (
 	"openvpn-auth-aws/internal/mgmt"
 )
 
+// MaxWebAuthURLLen is the maximum URL length that OpenVPN CE clients can
+// receive via the INFOMSG management interface buffer. The client allocates
+// 256 bytes (alloc_buf_gc(256) in src/openvpn/push.c), of which ~9 bytes
+// are consumed by the "OPEN_URL:" prefix, leaving ~247 bytes for the URL.
+// However, the full INFOMSG line includes "WEB_AUTH::" (10 bytes) wrapping,
+// so the practical limit for the URL itself is ~229 bytes. If exceeded, the
+// client silently drops the message and the browser never opens.
+const MaxWebAuthURLLen = 229
+
 type Handler struct {
-	cfg        config.Config
-	sessions   *SessionStore
-	identity   IdentityChecker
-	signer     StateSigner
-	metrics    Metrics
-	cache      *ReauthCache
-	instanceIP string
+	cfg      config.Config
+	sessions *SessionStore
+	identity IdentityChecker
+	signer   StateSigner
+	metrics  Metrics
+	cache    *ReauthCache
 
 	mu            sync.Mutex
 	inFlight      map[string]context.CancelFunc // CID → cancel
@@ -40,11 +47,6 @@ func NewHandler(cfg config.Config, sessions *SessionStore, identity IdentityChec
 		cache = NewReauthCache(cfg.RenegInterval + 10*time.Minute)
 	}
 
-	instanceIP := cfg.InstanceIP
-	if instanceIP == "" {
-		instanceIP = "127.0.0.1"
-	}
-
 	return &Handler{
 		cfg:           cfg,
 		sessions:      sessions,
@@ -52,7 +54,6 @@ func NewHandler(cfg config.Config, sessions *SessionStore, identity IdentityChec
 		signer:        signer,
 		metrics:       metrics,
 		cache:         cache,
-		instanceIP:    instanceIP,
 		inFlight:      make(map[string]context.CancelFunc),
 		cidToSID:      make(map[string]string),
 		cidToCN:       make(map[string]string),
@@ -130,24 +131,10 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "internal error"})
 		return
 	}
-	codeVerifier, err := generateRandomToken(32)
-	if err != nil {
-		h.metrics.AuthDenied("internal_error")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "internal error"})
-		return
-	}
-	nonce, err := generateRandomToken(16)
-	if err != nil {
-		h.metrics.AuthDenied("internal_error")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "internal error"})
-		return
-	}
 
 	now := time.Now().UTC()
 	session := &PendingSession{
 		SessionID:     sessionID,
-		CodeVerifier:  codeVerifier,
-		Nonce:         nonce,
 		CommonName:    event.CommonName(),
 		CID:           event.CID,
 		KID:           event.KID,
@@ -160,20 +147,25 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 	}
 	h.sessions.Put(session)
 
-	// PKCE S256: code_challenge = base64url(sha256(code_verifier))
-	ccHash := sha256.Sum256([]byte(codeVerifier))
-	codeChallenge := base64.RawURLEncoding.EncodeToString(ccHash[:])
-
-	callbackAddr := fmt.Sprintf("%s:%d", h.instanceIP, h.cfg.CallbackPort)
 	stateBlob := EncodeState(StatePayload{
 		SID: sessionID,
-		IP:  callbackAddr,
 		IAT: now.Unix(),
 		EXP: now.Add(h.cfg.AuthTimeout).Unix(),
 	}, h.signer)
 
-	authURL := fmt.Sprintf("%s/auth?state=%s", strings.TrimRight(h.cfg.APIGatewayURL, "/"), stateBlob)
-	_ = codeChallenge // TODO: re-enable PKCE once WEB_AUTH delivery is confirmed
+	authURL := fmt.Sprintf("%s?state=%s", strings.TrimRight(h.cfg.CallbackURL, "/"), stateBlob)
+
+	// OpenVPN CE clients silently drop WEB_AUTH URLs exceeding the INFOMSG
+	// buffer limit — fail loudly here instead.
+	webAuthLen := len("OPEN_URL:") + len(authURL)
+	if webAuthLen > MaxWebAuthURLLen {
+		slog.Error("WEB_AUTH URL exceeds OpenVPN CE INFOMSG limit",
+			"url_len", webAuthLen, "max", MaxWebAuthURLLen,
+			"cid", event.CID, "cn", event.CommonName())
+		h.metrics.AuthDenied("url_too_long")
+		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "auth URL too long"})
+		return
+	}
 
 	slog.Info("connect pending auth", "cid", event.CID, "cn", event.CommonName(), "timeout", h.cfg.AuthTimeout)
 	h.metrics.AuthAttempt("")

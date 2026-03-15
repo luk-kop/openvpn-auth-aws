@@ -18,23 +18,23 @@ variable "subnet_id" {
   type        = string
 }
 
-variable "daemon_callback_port" {
-  description = "Port the daemon listens on for Lambda callbacks"
-  type        = number
-}
-
 variable "cognito_user_pool_arn" {
   description = "Cognito User Pool ARN (for daemon IAM policy)"
   type        = string
 }
 
-variable "hmac_secret_arn" {
-  description = "Secrets Manager ARN for HMAC secret"
+variable "alb_arn" {
+  description = "ALB ARN passed to daemon --alb-arn for JWT signer validation"
   type        = string
 }
 
-variable "daemon_flags" {
-  description = "Pre-built CLI flags string for openvpn-auth-daemon"
+variable "callback_url_udp" {
+  description = "Full callback URL for the UDP daemon (e.g. https://vpn-auth.example.com/callback/01/udp)"
+  type        = string
+}
+
+variable "callback_url_tcp" {
+  description = "Full callback URL for the TCP daemon (e.g. https://vpn-auth.example.com/callback/01/tcp)"
   type        = string
 }
 
@@ -70,30 +70,35 @@ variable "ec2_root_volume_size" {
   default     = 20
 }
 
-variable "ec2_create_eip" {
-  description = "Create and associate an Elastic IP"
-  type        = bool
-  default     = true
+variable "eip_allocation_id" {
+  description = "Pre-allocated Elastic IP allocation ID to associate after health checks pass"
+  type        = string
 }
 
 # --- OpenVPN ---
 
-variable "openvpn_port" {
-  description = "OpenVPN listening port"
+variable "openvpn_udp_port" {
+  description = "OpenVPN UDP listening port"
   type        = number
   default     = 1194
 }
 
-variable "openvpn_protocol" {
-  description = "OpenVPN protocol (udp or tcp)"
-  type        = string
-  default     = "udp"
+variable "openvpn_tcp_port" {
+  description = "OpenVPN TCP listening port"
+  type        = number
+  default     = 1195
 }
 
-variable "openvpn_client_cidr" {
-  description = "VPN tunnel client CIDR"
+variable "openvpn_udp_client_cidr" {
+  description = "VPN tunnel client CIDR for the UDP server"
   type        = string
   default     = "10.8.0.0/24"
+}
+
+variable "openvpn_tcp_client_cidr" {
+  description = "VPN tunnel client CIDR for the TCP server"
+  type        = string
+  default     = "10.8.1.0/24"
 }
 
 variable "hand_window" {
@@ -102,3 +107,30 @@ variable "hand_window" {
   default     = 300
 }
 
+variable "cognito_user_pool_id" {
+  description = "Cognito User Pool ID passed to daemon --cognito-user-pool-id"
+  type        = string
+}
+
+variable "required_group" {
+  description = "Cognito group required for VPN access, passed to daemon --required-group"
+  type        = string
+  default     = ""
+}
+
+variable "hmac_secret" {
+  description = "HMAC secret for state blob signing, passed to daemon via VPN_AUTH_HMAC_SECRET"
+  type        = string
+  sensitive   = true
+}
+
+variable "pki_secret_arns" {
+  description = "ARNs of PKI secrets in Secrets Manager (for IAM policy scoping)"
+  type        = list(string)
+}
+
+variable "associate_public_ip" {
+  description = "Assign a temporary public IP at launch for cloud-init internet access. The EIP replaces this IP once ALB health checks pass. Set to false only if using VPC Endpoints and an apt proxy."
+  type        = bool
+  default     = true
+}

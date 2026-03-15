@@ -24,12 +24,13 @@ variable "vpn_group_name" {
 }
 
 variable "additional_callback_urls" {
-  description = "Additional OAuth2 callback URLs beyond the API Gateway default"
+  description = "Additional OAuth2 callback URLs beyond the ALB default"
   type        = list(string)
   default     = []
 }
 
-variable "lambda_redirect_uri" {
-  description = "Primary OAuth2 redirect URI (API Gateway callback URL)"
-  type        = string
+variable "alb_callback_urls" {
+  description = "OAuth2 callback URLs for the ALB (e.g. https://vpn-auth.example.com/oauth2/idpresponse)"
+  type        = list(string)
+  default     = []
 }

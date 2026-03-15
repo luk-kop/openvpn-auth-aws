@@ -7,7 +7,7 @@
 
 ## Key Dependencies
 
-- `github.com/aws/aws-sdk-go-v2` — AWS SDK (Cognito, Secrets Manager, EC2 IMDS)
+- `github.com/aws/aws-sdk-go-v2` — AWS SDK (Cognito, EC2 IMDS)
 - `github.com/golang-jwt/jwt/v5` — JWT validation
 - Standard library only for HTTP, logging (`log/slog`), crypto, and flag parsing
 
@@ -37,11 +37,11 @@ go test -v -short ./internal/auth/...   # test a single package
 go vet ./...                            # static analysis
 golangci-lint run                       # linter
 
-make run-daemon         # start daemon with --use-local-mocks
-make run-lambda-mock    # OAuth2 mock on :8080
+make run-daemon         # start daemon (no --cognito-user-pool-id = local dev mode)
+make run-alb-mock       # ALB + Cognito authenticate action simulator on :8080
 make run-mgmt-mock      # OpenVPN management socket simulator
 
-make stack-up           # full Docker stack (OpenVPN + daemon + lambda-mock)
+make stack-up           # full Docker stack (OpenVPN + daemon + alb-mock)
 make stack-down         # stop Docker stack
 make stack-rebuild      # rebuild images and restart
 ```
@@ -52,4 +52,4 @@ Configured in `.pre-commit-config.yaml`: `golangci-lint run`, `go vet ./...`, `g
 
 ## Build Outputs
 
-Three binaries built to the repo root: `openvpn-auth-daemon`, `mgmt-mock`, `lambda-mock`.
+Three binaries built to the repo root: `openvpn-auth-daemon`, `mgmt-mock`, `alb-mock`.
