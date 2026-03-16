@@ -66,7 +66,7 @@ func main() {
 	// live socket state without coupling the callback package to the app package.
 	daemon := app.New(cfg, handler, nil, m)
 	daemonSink := app.DaemonSink{CmdCh: daemon.CmdCh()}
-	callbackSrv := callback.NewServer(
+	callbackSrv, err := callback.NewServer(
 		sessions,
 		signer,
 		daemonSink,
@@ -75,6 +75,10 @@ func main() {
 		identity,
 		daemon.SocketConnected,
 	)
+	if err != nil {
+		slog.Error("callback server init failed", "error", err)
+		os.Exit(1)
+	}
 	daemon.SetCallbackServer(callbackSrv)
 
 	if err := daemon.Run(ctx); err != nil {

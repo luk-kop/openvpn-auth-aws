@@ -127,16 +127,18 @@ flowchart TD
 
 ### Step-by-step
 
-| # | Check | What it protects against | Failure |
-|---|-------|--------------------------|---------|
-| 1 | **State HMAC** — `DecodeState` verifies the HMAC-SHA256 signature on the `state` query parameter, checks `iat`/`exp` | CSRF, forged callbacks, replay after expiry | 400 |
-| 2 | **Session lookup** — `TryProcess` atomically transitions session from `PENDING` → `PROCESSING` | Replay (double callback), race conditions | 404 / 409 |
-| 3 | **OIDC header** — checks `x-amzn-oidc-data` header is present | Direct access bypassing ALB | 403 + deny |
-| 4 | **JWT header parse** — extracts `kid` and `signer` from the JWT header segment | Malformed tokens | 403 + deny |
-| 5 | **ALB public key fetch** — fetches ECDSA public key from `https://public-keys.auth.elb.{region}.amazonaws.com/{kid}`, cached in memory | N/A (infrastructure step) | 503 (retryable) |
-| 6 | **JWT signature + claims** — verifies ES256 signature with the ALB public key, checks `signer` matches `--alb-arn`, requires valid `exp` | Token forgery, ALB spoofing, expired tokens | 403 + deny |
-| 7 | **CN cross-check** — compares JWT `email` claim with the client certificate's Common Name (case-insensitive) | User A authenticating with User B's browser session | 403 + deny |
-| 8 | **Group membership** — checks if the user belongs to the required Cognito group (via JWT `cognito:groups` claim or Cognito Admin API) | Unauthorized access by authenticated but unprivileged users | 403 + deny |
+| # | Check | What it protects against | Failure | Metric reason |
+|---|-------|--------------------------|---------|---------------|
+| 1 | **State HMAC** — `DecodeState` verifies the HMAC-SHA256 signature on the `state` query parameter, checks `iat`/`exp`. **Note:** if state is invalid, the daemon cannot extract the session ID, so it cannot send `client-deny` — the VPN client waits until `--auth-timeout` expires. This is a UX limitation, not a security issue. | CSRF, forged callbacks, replay after expiry | 400 | `missing_state` / `invalid_state` |
+| 2 | **Session lookup** — `TryProcess` atomically transitions session from `PENDING` → `PROCESSING` | Replay (double callback), race conditions | 404 / 409 | `session_not_found` / `session_not_pending` |
+| 3 | **OIDC header** — checks `x-amzn-oidc-data` header is present | Direct access bypassing ALB | 403 + deny | `missing_oidc_header` |
+| 4 | **JWT header parse** — extracts `kid` and `signer` from the JWT header segment | Malformed tokens | 403 + deny | `invalid_jwt_header` |
+| 5 | **ALB public key fetch** — fetches ECDSA public key from `https://public-keys.auth.elb.{region}.amazonaws.com/{kid}`, cached in memory | N/A (infrastructure step) | 503 (retryable) | `public_key_fetch_failed` |
+| 6 | **JWT signature + claims** — verifies ES256 signature with the ALB public key, checks `signer` matches `--alb-arn`, requires valid `exp` | Token forgery, ALB spoofing, expired tokens | 403 + deny | `jwt_validation_failed` / `invalid_jwt_claims` |
+| 7 | **CN cross-check** — compares JWT `email` claim with the client certificate's Common Name (case-insensitive) | User A authenticating with User B's browser session | 403 + deny | `cn_mismatch` |
+| 8 | **Group membership** — checks if the user belongs to the required Cognito group (via JWT `cognito:groups` claim or Cognito Admin API) | Unauthorized access by authenticated but unprivileged users | 403 + deny | `group_check_error` / `group_denied` |
+
+All rejection reasons are emitted as `CallbackRejected` EMF metric with a `Reason` dimension. See [EMF Metrics](configuration.md#emf-metrics) for the full list.
 
 ### Production vs dev mode
 
@@ -149,6 +151,13 @@ In dev mode (`--alb-arn` is absent), JWT signature validation is skipped — cla
 The callback port is only reachable from the ALB security group (no public ingress). JWT validation provides defense-in-depth — even if network isolation were compromised, an attacker would need a valid JWT signed by the correct ALB.
 
 ## ALB JWT Validation
+
+Before the daemon sees a normal callback request, the ALB's `authenticate-cognito` action performs the browser login flow with Cognito and stores its own session in `AWSELBAuthSessionCookie-*` cookies. In Terraform this repo configures:
+
+- `scope = "openid email"` so Cognito returns the user's `email` claim and ALB can include it in `x-amzn-oidc-data`
+- `session_timeout` via `alb_auth_session_timeout_hours` (default `1h`) so the ALB browser session does not outlive the short-lived daemon `state` by too much
+
+These ALB cookies are separate from the daemon's `state` parameter. A browser may still have a valid ALB auth session while the callback `state` has already expired; in that case the request reaches the daemon and is correctly rejected as `invalid_state`.
 
 ALB signs the `x-amzn-oidc-data` header with ES256 (ECDSA P-256 + SHA-256). On first use of each `kid`, the daemon fetches the public key from:
 

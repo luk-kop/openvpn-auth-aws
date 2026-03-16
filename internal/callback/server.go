@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -54,6 +55,7 @@ type Server struct {
 	cfg      config.Config
 	metrics  auth.Metrics
 	identity GroupsChecker
+	tmpl     *template.Template
 
 	// v2 fields
 	albARN        string
@@ -76,7 +78,11 @@ func NewServer(
 	metrics auth.Metrics,
 	identity GroupsChecker,
 	mgmtConnected func() bool,
-) *Server {
+) (*Server, error) {
+	tmpl, err := loadTemplates(cfg.TemplatesDir)
+	if err != nil {
+		return nil, fmt.Errorf("callback server: %w", err)
+	}
 	return &Server{
 		sessions:      sessions,
 		signer:        signer,
@@ -84,12 +90,13 @@ func NewServer(
 		cfg:           cfg,
 		metrics:       metrics,
 		identity:      identity,
+		tmpl:          tmpl,
 		albARN:        cfg.ALBARN,
 		awsRegion:     cfg.AWSRegion,
 		keyCache:      make(map[string]*ecdsa.PublicKey),
 		mgmtConnected: mgmtConnected,
 		startTime:     time.Now(),
-	}
+	}, nil
 }
 
 // Handler returns the HTTP mux for the callback server.
@@ -108,14 +115,16 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Step 1: Extract and verify state blob.
 	stateParam := r.URL.Query().Get("state")
 	if stateParam == "" {
-		http.Error(w, "missing state", http.StatusBadRequest)
+		s.metrics.CallbackRejected("missing_state")
+		s.renderError(w, http.StatusBadRequest, "Session Error", "Authentication state is missing or invalid.")
 		return
 	}
 
 	payload, err := auth.DecodeState(stateParam, s.signer)
 	if err != nil {
-		slog.Warn("callback: invalid state", "error", err)
-		http.Error(w, "invalid or expired state", http.StatusBadRequest)
+		slog.Info("callback: invalid state", "error", err)
+		s.metrics.CallbackRejected("invalid_state")
+		s.renderError(w, http.StatusBadRequest, "Session Error", "Authentication state is missing or invalid.")
 		return
 	}
 
@@ -124,9 +133,13 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "not found") {
-			http.Error(w, "session not found", http.StatusNotFound)
+			slog.Info("callback: session not found", "sid", payload.SID)
+			s.metrics.CallbackRejected("session_not_found")
+			s.renderError(w, http.StatusNotFound, "Session Expired", "Your session has expired. Please try connecting again.")
 		} else {
-			http.Error(w, "session not pending", http.StatusConflict)
+			slog.Info("callback: session not pending", "sid", payload.SID)
+			s.metrics.CallbackRejected("session_not_pending")
+			s.renderError(w, http.StatusConflict, "Session Error", "This session has already been processed.")
 		}
 		return
 	}
@@ -136,7 +149,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if oidcData == "" {
 		slog.Warn("callback: missing x-amzn-oidc-data header", "sid", sess.SessionID)
 		s.denySession(sess, "missing oidc header")
-		http.Error(w, "missing x-amzn-oidc-data header", http.StatusForbidden)
+		s.metrics.CallbackRejected("missing_oidc_header")
+		s.renderError(w, http.StatusForbidden, "Authentication Failed", "Identity verification failed.")
 		return
 	}
 
@@ -145,7 +159,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Warn("callback: failed to parse JWT header", "sid", sess.SessionID, "error", err)
 		s.denySession(sess, "invalid jwt header")
-		http.Error(w, "invalid jwt header", http.StatusForbidden)
+		s.metrics.CallbackRejected("invalid_jwt_header")
+		s.renderError(w, http.StatusForbidden, "Authentication Failed", "Identity verification failed.")
 		return
 	}
 
@@ -159,7 +174,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			// Retryable failure: reset to pending so ALB can retry.
 			// TryProcess moved it to processing, so we reset it back.
 			s.sessions.MarkPending(sess.SessionID)
-			http.Error(w, "failed to fetch public key", http.StatusServiceUnavailable)
+			s.metrics.CallbackRejected("public_key_fetch_failed")
+			s.renderError(w, http.StatusServiceUnavailable, "Service Unavailable", "Please try again in a moment.")
 			return
 		}
 
@@ -168,7 +184,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("callback: ALB JWT validation failed",
 				"sid", sess.SessionID, "error", err)
 			s.denySession(sess, "jwt validation failed")
-			http.Error(w, "jwt validation failed", http.StatusForbidden)
+			s.metrics.CallbackRejected("jwt_validation_failed")
+			s.renderError(w, http.StatusForbidden, "Authentication Failed", "Identity verification failed.")
 			return
 		}
 		claims.ALBClaims = baseClaims
@@ -182,7 +199,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("callback: failed to parse JWT claims (dev mode)",
 				"sid", sess.SessionID, "error", parseErr)
 			s.denySession(sess, "invalid jwt claims")
-			http.Error(w, "invalid jwt claims", http.StatusForbidden)
+			s.metrics.CallbackRejected("invalid_jwt_claims")
+			s.renderError(w, http.StatusForbidden, "Authentication Failed", "Identity verification failed.")
 			return
 		}
 		claims.ALBClaims = baseClaims
@@ -197,7 +215,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 				"cn", sess.CommonName,
 				"email", claims.Email)
 			s.denySession(sess, "cn mismatch")
-			http.Error(w, "cn mismatch", http.StatusForbidden)
+			s.metrics.CallbackRejected("cn_mismatch")
+			s.renderError(w, http.StatusForbidden, "Certificate Mismatch", "Your certificate CN does not match your identity.")
 			return
 		}
 	}
@@ -209,7 +228,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			slog.Error("callback: group check error",
 				"sid", sess.SessionID, "error", err)
 			s.denySession(sess, "group check error")
-			http.Error(w, "group check error", http.StatusForbidden)
+			s.metrics.CallbackRejected("group_check_error")
+			s.renderError(w, http.StatusForbidden, "Authorization Error", "Authorization could not be verified. Please try again.")
 			return
 		}
 		if !inGroup {
@@ -218,7 +238,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 				"group", sess.RequiredGroup,
 				"email", claims.Email)
 			s.denySession(sess, "not in required group")
-			http.Error(w, "not in required group", http.StatusForbidden)
+			s.metrics.CallbackRejected("group_denied")
+			s.renderError(w, http.StatusForbidden, "Access Denied", "You are not a member of the required group.")
 			return
 		}
 	}
@@ -232,8 +253,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	})
 	s.metrics.AuthSuccess()
 	slog.Info("callback: auth success", "sid", sess.SessionID, "email", claims.Email)
-	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintln(w, "authenticated")
+	s.renderSuccess(w, claims.Email)
 }
 
 // handleHealthz returns the daemon health status for ALB target group health checks.

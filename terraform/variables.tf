@@ -133,6 +133,17 @@ variable "hand_window" {
   default     = 300
 }
 
+variable "alb_auth_session_timeout_hours" {
+  description = "ALB authenticate-cognito session timeout in hours."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.alb_auth_session_timeout_hours > 0
+    error_message = "alb_auth_session_timeout_hours must be greater than 0."
+  }
+}
+
 # --- EC2 ---
 
 variable "ec2_ami_id" {

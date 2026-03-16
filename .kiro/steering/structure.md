@@ -9,7 +9,7 @@ openvpn-auth-aws/
 ├── internal/
 │   ├── app/        # Daemon lifecycle, event loop, management socket reconnection
 │   ├── auth/       # Core auth orchestration, session store, state blob signing
-│   ├── callback/   # HTTP server for GET /callback and GET /healthz
+│   ├── callback/   # HTTP server for GET /callback and GET /healthz, HTML templates
 │   ├── cognito/    # ALB public key fetching, JWKS validation, user group checks
 │   ├── config/     # CLI flags + VPN_AUTH_* env vars, validation
 │   ├── metrics/    # CloudWatch EMF metrics
@@ -26,6 +26,8 @@ openvpn-auth-aws/
 - `internal/auth/sessions.go` — in-memory session store with TTL reaper
 - `internal/auth/state.go` — HMAC-signed state blob encode/decode (`StatePayload`: `SID`, `IAT`, `EXP`)
 - `internal/callback/server.go` — `GET /callback` (ALB JWT validation, group check, session resolution) and `GET /healthz`
+- `internal/callback/render.go` — HTML template loading (`//go:embed`), rendering with buffer-first pattern, plain text fallback
+- `internal/callback/templates/` — embedded HTML templates (`success.html`, `error.html`) with inline CSS and dark mode
 - `internal/cognito/albkeys.go` — fetches ALB EC public keys from `public-keys.auth.elb.{region}.amazonaws.com`
 - `internal/app/daemon.go` — top-level daemon wiring, reconnect loop, graceful shutdown
 - `internal/config/config.go` — single `Config` struct, all flags and env vars

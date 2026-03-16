@@ -25,6 +25,12 @@ The instance launches without a public IP by default — the EIP is assigned onl
 
 > **Note:** Even with all VPC Endpoints, cloud-init still needs internet access to download AWS CLI v2 (`awscli.amazonaws.com`) and install packages from external apt repos (Ubuntu archive, OpenVPN repo). This can be solved by configuring a forward proxy (for curl and apt via `Acquire::http::Proxy`), using a custom AMI with all dependencies pre-installed, or simply setting `ec2_associate_public_ip = true`.
 
+## ALB auth session
+
+The ALB `authenticate-cognito` action stores browser login state in `AWSELBAuthSessionCookie-*` cookies. This repo configures the ALB OAuth scope as `openid email` so the `email` claim is available in the `x-amzn-oidc-data` header forwarded to the daemon.
+
+The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaults to `1` hour. This is intentionally much shorter than the AWS default (`7` days) so stale callback URLs stop reaching the daemon through an old ALB browser session sooner. This timeout is separate from the daemon's own `state` lifetime, which is controlled by `--auth-timeout`.
+
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
@@ -39,8 +45,8 @@ The instance launches without a public IP by default — the EIP is assigned onl
 
 | Name | Version |
 |------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.0 |
-| <a name="provider_random"></a> [random](#provider\_random) | ~> 3.0 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.36.0 |
+| <a name="provider_random"></a> [random](#provider\_random) | 3.8.1 |
 
 ## Modules
 
@@ -75,6 +81,7 @@ The instance launches without a public IP by default — the EIP is assigned onl
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
+| <a name="input_alb_auth_session_timeout_hours"></a> [alb\_auth\_session\_timeout\_hours](#input\_alb\_auth\_session\_timeout\_hours) | ALB authenticate-cognito session timeout in hours. | `number` | `1` | no |
 | <a name="input_alb_domain_name"></a> [alb\_domain\_name](#input\_alb\_domain\_name) | Domain name for the ALB certificate (e.g. vpn-auth.example.com). Required when deploy\_compute = true. | `string` | `""` | no |
 | <a name="input_alb_subnet_ids"></a> [alb\_subnet\_ids](#input\_alb\_subnet\_ids) | Public subnet IDs for the ALB (minimum 2 AZs). Required when deploy\_compute = true. | `list(string)` | `[]` | no |
 | <a name="input_aws_region"></a> [aws\_region](#input\_aws\_region) | AWS region | `string` | `"eu-west-1"` | no |

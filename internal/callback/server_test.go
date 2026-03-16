@@ -8,8 +8,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,17 +36,22 @@ func (c *captureSink) Send(d auth.Decision) {
 	c.decisions = append(c.decisions, d)
 }
 
-type fakeMetrics struct{}
+type fakeMetrics struct {
+	rejectedReasons []string
+}
 
-func (fakeMetrics) Heartbeat(bool, int)       {}
-func (fakeMetrics) AuthAttempt(string)        {}
-func (fakeMetrics) AuthSuccess()              {}
-func (fakeMetrics) AuthDenied(string)         {}
-func (fakeMetrics) ReauthSuccess()            {}
-func (fakeMetrics) ReauthDenied(string)       {}
-func (fakeMetrics) ReauthCacheHit()           {}
-func (fakeMetrics) CallbackReceived()         {}
-func (fakeMetrics) TokenExchangeError(string) {}
+func (m *fakeMetrics) Heartbeat(bool, int)       {}
+func (m *fakeMetrics) AuthAttempt(string)        {}
+func (m *fakeMetrics) AuthSuccess()              {}
+func (m *fakeMetrics) AuthDenied(string)         {}
+func (m *fakeMetrics) ReauthSuccess()            {}
+func (m *fakeMetrics) ReauthDenied(string)       {}
+func (m *fakeMetrics) ReauthCacheHit()           {}
+func (m *fakeMetrics) CallbackReceived()         {}
+func (m *fakeMetrics) CallbackRejected(reason string) {
+	m.rejectedReasons = append(m.rejectedReasons, reason)
+}
+func (m *fakeMetrics) TokenExchangeError(string) {}
 
 // fakeGroupsChecker implements GroupsChecker for tests.
 type fakeGroupsChecker struct {
@@ -61,33 +69,43 @@ func (f *fakeGroupsChecker) CheckUser(_ context.Context, _, _ string, _ bool) (a
 
 // newTestServer builds a Server with sensible defaults for unit tests.
 // albARN is empty by default (dev mode — skip JWT signature validation).
-func newTestServer(cfg config.Config, identity GroupsChecker) (*Server, *captureSink) {
+func newTestServer(cfg config.Config, identity GroupsChecker) (*Server, *captureSink, *fakeMetrics) {
 	sessions := auth.NewSessionStore()
 	signer := secrets.NewStaticSigner("test-secret")
 	sink := &captureSink{}
-	srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, identity, func() bool { return true })
-	return srv, sink
+	m := &fakeMetrics{}
+	srv, err := NewServer(sessions, signer, sink, cfg, m, identity, func() bool { return true })
+	if err != nil {
+		panic("newTestServer: " + err.Error())
+	}
+	return srv, sink, m
 }
 
 // newTestServerWithSessions builds a Server and returns the session store too.
-func newTestServerWithSessions(cfg config.Config, identity GroupsChecker) (*Server, *auth.SessionStore, *captureSink) {
+func newTestServerWithSessions(cfg config.Config, identity GroupsChecker) (*Server, *auth.SessionStore, *captureSink, *fakeMetrics) {
 	sessions := auth.NewSessionStore()
 	signer := secrets.NewStaticSigner("test-secret")
 	sink := &captureSink{}
+	m := &fakeMetrics{}
+	tmpl, err := loadTemplates("")
+	if err != nil {
+		panic("newTestServerWithSessions: " + err.Error())
+	}
 	srv := &Server{
 		sessions:      sessions,
 		signer:        signer,
 		sink:          sink,
 		cfg:           cfg,
-		metrics:       fakeMetrics{},
+		metrics:       m,
 		identity:      identity,
+		tmpl:          tmpl,
 		albARN:        cfg.ALBARN,
 		awsRegion:     cfg.AWSRegion,
 		keyCache:      make(map[string]*ecdsa.PublicKey),
 		mgmtConnected: func() bool { return true },
 		startTime:     time.Now(),
 	}
-	return srv, sessions, sink
+	return srv, sessions, sink, m
 }
 
 // validStateParam creates a valid HMAC-signed state blob for the given session ID.
@@ -177,17 +195,19 @@ func defaultCfg() config.Config {
 // ---------------------------------------------------------------------------
 
 func TestHandleCallback_MissingState(t *testing.T) {
-	srv, _ := newTestServer(defaultCfg(), nil)
+	srv, _, m := newTestServer(defaultCfg(), nil)
 	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
+	assertHTMLResponse(t, w, "Session Error")
+	assertRejectedReason(t, m, "missing_state")
 }
 
 func TestHandleCallback_InvalidStateHMAC(t *testing.T) {
-	srv, _ := newTestServer(defaultCfg(), nil)
+	srv, _, m := newTestServer(defaultCfg(), nil)
 	valid := validStateParam(t, "some-sid")
 	parts := strings.SplitN(valid, ".", 2)
 	tampered := parts[0] + ".AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -198,10 +218,12 @@ func TestHandleCallback_InvalidStateHMAC(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
+	assertHTMLResponse(t, w, "Session Error")
+	assertRejectedReason(t, m, "invalid_state")
 }
 
 func TestHandleCallback_ExpiredState(t *testing.T) {
-	srv, _ := newTestServer(defaultCfg(), nil)
+	srv, _, m := newTestServer(defaultCfg(), nil)
 	state := expiredStateParam(t, "some-sid")
 
 	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
@@ -210,10 +232,12 @@ func TestHandleCallback_ExpiredState(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
+	assertHTMLResponse(t, w, "Session Error")
+	assertRejectedReason(t, m, "invalid_state")
 }
 
 func TestHandleCallback_SessionNotFound(t *testing.T) {
-	srv, _, _ := newTestServerWithSessions(defaultCfg(), nil)
+	srv, _, _, m := newTestServerWithSessions(defaultCfg(), nil)
 	state := validStateParam(t, "nonexistent-sid")
 
 	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
@@ -222,10 +246,12 @@ func TestHandleCallback_SessionNotFound(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
 	}
+	assertHTMLResponse(t, w, "Session Expired")
+	assertRejectedReason(t, m, "session_not_found")
 }
 
 func TestHandleCallback_SessionNotPending(t *testing.T) {
-	srv, sessions, _ := newTestServerWithSessions(defaultCfg(), nil)
+	srv, sessions, _, m := newTestServerWithSessions(defaultCfg(), nil)
 	sid := "already-processing"
 	addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
 	_, _ = sessions.TryProcess(sid)
@@ -237,6 +263,8 @@ func TestHandleCallback_SessionNotPending(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
 	}
+	assertHTMLResponse(t, w, "Session Error")
+	assertRejectedReason(t, m, "session_not_pending")
 }
 
 func TestHandleCallback_ALBJWTValidationFailure(t *testing.T) {
@@ -255,7 +283,7 @@ func TestHandleCallback_ALBJWTValidationFailure(t *testing.T) {
 		ALBARN:    albARN,
 	}
 
-	srv, sessions, sink := newTestServerWithSessions(cfg, nil)
+	srv, sessions, sink, m := newTestServerWithSessions(cfg, nil)
 	// Cache the WRONG public key so signature verification fails.
 	srv.keyCache["test-kid"] = &wrongKey.PublicKey
 
@@ -276,12 +304,14 @@ func TestHandleCallback_ALBJWTValidationFailure(t *testing.T) {
 	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
 		t.Fatalf("expected client-deny decision, got %+v", sink.decisions)
 	}
+	assertHTMLResponse(t, w, "Authentication Failed")
+	assertRejectedReason(t, m, "jwt_validation_failed")
 }
 
 func TestHandleCallback_GroupCheckFailure(t *testing.T) {
 	cfg := defaultCfg()
 	identity := &fakeGroupsChecker{inGroup: false}
-	srv, sessions, sink := newTestServerWithSessions(cfg, identity)
+	srv, sessions, sink, m := newTestServerWithSessions(cfg, identity)
 
 	sid := "group-fail-sid"
 	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
@@ -301,12 +331,14 @@ func TestHandleCallback_GroupCheckFailure(t *testing.T) {
 	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
 		t.Fatalf("expected client-deny decision, got %+v", sink.decisions)
 	}
+	assertHTMLResponse(t, w, "Access Denied")
+	assertRejectedReason(t, m, "group_denied")
 }
 
 func TestHandleCallback_GroupCheckFromClaims_Failure(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.CognitoGroupsClaims = true
-	srv, sessions, sink := newTestServerWithSessions(cfg, nil)
+	srv, sessions, sink, m := newTestServerWithSessions(cfg, nil)
 
 	sid := "claims-group-fail-sid"
 	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
@@ -326,12 +358,14 @@ func TestHandleCallback_GroupCheckFromClaims_Failure(t *testing.T) {
 	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
 		t.Fatalf("expected client-deny, got %+v", sink.decisions)
 	}
+	assertHTMLResponse(t, w, "Access Denied")
+	assertRejectedReason(t, m, "group_denied")
 }
 
 func TestHandleCallback_Success_DevMode(t *testing.T) {
 	cfg := defaultCfg()
 	identity := &fakeGroupsChecker{inGroup: true}
-	srv, sessions, sink := newTestServerWithSessions(cfg, identity)
+	srv, sessions, sink, m := newTestServerWithSessions(cfg, identity)
 
 	sid := "success-sid"
 	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
@@ -351,12 +385,15 @@ func TestHandleCallback_Success_DevMode(t *testing.T) {
 	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
 		t.Fatalf("expected client-auth decision, got %+v", sink.decisions)
 	}
+	assertHTMLResponse(t, w, "Authenticated")
+	assertContains(t, w.Body.String(), "user@example.com")
+	assertNoRejection(t, m)
 }
 
 func TestHandleCallback_Success_GroupFromClaims(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.CognitoGroupsClaims = true
-	srv, sessions, sink := newTestServerWithSessions(cfg, nil)
+	srv, sessions, sink, _ := newTestServerWithSessions(cfg, nil)
 
 	sid := "claims-success-sid"
 	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
@@ -376,6 +413,7 @@ func TestHandleCallback_Success_GroupFromClaims(t *testing.T) {
 	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
 		t.Fatalf("expected client-auth decision, got %+v", sink.decisions)
 	}
+	assertHTMLResponse(t, w, "Authenticated")
 }
 
 func TestHandleCallback_Success_WithALBJWT(t *testing.T) {
@@ -390,7 +428,7 @@ func TestHandleCallback_Success_WithALBJWT(t *testing.T) {
 		ALBARN:    albARN,
 	}
 	identity := &fakeGroupsChecker{inGroup: true}
-	srv, sessions, sink := newTestServerWithSessions(cfg, identity)
+	srv, sessions, sink, _ := newTestServerWithSessions(cfg, identity)
 	srv.keyCache["test-kid"] = &privKey.PublicKey
 
 	sid := "alb-success-sid"
@@ -411,11 +449,12 @@ func TestHandleCallback_Success_WithALBJWT(t *testing.T) {
 	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
 		t.Fatalf("expected client-auth decision, got %+v", sink.decisions)
 	}
+	assertHTMLResponse(t, w, "Authenticated")
 }
 
 func TestHandleCallback_CNMismatch(t *testing.T) {
 	cfg := defaultCfg()
-	srv, sessions, sink := newTestServerWithSessions(cfg, nil)
+	srv, sessions, sink, m := newTestServerWithSessions(cfg, nil)
 
 	sid := "cn-mismatch-sid"
 	sess := addSessionPending(sessions, sid, "cid1", "kid1", "cert-cn@example.com")
@@ -435,6 +474,8 @@ func TestHandleCallback_CNMismatch(t *testing.T) {
 	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
 		t.Fatalf("expected client-deny, got %+v", sink.decisions)
 	}
+	assertHTMLResponse(t, w, "Certificate Mismatch")
+	assertRejectedReason(t, m, "cn_mismatch")
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +487,10 @@ func TestHandleHealthz_Connected(t *testing.T) {
 	signer := secrets.NewStaticSigner("test-secret")
 	sink := &captureSink{}
 	cfg := defaultCfg()
-	srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, nil, func() bool { return true })
+	srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -472,7 +516,10 @@ func TestHandleHealthz_Disconnected(t *testing.T) {
 	signer := secrets.NewStaticSigner("test-secret")
 	sink := &captureSink{}
 	cfg := defaultCfg()
-	srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, nil, func() bool { return false })
+	srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return false })
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -523,7 +570,10 @@ func TestHealthzReflectsSocketState(t *testing.T) {
 				cfg := defaultCfg()
 
 				connected := tc.connected
-				srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, nil, func() bool { return connected })
+				srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return connected })
+				if err != nil {
+					t.Fatal(err)
+				}
 
 				req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 				w := httptest.NewRecorder()
@@ -562,7 +612,10 @@ func TestHealthzReflectsSocketState_DynamicSwitch(t *testing.T) {
 	cfg := defaultCfg()
 
 	connected := true
-	srv := NewServer(sessions, signer, sink, cfg, fakeMetrics{}, nil, func() bool { return connected })
+	srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return connected })
+	if err != nil {
+		t.Fatal(err)
+	}
 	handler := srv.Handler()
 
 	// Initially connected -> 200.
@@ -589,5 +642,162 @@ func TestHealthzReflectsSocketState_DynamicSwitch(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 after reconnect, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HTML response assertion helpers
+// ---------------------------------------------------------------------------
+
+func assertHTMLResponse(t *testing.T, w *httptest.ResponseRecorder, expectedText string) {
+	t.Helper()
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		t.Errorf("expected Content-Type text/html, got %q", ct)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("expected Cache-Control no-store, got %q", cc)
+	}
+	if xcto := w.Header().Get("X-Content-Type-Options"); xcto != "nosniff" {
+		t.Errorf("expected X-Content-Type-Options nosniff, got %q", xcto)
+	}
+	assertContains(t, w.Body.String(), expectedText)
+}
+
+func assertContains(t *testing.T, body, substr string) {
+	t.Helper()
+	if !strings.Contains(body, substr) {
+		t.Errorf("expected body to contain %q, got:\n%s", substr, body)
+	}
+}
+
+func assertRejectedReason(t *testing.T, m *fakeMetrics, expected string) {
+	t.Helper()
+	if len(m.rejectedReasons) == 0 {
+		t.Fatalf("expected CallbackRejected(%q) but no rejections were recorded", expected)
+	}
+	got := m.rejectedReasons[len(m.rejectedReasons)-1]
+	if got != expected {
+		t.Errorf("expected CallbackRejected reason %q, got %q (all: %v)", expected, got, m.rejectedReasons)
+	}
+}
+
+func assertNoRejection(t *testing.T, m *fakeMetrics) {
+	t.Helper()
+	if len(m.rejectedReasons) > 0 {
+		t.Errorf("expected no CallbackRejected calls, got %v", m.rejectedReasons)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Template loading tests
+// ---------------------------------------------------------------------------
+
+func TestLoadTemplates_Embedded(t *testing.T) {
+	tmpl, err := loadTemplates("")
+	if err != nil {
+		t.Fatalf("loadTemplates embedded: %v", err)
+	}
+	if tmpl.Lookup("success.html") == nil {
+		t.Error("missing success.html")
+	}
+	if tmpl.Lookup("error.html") == nil {
+		t.Error("missing error.html")
+	}
+}
+
+func TestLoadTemplates_OverrideOK(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "success.html", `<!DOCTYPE html><html><body>{{.Email}}</body></html>`)
+	writeFile(t, dir, "error.html", `<!DOCTYPE html><html><body>{{.Title}} {{.Message}}</body></html>`)
+
+	tmpl, err := loadTemplates(dir)
+	if err != nil {
+		t.Fatalf("loadTemplates override: %v", err)
+	}
+	if tmpl.Lookup("success.html") == nil {
+		t.Error("missing success.html")
+	}
+}
+
+func TestLoadTemplates_OverrideMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "success.html", `<!DOCTYPE html><html><body>ok</body></html>`)
+	// error.html is missing
+
+	_, err := loadTemplates(dir)
+	if err == nil {
+		t.Fatal("expected error for missing error.html")
+	}
+	if !strings.Contains(err.Error(), "error.html") {
+		t.Errorf("expected error to mention error.html, got: %v", err)
+	}
+}
+
+func TestLoadTemplates_OverrideSyntaxError(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "success.html", `{{.Unclosed`)
+	writeFile(t, dir, "error.html", `<!DOCTYPE html><html><body>ok</body></html>`)
+
+	_, err := loadTemplates(dir)
+	if err == nil {
+		t.Fatal("expected error for syntax error in template")
+	}
+}
+
+func TestLoadTemplates_NotADirectory(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "file.txt")
+	writeFile(t, filepath.Dir(f), "file.txt", "not a dir")
+
+	_, err := loadTemplates(f)
+	if err == nil {
+		t.Fatal("expected error when path is a file")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("expected 'not a directory' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Render fallback tests
+// ---------------------------------------------------------------------------
+
+func TestRenderError_Fallback(t *testing.T) {
+	srv := &Server{tmpl: template.New("root")} // no templates defined
+	w := httptest.NewRecorder()
+	srv.renderError(w, http.StatusForbidden, "Access Denied", "You are not a member of the required group.")
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/plain") {
+		t.Errorf("expected text/plain fallback, got %q", ct)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("expected Cache-Control no-store, got %q", cc)
+	}
+	assertContains(t, w.Body.String(), "You are not a member of the required group.")
+}
+
+func TestRenderSuccess_Fallback(t *testing.T) {
+	srv := &Server{tmpl: template.New("root")} // no templates defined
+	w := httptest.NewRecorder()
+	srv.renderSuccess(w, "user@example.com")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/plain") {
+		t.Errorf("expected text/plain fallback, got %q", ct)
+	}
+	assertContains(t, w.Body.String(), "authenticated")
+}
+
+func writeFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+		t.Fatal(err)
 	}
 }

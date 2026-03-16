@@ -45,6 +45,9 @@ type Config struct {
 	EMFMetrics           bool
 	EMFInterval          time.Duration
 	LogFormat            string
+
+	// HTML templates
+	TemplatesDir string
 }
 
 func Parse() (Config, error) {
@@ -85,6 +88,7 @@ func Parse() (Config, error) {
 	flag.BoolVar(&cfg.EMFMetrics, "emf-metrics", getBool("VPN_AUTH_EMF_METRICS", false), "emit CloudWatch EMF metrics to stdout")
 	flag.DurationVar(&cfg.EMFInterval, "emf-interval", getDurationOrCollect("VPN_AUTH_EMF_INTERVAL", 10*time.Second, &envErrors), "interval for EMF heartbeat metrics (0 to disable heartbeat only)")
 	flag.StringVar(&cfg.LogFormat, "log-format", getenv("VPN_AUTH_LOG_FORMAT", "text"), "log output format: text or json")
+	flag.StringVar(&cfg.TemplatesDir, "templates-dir", getenv("VPN_AUTH_TEMPLATES_DIR", ""), "path to custom HTML templates (overrides built-in)")
 
 	flag.Parse()
 

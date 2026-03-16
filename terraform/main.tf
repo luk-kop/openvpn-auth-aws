@@ -68,6 +68,7 @@ resource "aws_lb_listener_rule" "vpn_udp" {
       user_pool_client_id = module.alb[0].cognito_user_pool_client_id
       user_pool_domain    = module.alb[0].cognito_user_pool_domain
       scope               = "openid email"
+      session_timeout     = var.alb_auth_session_timeout_hours * 3600
     }
   }
 
@@ -96,6 +97,7 @@ resource "aws_lb_listener_rule" "vpn_tcp" {
       user_pool_client_id = module.alb[0].cognito_user_pool_client_id
       user_pool_domain    = module.alb[0].cognito_user_pool_domain
       scope               = "openid email"
+      session_timeout     = var.alb_auth_session_timeout_hours * 3600
     }
   }
 

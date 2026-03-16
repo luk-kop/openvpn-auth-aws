@@ -42,7 +42,8 @@ func (e *Emitter) AuthDenied(reason string)   { e.counter("AuthDenied", reason) 
 func (e *Emitter) ReauthSuccess()             { e.counter("ReauthSuccess", "") }
 func (e *Emitter) ReauthDenied(reason string) { e.counter("ReauthDenied", reason) }
 func (e *Emitter) ReauthCacheHit()            { e.counter("ReauthCacheHit", "") }
-func (e *Emitter) CallbackReceived()          { e.counter("CallbackReceived", "") }
+func (e *Emitter) CallbackReceived()               { e.counter("CallbackReceived", "") }
+func (e *Emitter) CallbackRejected(reason string)  { e.counter("CallbackRejected", reason) }
 func (e *Emitter) TokenExchangeError(reason string) {
 	e.counter("TokenExchangeError", reason)
 }

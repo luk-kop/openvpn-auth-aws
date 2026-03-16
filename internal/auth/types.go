@@ -61,6 +61,7 @@ type Metrics interface {
 	ReauthDenied(reason string)
 	ReauthCacheHit()
 	CallbackReceived()
+	CallbackRejected(reason string)
 	TokenExchangeError(reason string)
 }
 

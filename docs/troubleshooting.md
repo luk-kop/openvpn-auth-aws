@@ -212,3 +212,22 @@ ALB-signed JWTs (`x-amzn-oidc-data`) use base64url **with padding** (`=`), unlik
 Running `apt-get install` in cloud-init without `DEBIAN_FRONTEND=noninteractive` causes debconf/whiptail to fail because there is no interactive terminal. The cloud-init config sets this variable for all `apt-get install` commands in `runcmd`.
 
 These errors are harmless warnings when `DEBIAN_FRONTEND=noninteractive` is set — packages still install correctly.
+
+### Client hangs after invalid or tampered state
+
+The VPN client appears stuck after opening the browser — no `AUTH_FAILED`, no tunnel, just silence until `--auth-timeout` expires (default 4m30s).
+
+This happens when the `state` query parameter in the callback URL is invalid (tampered, corrupted, or expired). The daemon rejects the callback with HTTP 400, but because the state HMAC verification failed, it cannot extract the session ID. Without a session ID, it cannot look up the pending session or send `client-deny` to OpenVPN. The session remains in `PENDING` state until the auth timeout goroutine fires and denies it.
+
+**This is expected behavior, not a bug.** The state blob is the only link between a callback request and a pending session. If the state is invalid, the daemon has no way to identify which client the callback belongs to.
+
+**Diagnose:**
+```bash
+# Look for state validation failures in daemon logs
+journalctl -u openvpn-auth-udp --no-pager | grep "invalid state"
+
+# The corresponding timeout will appear ~auth-timeout later
+journalctl -u openvpn-auth-udp --no-pager | grep "auth timeout"
+```
+
+**Mitigation:** This only affects error cases (tampered URLs, expired state). Legitimate users see auth success or failure within seconds. The `--auth-timeout` value controls the worst-case wait time.

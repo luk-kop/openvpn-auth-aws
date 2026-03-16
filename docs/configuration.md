@@ -28,6 +28,7 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--emf-metrics` | `VPN_AUTH_EMF_METRICS` | `false` | Emit CloudWatch EMF metrics to stdout |
 | `--emf-interval` | `VPN_AUTH_EMF_INTERVAL` | `10s` | Interval for EMF heartbeat metrics (`0` to disable heartbeat only) |
 | `--log-format` | `VPN_AUTH_LOG_FORMAT` | `text` | Log output format: `text` or `json` |
+| `--templates-dir` | `VPN_AUTH_TEMPLATES_DIR` | — | Path to custom HTML templates directory. Overrides built-in templates. Must contain both `success.html` and `error.html`. |
 | `--instance-id` | `VPN_AUTH_INSTANCE_ID` | `local-dev` | Instance identifier used in EMF metrics |
 
 See `--help` for the full list.
@@ -64,15 +65,108 @@ The daemon uses structured logging via Go's `log/slog`. Output format is control
   {"time":"2026-03-13T12:00:00Z","level":"INFO","msg":"connect","cid":"3","kid":"1","cn":"john@example.com"}
   ```
 
+### Callback log levels
+
+The callback endpoint (`GET /callback`) is reachable through the ALB, so it receives invalid requests from browser retries, expired bookmarks, and scanners. Log levels are tuned to avoid noise while keeping operationally important events visible.
+
+| Log message | Level | Reason |
+| --- | --- | --- |
+| `callback: invalid state` | INFO | Normal rejection — expired state, browser retry, scanner. High volume expected. |
+| `callback: session not found` | INFO | Session already reaped (TTL expired). Diagnostic, not alarming. |
+| `callback: session not pending` | INFO | Replay of an already-processed callback. |
+| `callback: missing x-amzn-oidc-data header` | WARN | Request bypassed ALB or ALB misconfigured — should not happen in production. |
+| `callback: failed to parse JWT header` | WARN | Malformed token, possible tampering. |
+| `callback: failed to fetch ALB public key` | ERROR | AWS infrastructure issue, retryable. Requires attention. |
+| `callback: ALB JWT validation failed` | WARN | Forged, expired, or wrong-ALB token. |
+| `callback: failed to parse JWT claims` | WARN | Malformed claims (dev mode only). |
+| `callback: CN cross-check failed` | WARN | Certificate CN does not match authenticated identity. |
+| `callback: group check error` | ERROR | Cognito API failure during group lookup. |
+| `callback: user not in required group` | WARN | Authenticated user lacks required group — may indicate revoked access. |
+| `callback: auth success` | INFO | Successful authentication. |
+
+**Design principle:** INFO for expected rejections from external input, WARN for events that indicate misconfiguration or unauthorized access, ERROR for infrastructure failures that need operator attention. Observability for all rejection paths is covered by the `CallbackRejected` metric (see below) — logs don't need to carry the full alerting burden.
+
 ## EMF Metrics
 
 CloudWatch Embedded Metric Format (EMF) output is disabled by default (`--emf-metrics=false`). When enabled, the daemon emits JSON metrics to stdout that CloudWatch Logs agent can parse into CloudWatch Metrics automatically.
 
-- `--emf-metrics=true` — enables EMF counter metrics (AuthAttempt, AuthSuccess, AuthDenied, etc.)
+- `--emf-metrics=true` — enables EMF counter metrics (see table below)
 - `--emf-interval` — controls heartbeat metric interval (SocketConnected, StoredSessions). Set to `0` to disable heartbeat while keeping counter metrics.
+
+### Available metrics
+
+All metrics are emitted under the `VPNAuth` namespace with `InstanceId` as the primary dimension. Metrics with a `Reason` column also emit a second dimension set `[InstanceId, Reason]` for filtering.
+
+| Metric | Type | Reason dimension | Description |
+| --- | --- | --- | --- |
+| `SocketConnected` | gauge | — | Management socket connectivity (0/1), emitted on heartbeat interval |
+| `StoredSessions` | gauge | — | Number of in-memory sessions, emitted on heartbeat interval |
+| `AuthAttempt` | counter | — | `CLIENT:CONNECT` received and session created |
+| `AuthSuccess` | counter | — | Callback verification passed, `client-auth` sent |
+| `AuthDenied` | counter | `timeout`, `no_webauth`, `missing_common_name`, `url_too_long`, `internal_error` | Auth denied via `client-deny` (handler-level rejections) |
+| `CallbackRejected` | counter | see below | HTTP callback rejected (all error paths in `handleCallback`) |
+| `ReauthSuccess` | counter | — | `CLIENT:REAUTH` allowed |
+| `ReauthDenied` | counter | `missing_common_name`, `user_not_found`, `user_disabled`, `group_denied`, `cognito_error` | Reauth denied |
+| `ReauthCacheHit` | counter | — | Reauth allowed from cache (Cognito unavailable) |
+| `CallbackReceived` | counter | — | Any callback request received (before validation) |
+
+### CallbackRejected reasons
+
+`CallbackRejected` tracks every rejection path in the callback handler. The reason is a stable, low-cardinality string — never a dynamic error message.
+
+| Reason | HTTP status | Description |
+| --- | --- | --- |
+| `missing_state` | 400 | No `state` query parameter |
+| `invalid_state` | 400 | State HMAC verification failed or expired |
+| `session_not_found` | 404 | Session ID from state not in store (expired/reaped) |
+| `session_not_pending` | 409 | Session already processed (replay) |
+| `missing_oidc_header` | 403 | `x-amzn-oidc-data` header absent |
+| `invalid_jwt_header` | 403 | JWT header segment malformed |
+| `public_key_fetch_failed` | 503 | Could not fetch ALB public key (retryable) |
+| `jwt_validation_failed` | 403 | ES256 signature, signer ARN, or expiry check failed |
+| `invalid_jwt_claims` | 403 | JWT claims parse error (dev mode) |
+| `cn_mismatch` | 403 | JWT email does not match certificate CN |
+| `group_check_error` | 403 | Cognito API error during group lookup |
+| `group_denied` | 403 | User not in required group |
 
 For production with CloudWatch agent, enable with:
 
 ```bash
 --emf-metrics=true --emf-interval=10s --log-format=json
+```
+
+## HTML Templates
+
+The callback server renders styled HTML pages for authentication success and error responses. Templates are embedded in the binary at build time — no external files needed.
+
+### Built-in Templates
+
+Two templates are compiled into the binary via `//go:embed`:
+
+- `success.html` — shown after successful authentication (displays email, "You can close this window")
+- `error.html` — shown for all error cases (session expired, access denied, certificate mismatch, etc.)
+
+Both include inline CSS with dark mode support, responsive layout, and zero JavaScript.
+
+### Custom Templates
+
+To override the built-in templates, use `--templates-dir`:
+
+```bash
+openvpn-auth-daemon --templates-dir /etc/openvpn-auth/templates/
+```
+
+Requirements:
+- The directory must contain both `success.html` and `error.html` (all-or-nothing override)
+- Templates are parsed with Go's `html/template` package
+- `success.html` receives `{{ .Email }}` (string)
+- `error.html` receives `{{ .Title }}` and `{{ .Message }}` (both strings)
+
+The daemon validates templates at startup and refuses to start if any are missing or contain syntax errors.
+
+In Docker:
+
+```yaml
+volumes:
+  - ./my-templates:/etc/openvpn-auth/templates:ro
 ```

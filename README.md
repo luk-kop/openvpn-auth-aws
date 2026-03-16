@@ -64,7 +64,7 @@ openvpn-auth-aws/
 ├── internal/
 │   ├── app/       # Daemon lifecycle, event loop, management socket reconnection
 │   ├── auth/      # Auth orchestration, session store, state blob signing
-│   ├── callback/  # HTTP server for GET /callback and GET /healthz
+│   ├── callback/  # HTTP server for GET /callback and GET /healthz, HTML templates
 │   ├── cognito/   # ALB public key fetching, JWT validation, user group checks
 │   ├── config/    # CLI flags + env vars (VPN_AUTH_* prefix)
 │   ├── metrics/   # CloudWatch EMF metrics
