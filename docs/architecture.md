@@ -4,51 +4,61 @@ OpenVPN auth daemon that authenticates OpenVPN clients via browser-based OIDC wi
 
 ## Auth Flow
 
-```text
-┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-│  Client   │   │ OpenVPN  │   │  Daemon  │   │   ALB    │   │ Cognito  │
-│ (browser) │   │  Server  │   │          │   │          │   │          │
-└────┬─────┘   └────┬─────┘   └────┬─────┘   └────┬─────┘   └────┬─────┘
-     │  TLS connect  │              │               │               │
-     │──────────────>│  >CLIENT:    │               │               │
-     │               │  CONNECT     │               │               │
-     │               │─────────────>│               │               │
-     │               │              │ create session│               │
-     │               │              │ sign state    │               │
-     │               │              │ blob (sid,    │               │
-     │               │              │  iat, exp)    │               │
-     │               │  client-     │               │               │
-     │               │  pending-auth│               │               │
-     │               │<─────────────│               │               │
-     │  WEB_AUTH URL │              │               │               │
-     │<──────────────│              │               │               │
-     │               │              │               │               │
-     │  open browser ──────────────────────────────>│               │
-     │               │              │               │ Cognito auth  │
-     │               │              │               │ action ──────>│
-     │  login ───────────────────────────────────────────────────>  │
-     │               │              │               │<── auth code ─│
-     │               │              │               │ exchange +    │
-     │               │              │               │ add oidc hdrs │
-     │               │              │  GET /callback│               │
-     │               │              │<──────────────│               │
-     │               │              │ verify state  │               │
-     │               │              │ validate ALB  │               │
-     │               │              │ JWT (ES256)   │               │
-     │               │              │ check groups  │               │
-     │               │  client-auth │               │               │
-     │               │<─────────────│               │               │
-     │  tunnel up    │              │               │               │
-     │<──────────────│  >CLIENT:    │               │               │
-     │               │  ESTABLISHED │               │               │
-     │               │─────────────>│               │               │
+```mermaid
+sequenceDiagram
+    participant C as Client (browser)
+    participant V as OpenVPN Server
+    participant D as Daemon
+    participant A as ALB
+    participant Co as Cognito
+
+    C->>V: TLS connect
+    V->>D: >CLIENT:CONNECT (CID, KID, ENV)
+
+    note over D: Pre-checks (IV_SSO, CN, single-session eviction)
+
+    alt IV_SSO missing WebAuth or CN empty
+        D->>V: client-deny
+    end
+
+    D->>D: create session, sign state blob</br>(sid, iat, exp)
+    D->>V: client-pending-auth</br>+ WEB_AUTH URL
+    V->>C: WEB_AUTH URL
+
+    C->>A: open browser → GET /callback?state=...
+    A->>Co: Cognito authenticate action (OIDC)
+    C->>Co: login (username + password)
+    Co->>A: auth code
+    A->>A: token exchange,</br>add x-amzn-oidc-* headers
+    A->>D: GET /callback?state=...</br>(with x-amzn-oidc-data JWT)
+
+    note over D: Callback verification chain (see below)
+
+    alt verification passed
+        D->>V: client-auth (CID, KID)
+        V->>C: tunnel up
+        V->>D: >CLIENT:ESTABLISHED (CID)
+        D->>D: cancel timeout, cleanup session
+    else verification failed
+        D->>V: client-deny (CID, KID, reason)
+    end
 ```
 
+### Pre-checks
+
+Before starting the OIDC flow, the daemon validates the `CLIENT:CONNECT` event:
+
+- **IV_SSO check** — client must advertise `webauth` or `openurl` in the `IV_SSO` env variable; otherwise `client-deny` with reason `"client does not support WebAuth"`
+- **Common Name** — certificate CN must be non-empty; otherwise `client-deny` with reason `"missing common name"`
+- **Single-session eviction** — when `--single-session-per-user=true` (default), if a session for the same CN already exists, the old session is evicted (`client-deny` for pending, `client-kill` for established) before creating a new one
+
+### Steps
+
 1. VPN client connects → OpenVPN sends `>CLIENT:CONNECT` to management socket
-2. Daemon creates an in-memory session, signs a state blob (`sid`, `iat`, `exp`), sends `client-pending-auth` with WEB_AUTH URL: `{--callback-url}?state={blob}`
+2. Daemon runs pre-checks, creates an in-memory session, signs a state blob (`sid`, `iat`, `exp`), sends `client-pending-auth` with WEB_AUTH URL: `{--callback-url}?state={blob}`
 3. OpenVPN forwards the URL to the client; client opens browser
 4. ALB intercepts the request, runs the Cognito authenticate action (full OIDC flow), then forwards the authenticated request to the daemon's callback port with `x-amzn-oidc-*` headers
-5. Daemon verifies the state HMAC, validates the ALB JWT signature (ES256), checks email and group membership
+5. Daemon runs the [callback verification chain](#callback-verification-chain) — state HMAC, session transition, ALB JWT signature (ES256), CN cross-check, group membership
 6. Daemon sends `client-auth` (success) or `client-deny` (failure) to OpenVPN
 
 ## Two Daemons per EC2
@@ -71,6 +81,72 @@ ALB
 ├── Listener rule: /callback/01/tcp → Target Group (EC2:8081)
 └── Default action: Cognito authenticate action
 ```
+
+## Callback Verification Chain
+
+When the daemon receives `GET /callback` from the ALB, it runs a multi-step verification pipeline. Every step must pass — failure at any point results in `client-deny`. The flow is implemented in `internal/callback/server.go:handleCallback`.
+
+```mermaid
+flowchart TD
+    A["GET /callback?state=..."] --> B{"1. State HMAC</br>valid?"}
+    B -- no --> R1["400 Bad Request"]
+    B -- yes --> C{"2. Session exists</br>and PENDING?"}
+    C -- not found --> R2["404 Not Found"]
+    C -- not pending --> R3["409 Conflict"]
+    C -- yes --> D["Session → PROCESSING"]
+    D --> E{"3. x-amzn-oidc-data</br>header present?"}
+    E -- no --> R4["403 missing oidc header</br>client-deny"]
+    E -- yes --> F{"4. Parse JWT header</br>(kid, signer)"}
+    F -- error --> R5["403 invalid jwt header</br>client-deny"]
+    F -- ok --> G{"--alb-arn</br>set?"}
+    G -- "yes (prod)" --> H["5. Fetch ALB public key</br>(cache by kid)"]
+    H -- fetch error --> R6["503 retry</br>Session → PENDING"]
+    H -- ok --> I{"6. Validate JWT</br>ES256 signature</br>signer == ALB ARN\nexp not expired"}
+    I -- fail --> R7["403 jwt validation failed</br>client-deny"]
+    I -- ok --> J{"7. CN cross-check</br>enabled?"}
+    G -- "no (dev)" --> P["Parse claims</br>without signature"]
+    P --> J
+    J -- "yes: email ≠ CN" --> R8["403 cn mismatch</br>client-deny"]
+    J -- "no / match" --> K{"8. Required group</br>configured?"}
+    K -- no --> L["9. Auth SUCCESS\</br>Session → DONE</br>client-auth"]
+    K -- yes --> M{"Check group</br>membership"}
+    M -- "not in group" --> R9["403 not in required group</br>client-deny"]
+    M -- "in group" --> L
+
+    style L fill:#2d6,stroke:#184,color:#fff
+    style R1 fill:#d33,stroke:#911,color:#fff
+    style R2 fill:#d33,stroke:#911,color:#fff
+    style R3 fill:#d33,stroke:#911,color:#fff
+    style R4 fill:#d33,stroke:#911,color:#fff
+    style R5 fill:#d33,stroke:#911,color:#fff
+    style R6 fill:#f90,stroke:#a60,color:#fff
+    style R7 fill:#d33,stroke:#911,color:#fff
+    style R8 fill:#d33,stroke:#911,color:#fff
+    style R9 fill:#d33,stroke:#911,color:#fff
+```
+
+### Step-by-step
+
+| # | Check | What it protects against | Failure |
+|---|-------|--------------------------|---------|
+| 1 | **State HMAC** — `DecodeState` verifies the HMAC-SHA256 signature on the `state` query parameter, checks `iat`/`exp` | CSRF, forged callbacks, replay after expiry | 400 |
+| 2 | **Session lookup** — `TryProcess` atomically transitions session from `PENDING` → `PROCESSING` | Replay (double callback), race conditions | 404 / 409 |
+| 3 | **OIDC header** — checks `x-amzn-oidc-data` header is present | Direct access bypassing ALB | 403 + deny |
+| 4 | **JWT header parse** — extracts `kid` and `signer` from the JWT header segment | Malformed tokens | 403 + deny |
+| 5 | **ALB public key fetch** — fetches ECDSA public key from `https://public-keys.auth.elb.{region}.amazonaws.com/{kid}`, cached in memory | N/A (infrastructure step) | 503 (retryable) |
+| 6 | **JWT signature + claims** — verifies ES256 signature with the ALB public key, checks `signer` matches `--alb-arn`, requires valid `exp` | Token forgery, ALB spoofing, expired tokens | 403 + deny |
+| 7 | **CN cross-check** — compares JWT `email` claim with the client certificate's Common Name (case-insensitive) | User A authenticating with User B's browser session | 403 + deny |
+| 8 | **Group membership** — checks if the user belongs to the required Cognito group (via JWT `cognito:groups` claim or Cognito Admin API) | Unauthorized access by authenticated but unprivileged users | 403 + deny |
+
+### Production vs dev mode
+
+In production (`--alb-arn` is set), steps 5-6 enforce full cryptographic verification of the ALB JWT. The daemon only trusts tokens signed by the specific ALB identified by its ARN.
+
+In dev mode (`--alb-arn` is absent), JWT signature validation is skipped — claims are parsed from the token payload without verification. This mode should never be used in production. All other checks (state HMAC, session, CN cross-check, groups) still apply.
+
+### Network-level defense
+
+The callback port is only reachable from the ALB security group (no public ingress). JWT validation provides defense-in-depth — even if network isolation were compromised, an attacker would need a valid JWT signed by the correct ALB.
 
 ## ALB JWT Validation
 
@@ -183,24 +259,35 @@ Reauth results can be cached (`--reauth-cache=true`) to survive brief Cognito ou
 
 ## Docker Compose Stack
 
-```text
-┌─────────────────────┐
-│  OpenVPN Container  │
-│  UDP 1194           │
-│  management.sock    ├──┐
-└─────────────────────┘  │ shared volume
-                         │ /run/openvpn
-┌─────────────────────┐  │
-│  Daemon Container   │◄─┘
-│  Go application     │
-│  HTTP :8080         │◄─────────────────┐
-│  GET /callback      │                  │ GET /callback (with oidc headers)
-│  GET /healthz       │                  │
-└─────────────────────┘                  │
-                                         │
-                              ┌──────────┴───────┐
-                              │  alb-mock         │
-                              │  HTTP :8080       │
-                              │  GET /callback    │
-                              └──────────────────┘
+```mermaid
+graph LR
+    client("🖥️ VPN Client")
+
+    subgraph docker["Docker Compose"]
+        subgraph openvpn["OpenVPN"]
+            ovpn_port("UDP :1194")
+            mgmt_sock("/run/openvpn/management.sock")
+        end
+
+        subgraph daemon["Auth Daemon"]
+            daemon_cb("GET /callback — :8081")
+            daemon_hz("GET /healthz — :8081")
+        end
+
+        subgraph albmock["ALB Mock"]
+            alb_cb("GET /callback — :8080")
+            alb_hz("GET /healthz — :8080")
+        end
+    end
+
+    client -- "UDP :1194" --> ovpn_port
+    mgmt_sock -. "Unix socket</br>/run/openvpn" .-> daemon_cb
+    client -- "browser</br>GET /callback?state=..." --> alb_cb
+    alb_cb -- "GET /callback</br>+ x-amzn-oidc-data JWT" --> daemon_cb
+
+    style openvpn fill:#1a5276,stroke:#154360,color:#fff
+    style daemon fill:#1e8449,stroke:#186a3b,color:#fff
+    style albmock fill:#b9770e,stroke:#9c640c,color:#fff
+    style docker fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style client fill:#6c3483,stroke:#5b2c6f,color:#fff
 ```
