@@ -5,31 +5,15 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-      - id: check-merge-conflict
-
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
-    hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
-      - id: check-yaml
       - id: check-json
       - id: check-shebang-scripts-are-executable
+      - id: check-executables-have-shebangs
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: detect-aws-credentials
         args:
           - --allow-missing-credentials
       - id: detect-private-key
-
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.5
-    hooks:
-      # Run the linter.
-      - id: ruff-check
-        args: [ --fix ]
-      # Run the formatter.
-      - id: ruff-format
 
   - repo: https://github.com/antonbabenko/pre-commit-terraform
     rev: v1.105.0
@@ -64,3 +48,21 @@ repos:
         language: system
         pass_filenames: false
         types: [go]
+      - id: go-mod-tidy
+        name: go mod tidy
+        entry: bash -c 'go mod tidy && git diff --exit-code go.mod go.sum'
+        language: system
+        pass_filenames: false
+        types: [go]
+      - id: govulncheck
+        name: govulncheck
+        entry: govulncheck ./...
+        language: system
+        pass_filenames: false
+        types: [go]
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
