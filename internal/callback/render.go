@@ -17,12 +17,19 @@ var embeddedFS embed.FS
 var requiredTemplates = []string{"success.html", "error.html"}
 
 type successData struct {
-	Email string
+	Email      string
+	SessionID  string
+	Hostname   string
+	ServerName string
 }
 
 type errorData struct {
-	Title   string
-	Message string
+	Title      string
+	Message    string
+	StatusCode int
+	SessionID  string
+	Hostname   string
+	ServerName string
 }
 
 // loadTemplates parses HTML templates from the embedded FS or from an override
@@ -81,9 +88,15 @@ func setCommonHeaders(w http.ResponseWriter, contentType string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 }
 
-func (s *Server) renderSuccess(w http.ResponseWriter, email string) {
+func (s *Server) renderSuccess(w http.ResponseWriter, email, sessionID string) {
 	var buf bytes.Buffer
-	if err := s.tmpl.ExecuteTemplate(&buf, "success.html", successData{Email: email}); err != nil {
+	data := successData{
+		Email:      email,
+		SessionID:  sessionID,
+		Hostname:   s.hostname,
+		ServerName: s.cfg.ServerName,
+	}
+	if err := s.tmpl.ExecuteTemplate(&buf, "success.html", data); err != nil {
 		slog.Error("render success template failed", "error", err)
 		setCommonHeaders(w, "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -95,9 +108,17 @@ func (s *Server) renderSuccess(w http.ResponseWriter, email string) {
 	_, _ = buf.WriteTo(w)
 }
 
-func (s *Server) renderError(w http.ResponseWriter, status int, title, message string) {
+func (s *Server) renderError(w http.ResponseWriter, status int, title, message, sessionID string) {
 	var buf bytes.Buffer
-	if err := s.tmpl.ExecuteTemplate(&buf, "error.html", errorData{Title: title, Message: message}); err != nil {
+	data := errorData{
+		Title:      title,
+		Message:    message,
+		StatusCode: status,
+		SessionID:  sessionID,
+		Hostname:   s.hostname,
+		ServerName: s.cfg.ServerName,
+	}
+	if err := s.tmpl.ExecuteTemplate(&buf, "error.html", data); err != nil {
 		slog.Error("render error template failed", "error", err)
 		setCommonHeaders(w, "text/plain; charset=utf-8")
 		w.WriteHeader(status)

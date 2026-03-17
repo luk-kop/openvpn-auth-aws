@@ -9,7 +9,7 @@ mkdir -p "$OVPN_DATA"
 
 # Generate management password
 echo "test-management-password" > "$OVPN_DATA/management-pw"
-chmod 600 "$OVPN_DATA/management-pw"
+chmod 644 "$OVPN_DATA/management-pw"
 
 # Initialize PKI + generate all certs in one container run
 # Run as root so apk/easyrsa can write freely, then chown to current user

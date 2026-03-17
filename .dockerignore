@@ -19,6 +19,7 @@ LICENSE
 # Build artifacts (local)
 openvpn-auth-daemon
 mgmt-mock
+alb-mock
 lambda-mock
 
 # Lab environment (certs, configs, Docker files — not needed in image)

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -13,73 +15,32 @@ import (
 // buildValidState creates a valid HMAC-signed state blob for testing.
 func buildValidState(t *testing.T, secret string) string {
 	t.Helper()
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"sid": "test-session-id",
 		"iat": time.Now().Unix(),
 		"exp": time.Now().Add(5 * time.Minute).Unix(),
 	}
 	data, _ := json.Marshal(payload)
 	encoded := base64.RawURLEncoding.EncodeToString(data)
-	mac := signHMAC(secret, encoded)
-	return encoded + "." + mac
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(encoded))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return encoded + "." + sig
 }
 
-func TestVerifyStateHMAC(t *testing.T) {
-	secret := "test-secret"
-
-	tests := []struct {
-		name      string
-		stateBlob string
-		want      bool
-	}{
-		{
-			name:      "valid state",
-			stateBlob: buildValidState(t, secret),
-			want:      true,
-		},
-		{
-			name:      "wrong secret",
-			stateBlob: buildValidState(t, "other-secret"),
-			want:      false,
-		},
-		{
-			name:      "tampered payload",
-			stateBlob: "dGFtcGVyZWQ." + signHMAC(secret, "original"),
-			want:      false,
-		},
-		{
-			name:      "missing dot separator",
-			stateBlob: "nodothere",
-			want:      false,
-		},
-		{
-			name:      "empty string",
-			stateBlob: "",
-			want:      false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := verifyStateHMAC(secret, tc.stateBlob)
-			if got != tc.want {
-				t.Errorf("verifyStateHMAC() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestHandleCallback_InvalidHMAC(t *testing.T) {
-	// Daemon stub — should NOT be called on invalid HMAC.
+func TestHandleCallback_InvalidHMAC_ForwardsToDaemon(t *testing.T) {
+	// With the ALB-like behavior, alb-mock forwards all requests to daemon
+	// regardless of HMAC validity. The daemon is responsible for validation.
 	daemonCalled := false
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		daemonCalled = true
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("<html><body>Session Error</body></html>"))
 	}))
 	defer daemon.Close()
 
 	cfg := &mockConfig{
-		hmacSecret: "test-secret",
 		daemonAddr: strings.TrimPrefix(daemon.URL, "http://"),
 		email:      "test@example.com",
 		sub:        "test-sub",
@@ -92,18 +53,26 @@ func TestHandleCallback_InvalidHMAC(t *testing.T) {
 
 	handleCallback(cfg)(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", w.Code)
+	if !daemonCalled {
+		t.Error("daemon should be called — alb-mock forwards all requests like a real ALB")
 	}
-	if daemonCalled {
-		t.Error("daemon should not be called on invalid HMAC")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 (daemon error response), got %d", w.Code)
 	}
 }
 
-func TestHandleCallback_MissingState(t *testing.T) {
+func TestHandleCallback_MissingState_ForwardsToDaemon(t *testing.T) {
+	daemonCalled := false
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		daemonCalled = true
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("<html><body>Session Error</body></html>"))
+	}))
+	defer daemon.Close()
+
 	cfg := &mockConfig{
-		hmacSecret: "test-secret",
-		daemonAddr: "localhost:9999",
+		daemonAddr: strings.TrimPrefix(daemon.URL, "http://"),
 		email:      "test@example.com",
 		sub:        "test-sub",
 		groups:     []string{},
@@ -115,8 +84,11 @@ func TestHandleCallback_MissingState(t *testing.T) {
 
 	handleCallback(cfg)(w, req)
 
+	if !daemonCalled {
+		t.Error("daemon should be called — alb-mock forwards all requests like a real ALB")
+	}
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", w.Code)
+		t.Errorf("expected 400 (daemon error response), got %d", w.Code)
 	}
 }
 
@@ -135,7 +107,6 @@ func TestHandleCallback_ValidState_ForwardsOIDCHeaders(t *testing.T) {
 	defer daemon.Close()
 
 	cfg := &mockConfig{
-		hmacSecret: secret,
 		daemonAddr: strings.TrimPrefix(daemon.URL, "http://"),
 		email:      "user@example.com",
 		sub:        "sub-abc",
@@ -170,7 +141,7 @@ func TestHandleCallback_ValidState_ForwardsOIDCHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode JWT claims: %v", err)
 	}
-	var claims map[string]interface{}
+	var claims map[string]any
 	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
 		t.Fatalf("unmarshal JWT claims: %v", err)
 	}
@@ -193,7 +164,6 @@ func TestHandleCallback_DaemonResponsePassedThrough(t *testing.T) {
 	defer daemon.Close()
 
 	cfg := &mockConfig{
-		hmacSecret: secret,
 		daemonAddr: strings.TrimPrefix(daemon.URL, "http://"),
 		email:      "user@example.com",
 		sub:        "sub-abc",
@@ -234,7 +204,7 @@ func TestBuildUnsignedJWT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode claims: %v", err)
 	}
-	var claims map[string]interface{}
+	var claims map[string]any
 	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
 		t.Fatalf("unmarshal claims: %v", err)
 	}
@@ -245,7 +215,7 @@ func TestBuildUnsignedJWT(t *testing.T) {
 	if claims["sub"] != "sub-123" {
 		t.Errorf("sub = %v, want sub-123", claims["sub"])
 	}
-	rawGroups, ok := claims["cognito:groups"].([]interface{})
+	rawGroups, ok := claims["cognito:groups"].([]any)
 	if !ok || len(rawGroups) != 2 {
 		t.Errorf("cognito:groups = %v, want 2 entries", claims["cognito:groups"])
 	}

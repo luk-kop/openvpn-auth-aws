@@ -29,7 +29,7 @@ type Config struct {
 	AuthTimeout  time.Duration
 	CallbackPort int
 
-	// v2 ALB fields
+	// ALB fields
 	CallbackURL         string // --callback-url / VPN_AUTH_CALLBACK_URL
 	ALBARN              string // --alb-arn / VPN_AUTH_ALB_ARN
 	CognitoSkipReauth   bool   // --cognito-skip-reauth / VPN_AUTH_COGNITO_SKIP_REAUTH
@@ -48,6 +48,7 @@ type Config struct {
 
 	// HTML templates
 	TemplatesDir string
+	ServerName   string
 }
 
 func Parse() (Config, error) {
@@ -72,7 +73,7 @@ func Parse() (Config, error) {
 	flag.DurationVar(&cfg.AuthTimeout, "auth-timeout", getDurationOrCollect("VPN_AUTH_AUTH_TIMEOUT", 270*time.Second, &envErrors), "timeout for WebAuth callback flow (should be hand-window minus ~30s)")
 	flag.IntVar(&cfg.CallbackPort, "callback-port", getIntOrCollect("VPN_AUTH_CALLBACK_PORT", 8080, &envErrors), "port for callback HTTP server")
 
-	// v2 ALB flags
+	// ALB flags
 	flag.StringVar(&cfg.CallbackURL, "callback-url", getenv("VPN_AUTH_CALLBACK_URL", ""), "full callback URL including path (e.g. https://vpn-auth.example.com/callback/01/udp); daemon appends ?state=...")
 	flag.StringVar(&cfg.ALBARN, "alb-arn", getenv("VPN_AUTH_ALB_ARN", ""), "ALB ARN for validating the signer field in ALB JWTs (omit to skip JWT signature validation in dev/test)")
 	flag.BoolVar(&cfg.CognitoSkipReauth, "cognito-skip-reauth", getBool("VPN_AUTH_COGNITO_SKIP_REAUTH", false), "skip Cognito AdminGetUser call on CLIENT:REAUTH (dev/test only)")
@@ -89,6 +90,7 @@ func Parse() (Config, error) {
 	flag.DurationVar(&cfg.EMFInterval, "emf-interval", getDurationOrCollect("VPN_AUTH_EMF_INTERVAL", 10*time.Second, &envErrors), "interval for EMF heartbeat metrics (0 to disable heartbeat only)")
 	flag.StringVar(&cfg.LogFormat, "log-format", getenv("VPN_AUTH_LOG_FORMAT", "text"), "log output format: text or json")
 	flag.StringVar(&cfg.TemplatesDir, "templates-dir", getenv("VPN_AUTH_TEMPLATES_DIR", ""), "path to custom HTML templates (overrides built-in)")
+	flag.StringVar(&cfg.ServerName, "server-name", getenv("VPN_AUTH_SERVER_NAME", ""), "human-readable server name exposed to HTML templates")
 
 	flag.Parse()
 

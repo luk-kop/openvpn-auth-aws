@@ -25,7 +25,7 @@ run-daemon:
 		--hand-window=120s
 
 run-alb-mock:
-	VPN_AUTH_HMAC_SECRET=test-secret DAEMON_ADDR=localhost:8081 go run ./cmd/alb-mock
+	DAEMON_ADDR=localhost:8081 go run ./cmd/alb-mock
 
 run-mgmt-mock:
 	go run ./cmd/mgmt-mock
@@ -58,6 +58,14 @@ stack-down:
 stack-rebuild:
 	docker compose -f lab/docker-compose.yml build --no-cache
 	docker compose -f lab/docker-compose.yml up -d
+	@echo ""
+	@echo "==> Stack ready!"
+	@echo "    OpenVPN:     udp://localhost:1194"
+	@echo "    alb-mock:    http://localhost:8080"
+	@echo "    daemon cb:   http://localhost:8081"
+	@echo ""
+	@echo "Connect: sudo openvpn --config lab/client.ovpn"
+	@echo "Logs:    docker compose -f lab/docker-compose.yml logs -f daemon"
 
 # Build all binaries
 build:

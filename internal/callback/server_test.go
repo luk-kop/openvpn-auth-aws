@@ -708,8 +708,8 @@ func TestLoadTemplates_Embedded(t *testing.T) {
 
 func TestLoadTemplates_OverrideOK(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "success.html", `<!DOCTYPE html><html><body>{{.Email}}</body></html>`)
-	writeFile(t, dir, "error.html", `<!DOCTYPE html><html><body>{{.Title}} {{.Message}}</body></html>`)
+	writeFile(t, dir, "success.html", `<!DOCTYPE html><html><body>{{.Email}} {{.SessionID}}</body></html>`)
+	writeFile(t, dir, "error.html", `<!DOCTYPE html><html><body>{{.Title}} {{.Message}} {{.StatusCode}}</body></html>`)
 
 	tmpl, err := loadTemplates(dir)
 	if err != nil {
@@ -765,7 +765,7 @@ func TestLoadTemplates_NotADirectory(t *testing.T) {
 func TestRenderError_Fallback(t *testing.T) {
 	srv := &Server{tmpl: template.New("root")} // no templates defined
 	w := httptest.NewRecorder()
-	srv.renderError(w, http.StatusForbidden, "Access Denied", "You are not a member of the required group.")
+	srv.renderError(w, http.StatusForbidden, "Access Denied", "You are not a member of the required group.", "test-sid")
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", w.Code)
@@ -783,7 +783,7 @@ func TestRenderError_Fallback(t *testing.T) {
 func TestRenderSuccess_Fallback(t *testing.T) {
 	srv := &Server{tmpl: template.New("root")} // no templates defined
 	w := httptest.NewRecorder()
-	srv.renderSuccess(w, "user@example.com")
+	srv.renderSuccess(w, "user@example.com", "test-sid")
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)

@@ -1,11 +1,10 @@
 // alb-mock simulates ALB + Cognito authenticate action for local development.
-// It verifies the HMAC state blob, builds an unsigned x-amzn-oidc-data JWT
-// with configurable test identity, and forwards the request to the daemon's
-// callback port.
+// It builds an unsigned x-amzn-oidc-data JWT with configurable test identity
+// and forwards all requests to the daemon's callback port — just like a real
+// ALB, which does not inspect or validate the application state parameter.
 //
 // Usage (via docker compose or standalone):
 //
-//	VPN_AUTH_HMAC_SECRET=test-secret
 //	MOCK_EMAIL=test@example.com
 //	MOCK_SUB=test-sub-123
 //	MOCK_GROUPS=vpn-users
@@ -14,8 +13,6 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -28,7 +25,6 @@ import (
 )
 
 func main() {
-	hmacSecret := mustEnv("VPN_AUTH_HMAC_SECRET")
 	daemonAddr := mustEnv("DAEMON_ADDR")
 	mockEmail := getenv("MOCK_EMAIL", "test@example.com")
 	mockSub := getenv("MOCK_SUB", "test-sub-123")
@@ -36,7 +32,6 @@ func main() {
 	listenAddr := getenv("LISTEN_ADDR", ":8080")
 
 	cfg := &mockConfig{
-		hmacSecret: hmacSecret,
 		daemonAddr: daemonAddr,
 		email:      mockEmail,
 		sub:        mockSub,
@@ -57,7 +52,6 @@ func main() {
 }
 
 type mockConfig struct {
-	hmacSecret string
 	daemonAddr string
 	email      string
 	sub        string
@@ -67,17 +61,6 @@ type mockConfig struct {
 func handleCallback(cfg *mockConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		stateBlob := r.URL.Query().Get("state")
-		if stateBlob == "" {
-			http.Error(w, "missing state", http.StatusBadRequest)
-			return
-		}
-
-		// Verify HMAC on state blob (format: base64payload.mac).
-		if !verifyStateHMAC(cfg.hmacSecret, stateBlob) {
-			slog.Warn("alb-mock: invalid state HMAC")
-			http.Error(w, "invalid state signature", http.StatusForbidden)
-			return
-		}
 
 		// Build unsigned x-amzn-oidc-data JWT.
 		oidcData, err := buildUnsignedJWT(cfg.email, cfg.sub, cfg.groups)
@@ -88,9 +71,17 @@ func handleCallback(cfg *mockConfig) http.HandlerFunc {
 		}
 
 		// Forward GET to daemon with oidc headers.
+		// State validation (HMAC, expiry) is the daemon's responsibility,
+		// just like a real ALB forwards all requests without inspecting state.
 		path := r.PathValue("path")
-		daemonURL := fmt.Sprintf("http://%s/callback/%s?state=%s",
-			cfg.daemonAddr, path, stateBlob)
+		query := "state=" + stateBlob
+		if stateBlob == "" {
+			query = ""
+		}
+		daemonURL := fmt.Sprintf("http://%s/callback/%s", cfg.daemonAddr, path)
+		if query != "" {
+			daemonURL += "?" + query
+		}
 
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, daemonURL, nil)
 		if err != nil {
@@ -119,24 +110,6 @@ func handleCallback(cfg *mockConfig) http.HandlerFunc {
 	}
 }
 
-// verifyStateHMAC checks the HMAC signature on a state blob (format: base64payload.mac).
-func verifyStateHMAC(secret, stateBlob string) bool {
-	parts := strings.SplitN(stateBlob, ".", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	encoded, mac := parts[0], parts[1]
-	expected := signHMAC(secret, encoded)
-	return hmac.Equal([]byte(expected), []byte(mac))
-}
-
-// signHMAC computes HMAC-SHA256 of data using secret, returning base64url encoding.
-func signHMAC(secret, data string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(data))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
 // buildUnsignedJWT constructs an unsigned JWT (header.claims.) with the given identity.
 // The daemon in dev mode (no --alb-arn) skips signature verification.
 func buildUnsignedJWT(email, sub string, groups []string) (string, error) {
@@ -151,7 +124,7 @@ func buildUnsignedJWT(email, sub string, groups []string) (string, error) {
 	}
 
 	now := time.Now().Unix()
-	claims := map[string]interface{}{
+	claims := map[string]any{
 		"sub":            sub,
 		"email":          email,
 		"exp":            now + 3600,

@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
 
@@ -20,7 +20,9 @@ WORKDIR /app
 
 COPY --from=builder /build/openvpn-auth-daemon .
 
-RUN addgroup -S daemon && adduser -S -G daemon daemon
-USER daemon
+RUN adduser -S -D -H -u 10001 -G daemon appuser
+USER appuser
+
+EXPOSE 8081
 
 CMD ["/app/openvpn-auth-daemon"]

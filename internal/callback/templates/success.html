@@ -7,26 +7,44 @@
 <title>Authenticated</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:system-ui,-apple-system,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f5f5f5;color:#333}
-.card{text-align:center;padding:2.5rem 3rem;background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.1);max-width:420px;width:90%}
-.emoji{font-size:3rem;margin-bottom:.5rem}
-h1{font-size:1.4rem;margin-bottom:.5rem}
-.detail{color:#666;font-size:.9rem;margin-top:.25rem}
-.hint{color:#999;font-size:.85rem;margin-top:1.25rem}
+body{font-family:system-ui,-apple-system,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;background:linear-gradient(135deg,#f0f4f8 0%,#e2e8f0 100%);color:#333}
+.card{text-align:center;padding:2.5rem 3rem;background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08);max-width:420px;width:90%;animation:fade-in .4s ease-out}
+@keyframes fade-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.icon{margin:0 auto .75rem}
+.icon svg{width:56px;height:56px}
+h1{font-size:1.4rem;margin-bottom:.25rem;letter-spacing:-.02em}
+.server{color:#64748b;font-size:.9rem;margin-bottom:.5rem;font-weight:500}
+.detail{color:#64748b;font-size:.9rem;margin-top:.25rem}
+.hint{color:#94a3b8;font-size:.85rem;margin-top:1.25rem}
+hr{border:none;border-top:1px solid #e2e8f0;margin:1.25rem 0 .75rem}
+.meta{color:#b0bec5;font-size:.72rem;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;word-break:break-all}
 @media(prefers-color-scheme:dark){
-body{background:#1a1a1a;color:#e0e0e0}
-.card{background:#2a2a2a;box-shadow:0 2px 8px rgba(0,0,0,.4)}
-.detail{color:#aaa}
-.hint{color:#888}
+body{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);color:#e2e8f0}
+.card{background:#1e293b;box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.icon svg .circle{fill:#064e3b}
+.icon svg .check{fill:#34d399}
+.server{color:#94a3b8}
+.detail{color:#94a3b8}
+.hint{color:#64748b}
+hr{border-top-color:#334155}
+.meta{color:#475569}
 }
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="emoji">✅</div>
+  <div class="icon">
+    <svg viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle class="circle" cx="28" cy="28" r="28" fill="#d1fae5"/>
+      <path class="check" d="M17 29l7 7 15-15" stroke="#059669" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+  </div>
   <h1>Authenticated</h1>
+  {{if .ServerName}}<p class="server">{{.ServerName}}</p>{{end}}
   <p class="detail">{{.Email}}</p>
   <p class="hint">You can close this window.</p>
+  <hr>
+  <p class="meta">{{.Hostname}}{{if .SessionID}} &middot; {{.SessionID}}{{end}}</p>
 </div>
 </body>
 </html>

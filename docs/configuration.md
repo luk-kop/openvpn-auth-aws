@@ -29,6 +29,7 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--emf-interval` | `VPN_AUTH_EMF_INTERVAL` | `10s` | Interval for EMF heartbeat metrics (`0` to disable heartbeat only) |
 | `--log-format` | `VPN_AUTH_LOG_FORMAT` | `text` | Log output format: `text` or `json` |
 | `--templates-dir` | `VPN_AUTH_TEMPLATES_DIR` | — | Path to custom HTML templates directory. Overrides built-in templates. Must contain both `success.html` and `error.html`. |
+| `--server-name` | `VPN_AUTH_SERVER_NAME` | — | Human-readable server name exposed to HTML templates via `{{ .ServerName }}` |
 | `--instance-id` | `VPN_AUTH_INSTANCE_ID` | `local-dev` | Instance identifier used in EMF metrics |
 
 See `--help` for the full list.
@@ -159,10 +160,30 @@ openvpn-auth-daemon --templates-dir /etc/openvpn-auth/templates/
 Requirements:
 - The directory must contain both `success.html` and `error.html` (all-or-nothing override)
 - Templates are parsed with Go's `html/template` package
-- `success.html` receives `{{ .Email }}` (string)
-- `error.html` receives `{{ .Title }}` and `{{ .Message }}` (both strings)
 
 The daemon validates templates at startup and refuses to start if any are missing or contain syntax errors.
+
+### Template Variables
+
+**`success.html`:**
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `{{ .Email }}` | string | Authenticated user's email address |
+| `{{ .SessionID }}` | string | Internal session ID (useful for support/debugging) |
+| `{{ .Hostname }}` | string | OS hostname of the daemon server (`os.Hostname()`) |
+| `{{ .ServerName }}` | string | Human-readable name set via `--server-name` (empty if not configured) |
+
+**`error.html`:**
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `{{ .Title }}` | string | Error title (e.g. "Access Denied", "Session Expired") |
+| `{{ .Message }}` | string | Human-readable error description |
+| `{{ .StatusCode }}` | int | HTTP status code (e.g. 400, 403, 404, 503) |
+| `{{ .SessionID }}` | string | Internal session ID, empty if not yet resolved |
+| `{{ .Hostname }}` | string | OS hostname of the daemon server (`os.Hostname()`) |
+| `{{ .ServerName }}` | string | Human-readable name set via `--server-name` (empty if not configured) |
 
 In Docker:
 
