@@ -51,11 +51,11 @@ func TestValidate_ManagementSocketRequired(t *testing.T) {
 	}
 }
 
-func TestValidate_HMACSecretRequired(t *testing.T) {
+func TestValidate_HMACSecretOptional(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.HMACSecret = ""
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when HMACSecret is empty, got nil")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error when HMACSecret is empty (daemon generates random key), got: %v", err)
 	}
 }
 

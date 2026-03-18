@@ -19,20 +19,13 @@ resource "aws_vpc_security_group_ingress_rule" "alb_https" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-resource "aws_vpc_security_group_egress_rule" "alb_to_daemon_udp" {
-  security_group_id            = aws_security_group.alb.id
-  description                  = "ALB to UDP daemon"
-  from_port                    = 8080
-  to_port                      = 8080
-  ip_protocol                  = "tcp"
-  referenced_security_group_id = var.daemon_security_group_id
-}
+resource "aws_vpc_security_group_egress_rule" "alb_to_daemon" {
+  for_each = var.listeners
 
-resource "aws_vpc_security_group_egress_rule" "alb_to_daemon_tcp" {
   security_group_id            = aws_security_group.alb.id
-  description                  = "ALB to TCP daemon"
-  from_port                    = 8081
-  to_port                      = 8081
+  description                  = "ALB to ${each.key} daemon"
+  from_port                    = each.value.daemon_port
+  to_port                      = each.value.daemon_port
   ip_protocol                  = "tcp"
   referenced_security_group_id = var.daemon_security_group_id
 }

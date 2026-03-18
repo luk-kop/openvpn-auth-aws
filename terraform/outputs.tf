@@ -37,14 +37,11 @@ output "alb_dns_name" {
   value       = var.deploy_compute ? module.alb[0].alb_dns_name : null
 }
 
-output "callback_url_udp" {
-  description = "Full callback URL for the UDP daemon"
-  value       = var.deploy_compute ? "https://${var.alb_domain_name}/callback/${var.server_name}/udp" : null
-}
-
-output "callback_url_tcp" {
-  description = "Full callback URL for the TCP daemon"
-  value       = var.deploy_compute ? "https://${var.alb_domain_name}/callback/${var.server_name}/tcp" : null
+output "callback_urls" {
+  description = "Full callback URLs per listener (e.g. {udp = \"https://...\", tcp = \"https://...\"})"
+  value = var.deploy_compute ? {
+    for k, _ in var.openvpn_listeners : k => "https://${var.alb_domain_name}/callback/${var.server_name}/${k}"
+  } : null
 }
 
 output "vpn_public_ip" {
@@ -52,16 +49,16 @@ output "vpn_public_ip" {
   value       = var.deploy_compute ? aws_eip.vpn[0].public_ip : null
 }
 
-# --- EC2 ---
+# --- ASG / EC2 ---
 
-output "ec2_instance_id" {
-  description = "OpenVPN EC2 instance ID"
-  value       = var.deploy_compute ? module.vpn_server[0].instance_id : null
+output "asg_name" {
+  description = "Auto Scaling Group name for the OpenVPN server"
+  value       = var.deploy_compute ? module.vpn_server[0].asg_name : null
 }
 
-output "ec2_private_ip" {
-  description = "OpenVPN EC2 private IP"
-  value       = var.deploy_compute ? module.vpn_server[0].private_ip : null
+output "launch_template_id" {
+  description = "Launch template ID for the OpenVPN server"
+  value       = var.deploy_compute ? module.vpn_server[0].launch_template_id : null
 }
 
 output "daemon_instance_profile_name" {
@@ -75,6 +72,6 @@ output "daemon_security_group_id" {
 }
 
 output "ssm_session_command" {
-  description = "AWS CLI command to start an SSM session"
-  value       = var.deploy_compute ? "aws ssm start-session --target ${module.vpn_server[0].instance_id} --region ${var.aws_region}" : null
+  description = "AWS CLI command to find the EC2 instance from ASG and start an SSM session"
+  value       = var.deploy_compute ? "aws ssm start-session --target $(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${module.vpn_server[0].asg_name} --query 'AutoScalingGroups[0].Instances[0].InstanceId' --output text) --region ${var.aws_region}" : null
 }

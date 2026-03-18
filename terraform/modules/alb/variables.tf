@@ -37,3 +37,13 @@ variable "daemon_security_group_id" {
   description = "Security group ID of the daemon EC2 instance (used for ALB egress rules)"
   type        = string
 }
+
+variable "listeners" {
+  description = "Map of OpenVPN listeners (used for ALB egress rules to daemon ports)"
+  type = map(object({
+    openvpn_port = number
+    ip_protocol  = string
+    client_cidr  = string
+    daemon_port  = number
+  }))
+}

@@ -106,11 +106,10 @@ write_files:
 
       hand-window ${hand_window}
 
-  # --- Daemon environment (HMAC secret) ---
+  # --- Daemon environment ---
   - path: /etc/openvpn-auth/env
     permissions: "0600"
-    content: |
-      VPN_AUTH_HMAC_SECRET=${hmac_secret}
+    content: ""
 
   # --- PKI fetch script ---
   - path: /usr/local/bin/fetch-pki.sh

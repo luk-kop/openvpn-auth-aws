@@ -1,11 +1,11 @@
-output "instance_id" {
-  description = "EC2 instance ID"
-  value       = aws_instance.openvpn.id
+output "asg_name" {
+  description = "Auto Scaling Group name"
+  value       = aws_autoscaling_group.openvpn.name
 }
 
-output "private_ip" {
-  description = "EC2 private IP"
-  value       = aws_instance.openvpn.private_ip
+output "launch_template_id" {
+  description = "Launch template ID"
+  value       = aws_launch_template.openvpn.id
 }
 
 output "instance_profile_name" {
@@ -13,12 +13,7 @@ output "instance_profile_name" {
   value       = aws_iam_instance_profile.daemon.name
 }
 
-output "tg_udp_arn" {
-  description = "ALB Target Group ARN for the UDP daemon (port 8080)"
-  value       = aws_lb_target_group.udp.arn
-}
-
-output "tg_tcp_arn" {
-  description = "ALB Target Group ARN for the TCP daemon (port 8081)"
-  value       = aws_lb_target_group.tcp.arn
+output "target_group_arns" {
+  description = "Map of listener key to ALB Target Group ARN"
+  value       = { for k, tg in aws_lb_target_group.this : k => tg.arn }
 }

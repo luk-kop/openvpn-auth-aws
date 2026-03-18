@@ -44,9 +44,15 @@ func main() {
 	var identity auth.IdentityChecker
 	var signer auth.StateSigner
 
+	if cfg.HMACSecret != "" {
+		signer = secrets.NewStaticSigner(cfg.HMACSecret)
+	} else {
+		slog.Info("no hmac-secret provided, generating random key")
+		signer = secrets.NewRandomSigner()
+	}
+
 	if cfg.CognitoUserPoolID == "" {
 		identity = cognito.NewStaticChecker(cfg.CheckGroupsOnReauth)
-		signer = secrets.NewStaticSigner(cfg.HMACSecret)
 	} else {
 		slog.Info("initializing AWS clients")
 		awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.AWSRegion))
@@ -56,7 +62,6 @@ func main() {
 		}
 
 		identity = cognito.NewChecker(awsCfg, cfg.CognitoUserPoolID)
-		signer = secrets.NewStaticSigner(cfg.HMACSecret)
 	}
 
 	handler := auth.NewHandler(cfg, sessions, identity, signer, m)

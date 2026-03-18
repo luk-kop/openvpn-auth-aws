@@ -170,35 +170,30 @@ variable "ec2_root_volume_size" {
   default     = 20
 }
 
-# --- OpenVPN ---
+# --- OpenVPN Listeners ---
 
-variable "openvpn_udp_port" {
-  description = "OpenVPN UDP listening port"
-  type        = number
-  default     = 1194
-}
-
-variable "openvpn_tcp_port" {
-  description = "OpenVPN TCP listening port"
-  type        = number
-  default     = 1195
-
-  validation {
-    condition     = var.openvpn_tcp_port != var.openvpn_udp_port
-    error_message = "openvpn_tcp_port must be different from openvpn_udp_port."
+variable "openvpn_listeners" {
+  description = "Map of OpenVPN listeners. Each key (e.g. 'udp', 'tcp') defines an OpenVPN server instance with its VPN port, transport protocol, tunnel CIDR, and auth daemon HTTP port."
+  type = map(object({
+    openvpn_port = number
+    ip_protocol  = string
+    client_cidr  = string
+    daemon_port  = number
+  }))
+  default = {
+    udp = {
+      openvpn_port = 1194
+      ip_protocol  = "udp"
+      client_cidr  = "10.8.0.0/24"
+      daemon_port  = 8080
+    }
+    tcp = {
+      openvpn_port = 1195
+      ip_protocol  = "tcp"
+      client_cidr  = "10.8.1.0/24"
+      daemon_port  = 8081
+    }
   }
-}
-
-variable "openvpn_udp_client_cidr" {
-  description = "VPN tunnel client CIDR for the UDP server (e.g. 10.8.0.0/24)"
-  type        = string
-  default     = "10.8.0.0/24"
-}
-
-variable "openvpn_tcp_client_cidr" {
-  description = "VPN tunnel client CIDR for the TCP server (e.g. 10.8.1.0/24). Must not overlap with UDP CIDR."
-  type        = string
-  default     = "10.8.1.0/24"
 }
 
 variable "ssh_allowed_cidrs" {

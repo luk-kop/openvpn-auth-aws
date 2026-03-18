@@ -13,9 +13,14 @@ variable "daemon_security_group_id" {
   type        = string
 }
 
-variable "subnet_id" {
-  description = "Subnet ID for the EC2 instance"
+variable "vpc_id" {
+  description = "VPC ID for target groups"
   type        = string
+}
+
+variable "subnet_ids" {
+  description = "Subnet IDs for the ASG (public subnets with IGW route required)"
+  type        = list(string)
 }
 
 variable "cognito_user_pool_arn" {
@@ -28,14 +33,24 @@ variable "alb_arn" {
   type        = string
 }
 
-variable "callback_url_udp" {
-  description = "Full callback URL for the UDP daemon (e.g. https://vpn-auth.example.com/callback/01/udp)"
+variable "alb_domain_name" {
+  description = "ALB domain name for constructing callback URLs"
   type        = string
 }
 
-variable "callback_url_tcp" {
-  description = "Full callback URL for the TCP daemon (e.g. https://vpn-auth.example.com/callback/01/tcp)"
+variable "server_name" {
+  description = "Unique server name used in ALB path routing (e.g. '01')"
   type        = string
+}
+
+variable "listeners" {
+  description = "Map of OpenVPN listeners keyed by protocol name (e.g. 'udp', 'tcp')"
+  type = map(object({
+    openvpn_port = number
+    ip_protocol  = string
+    client_cidr  = string
+    daemon_port  = number
+  }))
 }
 
 variable "daemon_binary_s3_uri" {
@@ -75,32 +90,6 @@ variable "eip_allocation_id" {
   type        = string
 }
 
-# --- OpenVPN ---
-
-variable "openvpn_udp_port" {
-  description = "OpenVPN UDP listening port"
-  type        = number
-  default     = 1194
-}
-
-variable "openvpn_tcp_port" {
-  description = "OpenVPN TCP listening port"
-  type        = number
-  default     = 1195
-}
-
-variable "openvpn_udp_client_cidr" {
-  description = "VPN tunnel client CIDR for the UDP server"
-  type        = string
-  default     = "10.8.0.0/24"
-}
-
-variable "openvpn_tcp_client_cidr" {
-  description = "VPN tunnel client CIDR for the TCP server"
-  type        = string
-  default     = "10.8.1.0/24"
-}
-
 variable "hand_window" {
   description = "Seconds allowed for browser-based auth. Used in both OpenVPN server config and daemon --hand-window flag to keep them in sync."
   type        = number
@@ -112,16 +101,15 @@ variable "cognito_user_pool_id" {
   type        = string
 }
 
+variable "cognito_issuer_url" {
+  description = "Cognito issuer URL for JWT validation (e.g. https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_abc123)"
+  type        = string
+}
+
 variable "required_group" {
   description = "Cognito group required for VPN access, passed to daemon --required-group"
   type        = string
   default     = ""
-}
-
-variable "hmac_secret" {
-  description = "HMAC secret for state blob signing, passed to daemon via VPN_AUTH_HMAC_SECRET"
-  type        = string
-  sensitive   = true
 }
 
 variable "pki_secret_arns" {
@@ -133,4 +121,30 @@ variable "associate_public_ip" {
   description = "Assign a temporary public IP at launch for cloud-init internet access. The EIP replaces this IP once ALB health checks pass. Set to false only if using VPC Endpoints and an apt proxy."
   type        = bool
   default     = true
+}
+
+# --- ASG ---
+
+variable "asg_desired_capacity" {
+  description = "Desired number of instances in the ASG"
+  type        = number
+  default     = 1
+}
+
+variable "asg_min_size" {
+  description = "Minimum number of instances in the ASG"
+  type        = number
+  default     = 1
+}
+
+variable "asg_max_size" {
+  description = "Maximum number of instances in the ASG"
+  type        = number
+  default     = 2
+}
+
+variable "asg_health_check_grace_period" {
+  description = "Seconds after instance launch before health checks start"
+  type        = number
+  default     = 300
 }

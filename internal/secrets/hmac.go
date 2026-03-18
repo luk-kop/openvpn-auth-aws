@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 )
@@ -13,6 +14,15 @@ type StaticSigner struct {
 
 func NewStaticSigner(secret string) *StaticSigner {
 	return &StaticSigner{secret: []byte(secret)}
+}
+
+// NewRandomSigner creates a StaticSigner with a cryptographically random 32-byte key.
+func NewRandomSigner() *StaticSigner {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		panic("crypto/rand: " + err.Error())
+	}
+	return &StaticSigner{secret: key}
 }
 
 func (s *StaticSigner) Sign(data string) string {

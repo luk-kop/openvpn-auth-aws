@@ -114,9 +114,6 @@ func (c Config) Validate() error {
 	if c.CallbackURL == "" {
 		problems = append(problems, "callback-url is required")
 	}
-	if c.HMACSecret == "" {
-		problems = append(problems, "hmac-secret is required")
-	}
 	if c.CognitoUserPoolID == "" && c.ALBARN != "" {
 		problems = append(problems, "cognito-user-pool-id is required when alb-arn is set")
 	}

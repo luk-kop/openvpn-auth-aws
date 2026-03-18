@@ -38,15 +38,12 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 |------|---------|
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.1 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.0 |
-| <a name="requirement_cloudinit"></a> [cloudinit](#requirement\_cloudinit) | ~> 2.0 |
-| <a name="requirement_random"></a> [random](#requirement\_random) | ~> 3.0 |
 
 ## Providers
 
 | Name | Version |
 |------|---------|
 | <a name="provider_aws"></a> [aws](#provider\_aws) | 6.36.0 |
-| <a name="provider_random"></a> [random](#provider\_random) | 3.8.1 |
 
 ## Modules
 
@@ -63,19 +60,15 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 | [aws_acm_certificate.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/acm_certificate) | resource |
 | [aws_acm_certificate_validation.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/acm_certificate_validation) | resource |
 | [aws_eip.vpn](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/eip) | resource |
-| [aws_lb_listener_rule.vpn_tcp](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb_listener_rule) | resource |
-| [aws_lb_listener_rule.vpn_udp](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb_listener_rule) | resource |
+| [aws_lb_listener_rule.vpn](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb_listener_rule) | resource |
 | [aws_route53_record.acm_validation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route53_record) | resource |
 | [aws_route53_record.alb](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route53_record) | resource |
 | [aws_secretsmanager_secret.pki](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
 | [aws_security_group.daemon](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_vpc_security_group_egress_rule.daemon_all](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
-| [aws_vpc_security_group_ingress_rule.daemon_from_alb_tcp](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
-| [aws_vpc_security_group_ingress_rule.daemon_from_alb_udp](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
-| [aws_vpc_security_group_ingress_rule.openvpn_tcp](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
-| [aws_vpc_security_group_ingress_rule.openvpn_udp](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
+| [aws_vpc_security_group_ingress_rule.daemon_from_alb](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
+| [aws_vpc_security_group_ingress_rule.openvpn](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.ssh](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
-| [random_password.hmac_secret](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
 
 ## Inputs
 
@@ -101,10 +94,7 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 | <a name="input_ec2_root_volume_size"></a> [ec2\_root\_volume\_size](#input\_ec2\_root\_volume\_size) | Root EBS volume size in GB | `number` | `20` | no |
 | <a name="input_hand_window"></a> [hand\_window](#input\_hand\_window) | Seconds allowed for browser-based auth. Applied to both OpenVPN server config and daemon --hand-window to keep them in sync. | `number` | `300` | no |
 | <a name="input_openvpn_allowed_cidrs"></a> [openvpn\_allowed\_cidrs](#input\_openvpn\_allowed\_cidrs) | CIDR blocks allowed to connect to OpenVPN. Use ["0.0.0.0/0"] for public access. | `list(string)` | <pre>[<br/>  "0.0.0.0/0"<br/>]</pre> | no |
-| <a name="input_openvpn_tcp_client_cidr"></a> [openvpn\_tcp\_client\_cidr](#input\_openvpn\_tcp\_client\_cidr) | VPN tunnel client CIDR for the TCP server (e.g. 10.8.1.0/24). Must not overlap with UDP CIDR. | `string` | `"10.8.1.0/24"` | no |
-| <a name="input_openvpn_tcp_port"></a> [openvpn\_tcp\_port](#input\_openvpn\_tcp\_port) | OpenVPN TCP listening port | `number` | `1195` | no |
-| <a name="input_openvpn_udp_client_cidr"></a> [openvpn\_udp\_client\_cidr](#input\_openvpn\_udp\_client\_cidr) | VPN tunnel client CIDR for the UDP server (e.g. 10.8.0.0/24) | `string` | `"10.8.0.0/24"` | no |
-| <a name="input_openvpn_udp_port"></a> [openvpn\_udp\_port](#input\_openvpn\_udp\_port) | OpenVPN UDP listening port | `number` | `1194` | no |
+| <a name="input_openvpn_listeners"></a> [openvpn\_listeners](#input\_openvpn\_listeners) | Map of OpenVPN listeners. Each key (e.g. 'udp', 'tcp') defines an OpenVPN server instance with its VPN port, transport protocol, tunnel CIDR, and auth daemon HTTP port. | <pre>map(object({<br/>    openvpn_port = number<br/>    ip_protocol  = string<br/>    client_cidr  = string<br/>    daemon_port  = number<br/>  }))</pre> | <pre>{<br/>  "tcp": {<br/>    "client_cidr": "10.8.1.0/24",<br/>    "daemon_port": 8081,<br/>    "ip_protocol": "tcp",<br/>    "openvpn_port": 1195<br/>  },<br/>  "udp": {<br/>    "client_cidr": "10.8.0.0/24",<br/>    "daemon_port": 8080,<br/>    "ip_protocol": "udp",<br/>    "openvpn_port": 1194<br/>  }<br/>}</pre> | no |
 | <a name="input_project_name"></a> [project\_name](#input\_project\_name) | Project name used for resource naming | `string` | `"openvpn-auth-aws"` | no |
 | <a name="input_route53_hosted_zone_id"></a> [route53\_hosted\_zone\_id](#input\_route53\_hosted\_zone\_id) | Route53 hosted zone ID for ACM DNS validation. Required when deploy\_compute = true. | `string` | `""` | no |
 | <a name="input_server_name"></a> [server\_name](#input\_server\_name) | Unique server name used in ALB path routing (e.g. '01'). Required when deploy\_compute = true. | `string` | `"01"` | no |
@@ -117,8 +107,8 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 |------|-------------|
 | <a name="output_alb_arn"></a> [alb\_arn](#output\_alb\_arn) | ALB ARN |
 | <a name="output_alb_dns_name"></a> [alb\_dns\_name](#output\_alb\_dns\_name) | ALB DNS name (use as the base for callback URLs) |
-| <a name="output_callback_url_tcp"></a> [callback\_url\_tcp](#output\_callback\_url\_tcp) | Full callback URL for the TCP daemon |
-| <a name="output_callback_url_udp"></a> [callback\_url\_udp](#output\_callback\_url\_udp) | Full callback URL for the UDP daemon |
+| <a name="output_asg_name"></a> [asg\_name](#output\_asg\_name) | Auto Scaling Group name for the OpenVPN server |
+| <a name="output_callback_urls"></a> [callback\_urls](#output\_callback\_urls) | Full callback URLs per listener (e.g. {udp = "https://...", tcp = "https://..."}) |
 | <a name="output_cognito_client_id"></a> [cognito\_client\_id](#output\_cognito\_client\_id) | Cognito User Pool Client ID |
 | <a name="output_cognito_domain_url"></a> [cognito\_domain\_url](#output\_cognito\_domain\_url) | Cognito hosted UI domain URL |
 | <a name="output_cognito_issuer_url"></a> [cognito\_issuer\_url](#output\_cognito\_issuer\_url) | Cognito issuer URL for JWT validation |
@@ -126,8 +116,7 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 | <a name="output_cognito_user_pool_id"></a> [cognito\_user\_pool\_id](#output\_cognito\_user\_pool\_id) | Cognito User Pool ID |
 | <a name="output_daemon_instance_profile_name"></a> [daemon\_instance\_profile\_name](#output\_daemon\_instance\_profile\_name) | IAM instance profile name for the daemon EC2 instance |
 | <a name="output_daemon_security_group_id"></a> [daemon\_security\_group\_id](#output\_daemon\_security\_group\_id) | Security group ID for the daemon EC2 instance |
-| <a name="output_ec2_instance_id"></a> [ec2\_instance\_id](#output\_ec2\_instance\_id) | OpenVPN EC2 instance ID |
-| <a name="output_ec2_private_ip"></a> [ec2\_private\_ip](#output\_ec2\_private\_ip) | OpenVPN EC2 private IP |
-| <a name="output_ssm_session_command"></a> [ssm\_session\_command](#output\_ssm\_session\_command) | AWS CLI command to start an SSM session |
+| <a name="output_launch_template_id"></a> [launch\_template\_id](#output\_launch\_template\_id) | Launch template ID for the OpenVPN server |
+| <a name="output_ssm_session_command"></a> [ssm\_session\_command](#output\_ssm\_session\_command) | AWS CLI command to find the EC2 instance from ASG and start an SSM session |
 | <a name="output_vpn_public_ip"></a> [vpn\_public\_ip](#output\_vpn\_public\_ip) | Elastic IP address of the VPN server |
 <!-- END_TF_DOCS -->
