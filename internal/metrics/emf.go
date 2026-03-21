@@ -17,7 +17,7 @@ func NewEmitter(w io.Writer, instanceID string) *Emitter {
 	return &Emitter{w: w, instanceID: instanceID}
 }
 
-func (e *Emitter) Heartbeat(socketConnected bool, inFlight int) {
+func (e *Emitter) Heartbeat(socketConnected bool, storedSessions int) {
 	e.emit(map[string]any{
 		"_aws": map[string]any{
 			"Timestamp": time.Now().UnixMilli(),
@@ -32,7 +32,7 @@ func (e *Emitter) Heartbeat(socketConnected bool, inFlight int) {
 		},
 		"InstanceId":       e.instanceID,
 		"SocketConnected":  boolToInt(socketConnected),
-		"StoredSessions": inFlight,
+		"StoredSessions": storedSessions,
 	})
 }
 

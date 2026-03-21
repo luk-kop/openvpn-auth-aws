@@ -53,7 +53,7 @@ type StateSigner interface {
 }
 
 type Metrics interface {
-	Heartbeat(socketConnected bool, inFlight int)
+	Heartbeat(socketConnected bool, storedSessions int)
 	AuthAttempt(reason string)
 	AuthSuccess()
 	AuthDenied(reason string)

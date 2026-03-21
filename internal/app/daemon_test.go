@@ -50,7 +50,7 @@ func TestRunFailsWhenCallbackPortBusy(t *testing.T) {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	daemon := New(cfg, handler, cbSrv, m)
+	daemon := New(cfg, handler, sessions, cbSrv, m)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -150,7 +150,7 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	daemon := New(cfg, handler, cbSrv, m)
+	daemon := New(cfg, handler, sessions, cbSrv, m)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

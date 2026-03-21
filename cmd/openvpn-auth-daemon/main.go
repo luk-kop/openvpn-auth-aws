@@ -74,7 +74,7 @@ func main() {
 	// Create daemon first to get the command channel, then create callback server with DaemonSink.
 	// The mgmtConnected closure reads the daemon's socketConnected atomic so /healthz reflects
 	// live socket state without coupling the callback package to the app package.
-	daemon := app.New(cfg, handler, nil, m)
+	daemon := app.New(cfg, handler, sessions, nil, m)
 	daemonSink := app.DaemonSink{CmdCh: daemon.CmdCh()}
 
 	// Give the handler a daemon-level sink for authTimeout goroutines so that

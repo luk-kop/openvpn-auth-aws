@@ -14,7 +14,7 @@ test:
 run-daemon:
 	go run ./cmd/openvpn-auth-daemon \
 		--cn-cross-check=false \
-		--hmac-secret=test-secret \
+		--hmac-secret=test-secret-key!! \
 		--callback-url=http://localhost:8080/callback \
 		--cognito-skip-reauth \
 		--cognito-groups-from-claims \

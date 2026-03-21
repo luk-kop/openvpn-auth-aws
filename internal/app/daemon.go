@@ -18,6 +18,7 @@ import (
 type Daemon struct {
 	cfg            config.Config
 	handler        *auth.Handler
+	sessions       *auth.SessionStore
 	metrics        auth.Metrics
 	callbackServer *callback.Server
 
@@ -95,11 +96,12 @@ func (s DaemonSink) trySend(cmd string) error {
 	}
 }
 
-func New(cfg config.Config, handler *auth.Handler, callbackServer *callback.Server, metrics auth.Metrics) *Daemon {
+func New(cfg config.Config, handler *auth.Handler, sessions *auth.SessionStore, callbackServer *callback.Server, metrics auth.Metrics) *Daemon {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	return &Daemon{
 		cfg:            cfg,
 		handler:        handler,
+		sessions:       sessions,
 		metrics:        metrics,
 		callbackServer: callbackServer,
 		cmdCh:          make(chan string, 256),
@@ -246,7 +248,7 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 		case <-ticker.C:
 			d.metrics.Heartbeat(
 				d.socketConnected.Load(),
-				d.handler.InFlight(),
+				d.sessions.Len(),
 			)
 		}
 	}

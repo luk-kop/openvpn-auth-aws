@@ -34,7 +34,7 @@ services:
       - ./openvpn-data:/etc/openvpn:ro
     environment:
       - VPN_AUTH_CN_CROSS_CHECK=false
-      - VPN_AUTH_HMAC_SECRET=test-secret
+      - VPN_AUTH_HMAC_SECRET=test-secret-key!!
       - VPN_AUTH_CALLBACK_URL=http://localhost:8080/callback/01/udp
       - VPN_AUTH_COGNITO_SKIP_REAUTH=true
       - VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS=true

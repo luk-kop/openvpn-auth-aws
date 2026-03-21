@@ -139,7 +139,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, auth.ErrSessionNotFound) {
 			slog.Info("callback: session not found", "sid", payload.SID)
 			s.metrics.CallbackRejected("session_not_found")
-			s.renderError(w, http.StatusNotFound, "Session Expired", "Your session has expired. Please try connecting again.", payload.SID)
+			s.renderError(w, http.StatusNotFound, "Session Expired", "Your session has expired.\nPlease try connecting again.", payload.SID)
 		} else {
 			slog.Info("callback: session not pending", "sid", payload.SID)
 			s.metrics.CallbackRejected("session_not_pending")

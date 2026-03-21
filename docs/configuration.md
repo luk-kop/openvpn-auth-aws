@@ -50,7 +50,7 @@ See `--help` for the full list.
 In production: set `--alb-arn` and `--cognito-user-pool-id`, leave both `--cognito-*` flags unset.
 In local dev: omit `--alb-arn` and `--cognito-user-pool-id`, set `--cognito-groups-from-claims` and `--cognito-skip-reauth`.
 
-**Startup validation:** The daemon will refuse to start if `--alb-arn` is set without `--cognito-user-pool-id` (production misconfiguration), or if `--required-group` is set without `--cognito-user-pool-id` and `--cognito-groups-from-claims` (group enforcement without a backend to check against).
+**Startup validation:** The daemon will refuse to start if `--alb-arn` is set without `--cognito-user-pool-id` or `--cognito-issuer-url` (production misconfiguration), if `--required-group` is set without `--cognito-user-pool-id` and `--cognito-groups-from-claims` (group enforcement without a backend to check against), or if `--hmac-secret` is provided but shorter than 16 bytes.
 
 ## Logging
 
