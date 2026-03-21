@@ -71,7 +71,7 @@ func (f *fakeGroupsChecker) CheckUser(_ context.Context, _, _ string, _ bool) (a
 // albARN is empty by default (dev mode — skip JWT signature validation).
 func newTestServer(cfg config.Config, identity GroupsChecker) (*Server, *captureSink, *fakeMetrics) {
 	sessions := auth.NewSessionStore()
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	sink := &captureSink{}
 	m := &fakeMetrics{}
 	srv, err := NewServer(sessions, signer, sink, cfg, m, identity, func() bool { return true })
@@ -84,7 +84,7 @@ func newTestServer(cfg config.Config, identity GroupsChecker) (*Server, *capture
 // newTestServerWithSessions builds a Server and returns the session store too.
 func newTestServerWithSessions(cfg config.Config, identity GroupsChecker) (*Server, *auth.SessionStore, *captureSink, *fakeMetrics) {
 	sessions := auth.NewSessionStore()
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	sink := &captureSink{}
 	m := &fakeMetrics{}
 	tmpl, err := loadTemplates("")
@@ -111,7 +111,7 @@ func newTestServerWithSessions(cfg config.Config, identity GroupsChecker) (*Serv
 // validStateParam creates a valid HMAC-signed state blob for the given session ID.
 func validStateParam(t *testing.T, sid string) string {
 	t.Helper()
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	return auth.EncodeState(auth.StatePayload{
 		SID: sid,
 		IAT: time.Now().Unix(),
@@ -122,7 +122,7 @@ func validStateParam(t *testing.T, sid string) string {
 // expiredStateParam creates an expired state blob.
 func expiredStateParam(t *testing.T, sid string) string {
 	t.Helper()
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	return auth.EncodeState(auth.StatePayload{
 		SID: sid,
 		IAT: time.Now().Add(-10 * time.Minute).Unix(),
@@ -484,7 +484,7 @@ func TestHandleCallback_CNMismatch(t *testing.T) {
 
 func TestHandleHealthz_Connected(t *testing.T) {
 	sessions := auth.NewSessionStore()
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	sink := &captureSink{}
 	cfg := defaultCfg()
 	srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return true })
@@ -513,7 +513,7 @@ func TestHandleHealthz_Connected(t *testing.T) {
 
 func TestHandleHealthz_Disconnected(t *testing.T) {
 	sessions := auth.NewSessionStore()
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	sink := &captureSink{}
 	cfg := defaultCfg()
 	srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return false })
@@ -565,7 +565,7 @@ func TestHealthzReflectsSocketState(t *testing.T) {
 			// Run many iterations to confirm the closure is evaluated at request time.
 			for i := 0; i < 50; i++ {
 				sessions := auth.NewSessionStore()
-				signer := secrets.NewStaticSigner("test-secret")
+				signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 				sink := &captureSink{}
 				cfg := defaultCfg()
 
@@ -607,7 +607,7 @@ func TestHealthzReflectsSocketState(t *testing.T) {
 // Validates: Requirements 6.2, 6.3
 func TestHealthzReflectsSocketState_DynamicSwitch(t *testing.T) {
 	sessions := auth.NewSessionStore()
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	sink := &captureSink{}
 	cfg := defaultCfg()
 

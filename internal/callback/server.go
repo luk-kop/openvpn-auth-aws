@@ -452,6 +452,10 @@ func extractALBClaims(mc *jwt.MapClaims) (auth.ALBClaims, error) {
 	sub, _ := raw["sub"].(string)
 	iss, _ := raw["iss"].(string)
 
+	if email == "" {
+		return auth.ALBClaims{}, fmt.Errorf("missing or empty email claim")
+	}
+
 	var exp int64
 	switch v := raw["exp"].(type) {
 	case float64:

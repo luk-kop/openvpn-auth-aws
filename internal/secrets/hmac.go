@@ -5,15 +5,22 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 )
+
+// MinSecretLen is the minimum accepted length for a user-provided HMAC secret.
+const MinSecretLen = 16
 
 // StaticSigner signs and verifies HMAC-SHA256 MACs using a static secret.
 type StaticSigner struct {
 	secret []byte
 }
 
-func NewStaticSigner(secret string) *StaticSigner {
-	return &StaticSigner{secret: []byte(secret)}
+func NewStaticSigner(secret string) (*StaticSigner, error) {
+	if len(secret) < MinSecretLen {
+		return nil, fmt.Errorf("hmac secret must be at least %d bytes, got %d", MinSecretLen, len(secret))
+	}
+	return &StaticSigner{secret: []byte(secret)}, nil
 }
 
 // NewRandomSigner creates a StaticSigner with a cryptographically random 32-byte key.

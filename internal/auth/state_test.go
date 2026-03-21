@@ -8,7 +8,7 @@ import (
 )
 
 func TestStateRoundTrip(t *testing.T) {
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	payload := StatePayload{
 		SID: "abc123",
 		IAT: time.Now().Unix(),
@@ -26,7 +26,7 @@ func TestStateRoundTrip(t *testing.T) {
 }
 
 func TestStateExpired(t *testing.T) {
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	payload := StatePayload{
 		SID: "abc123",
 		IAT: time.Now().Add(-10 * time.Minute).Unix(),
@@ -41,7 +41,7 @@ func TestStateExpired(t *testing.T) {
 }
 
 func TestStateTampered(t *testing.T) {
-	signer := secrets.NewStaticSigner("test-secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	payload := StatePayload{
 		SID: "abc123",
 		IAT: time.Now().Unix(),
@@ -62,7 +62,7 @@ func TestStateTampered(t *testing.T) {
 // PropStateRoundTrip: DecodeState(EncodeState(p, signer), signer) == p for all valid StatePayload values.
 // Validates: Requirement 13.4
 func TestPropStateRoundTrip(t *testing.T) {
-	signer := secrets.NewStaticSigner("prop-test-secret")
+	signer, _ := secrets.NewStaticSigner("prop-test-secret!!")
 
 	// Run with a fixed set of representative inputs covering edge cases.
 	cases := []StatePayload{
@@ -89,7 +89,7 @@ func TestPropStateRoundTrip(t *testing.T) {
 // PropTamperedStateRejection: flipping any byte in the MAC portion must cause Verify to return false.
 // Validates: Requirement 13.3
 func TestPropTamperedStateRejection(t *testing.T) {
-	signer := secrets.NewStaticSigner("prop-test-secret")
+	signer, _ := secrets.NewStaticSigner("prop-test-secret!!")
 	payload := StatePayload{
 		SID: "tamper-test",
 		IAT: 1000,
@@ -126,7 +126,7 @@ func TestPropTamperedStateRejection(t *testing.T) {
 // PropExpiredStateRejection: any StatePayload with EXP < now must be rejected by DecodeState.
 // Validates: Requirement 13.5
 func TestPropExpiredStateRejection(t *testing.T) {
-	signer := secrets.NewStaticSigner("prop-test-secret")
+	signer, _ := secrets.NewStaticSigner("prop-test-secret!!")
 
 	expiredCases := []StatePayload{
 		{SID: "s1", IAT: 0, EXP: 1},                                            // epoch + 1s

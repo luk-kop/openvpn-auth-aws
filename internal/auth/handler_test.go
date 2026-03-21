@@ -22,7 +22,7 @@ func (c *captureSink) Send(d Decision) {
 
 func newTestHandler(cfg config.Config) *Handler {
 	sessions := NewSessionStore()
-	signer := secrets.NewStaticSigner("secret")
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	m := metrics.NewEmitter(&strings.Builder{}, "test")
 	return NewHandler(cfg, sessions, nil, signer, m)
 }
@@ -30,7 +30,7 @@ func newTestHandler(cfg config.Config) *Handler {
 func TestHandleConnectWithoutWebAuth(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   50 * time.Millisecond,
 		AuthTimeout:  50 * time.Millisecond,
 		CallbackPort: 8080,
@@ -59,7 +59,7 @@ func TestHandleConnectWithoutWebAuth(t *testing.T) {
 func TestHandleConnectAcceptsOpenURL(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   50 * time.Millisecond,
 		AuthTimeout:  50 * time.Millisecond,
 		CallbackPort: 8080,
@@ -95,7 +95,7 @@ func TestHandleConnectAcceptsOpenURL(t *testing.T) {
 func TestHandleConnectAcceptsCSVWebAuth(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   50 * time.Millisecond,
 		AuthTimeout:  50 * time.Millisecond,
 		CallbackPort: 8080,
@@ -131,7 +131,7 @@ func TestHandleConnectAcceptsCSVWebAuth(t *testing.T) {
 func TestHandleConnectRejectsCrtext(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   50 * time.Millisecond,
 		AuthTimeout:  50 * time.Millisecond,
 		CallbackPort: 8080,
@@ -160,7 +160,7 @@ func TestHandleConnectRejectsCrtext(t *testing.T) {
 func TestHandleConnectIgnoresPassword(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   50 * time.Millisecond,
 		AuthTimeout:  50 * time.Millisecond,
 		CallbackPort: 8080,
@@ -201,7 +201,7 @@ func TestHandleConnectIgnoresPassword(t *testing.T) {
 func TestHandleConnectStateBlob(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   300 * time.Second,
 		AuthTimeout:  300 * time.Second,
 		CallbackPort: 9090,
@@ -249,7 +249,7 @@ func TestHandleConnectURLFormat(t *testing.T) {
 	callbackURL := "https://vpn-auth.example.com/callback/01/udp"
 	cfg := config.Config{
 		CallbackURL:  callbackURL,
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   300 * time.Second,
 		AuthTimeout:  300 * time.Second,
 		CallbackPort: 8080,
@@ -309,7 +309,7 @@ func TestHandleConnectURLTooLong(t *testing.T) {
 	longCallbackURL := "https://vpn-auth.example.com/callback/" + strings.Repeat("x", 100)
 	cfg := config.Config{
 		CallbackURL:  longCallbackURL,
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   300 * time.Second,
 		AuthTimeout:  300 * time.Second,
 		CallbackPort: 8080,
@@ -342,7 +342,7 @@ func TestHandleConnectURLTooLong(t *testing.T) {
 func TestHandleConnectTimeoutCleanup(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   200 * time.Millisecond,
 		AuthTimeout:  20 * time.Millisecond,
 		CallbackPort: 8080,
@@ -380,7 +380,7 @@ func TestHandleConnectTimeoutCleanup(t *testing.T) {
 func TestHandleConnectDisconnectCleanup(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   5 * time.Second,
 		AuthTimeout:  5 * time.Second,
 		CallbackPort: 8080,
@@ -419,7 +419,7 @@ func TestHandleConnectDisconnectCleanup(t *testing.T) {
 func TestHandleConnectRejectsMissingCommonName(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   50 * time.Millisecond,
 		AuthTimeout:  50 * time.Millisecond,
 		CallbackPort: 8080,
@@ -450,7 +450,7 @@ func TestHandleConnectRejectsMissingCommonName(t *testing.T) {
 func TestHandleEstablishedClearsInFlight(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   5 * time.Second,
 		AuthTimeout:  5 * time.Second,
 		CallbackPort: 8080,
@@ -493,7 +493,7 @@ func TestHandleEstablishedClearsInFlight(t *testing.T) {
 func TestHandleConnectEvictsInFlightSessionOnReconnect(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:           "secret",
+		HMACSecret:           "test-secret-key!!",
 		HandWindow:           5 * time.Second,
 		AuthTimeout:          5 * time.Second,
 		CallbackPort:         8080,
@@ -550,7 +550,7 @@ func TestHandleConnectEvictsInFlightSessionOnReconnect(t *testing.T) {
 func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:           "secret",
+		HMACSecret:           "test-secret-key!!",
 		HandWindow:           5 * time.Second,
 		AuthTimeout:          5 * time.Second,
 		CallbackPort:         8080,
@@ -604,7 +604,7 @@ func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 func TestHandleConnectAllowsNewSessionAfterDisconnect(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:   "secret",
+		HMACSecret:   "test-secret-key!!",
 		HandWindow:   5 * time.Second,
 		AuthTimeout:  5 * time.Second,
 		CallbackPort: 8080,

@@ -45,7 +45,12 @@ func main() {
 	var signer auth.StateSigner
 
 	if cfg.HMACSecret != "" {
-		signer = secrets.NewStaticSigner(cfg.HMACSecret)
+		var err error
+		signer, err = secrets.NewStaticSigner(cfg.HMACSecret)
+		if err != nil {
+			slog.Error("invalid hmac-secret", "error", err)
+			os.Exit(1)
+		}
 	} else {
 		slog.Info("no hmac-secret provided, generating random key")
 		signer = secrets.NewRandomSigner()
