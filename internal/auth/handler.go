@@ -16,11 +16,12 @@ import (
 
 // MaxWebAuthURLLen is the maximum URL length that OpenVPN CE clients can
 // receive via the INFOMSG management interface buffer. The client allocates
-// 256 bytes (alloc_buf_gc(256) in src/openvpn/push.c), of which ~9 bytes
-// are consumed by the "OPEN_URL:" prefix, leaving ~247 bytes for the URL.
-// However, the full INFOMSG line includes "WEB_AUTH::" (10 bytes) wrapping,
-// so the practical limit for the URL itself is ~229 bytes. If exceeded, the
-// client silently drops the message and the browser never opens.
+// 256 bytes (alloc_buf_gc(256) in src/openvpn/push.c). The full INFOMSG line
+// includes "WEB_AUTH::" (10 bytes) wrapping, the "OPEN_URL:" prefix (9 bytes),
+// and a null terminator, so the practical limit for the URL itself is
+// 256 - 10 - 9 - 1 = 236 bytes. We use 229 as a conservative limit to
+// account for any additional framing overhead across OpenVPN versions.
+// If exceeded, the client silently drops the message and the browser never opens.
 const MaxWebAuthURLLen = 229
 
 type Handler struct {
@@ -157,10 +158,11 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 
 	// OpenVPN CE clients silently drop WEB_AUTH URLs exceeding the INFOMSG
 	// buffer limit — fail loudly here instead.
-	webAuthLen := len("OPEN_URL:") + len(authURL)
-	if webAuthLen > MaxWebAuthURLLen {
+	// MaxWebAuthURLLen already accounts for all protocol framing (WEB_AUTH::,
+	// OPEN_URL: prefix, null terminator), so compare against the raw URL length.
+	if len(authURL) > MaxWebAuthURLLen {
 		slog.Error("WEB_AUTH URL exceeds OpenVPN CE INFOMSG limit",
-			"url_len", webAuthLen, "max", MaxWebAuthURLLen,
+			"url_len", len(authURL), "max", MaxWebAuthURLLen,
 			"cid", event.CID, "cn", event.CommonName())
 		h.metrics.AuthDenied("url_too_long")
 		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "auth URL too long"})

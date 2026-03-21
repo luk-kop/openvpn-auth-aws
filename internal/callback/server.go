@@ -183,7 +183,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		baseClaims, err := validateALBJWT(oidcData, pubKey, s.albARN, jwtHeader.Signer)
+		baseClaims, err := validateALBJWT(oidcData, pubKey, s.albARN, jwtHeader.Signer, s.cfg.CognitoIssuerURL)
 		if err != nil {
 			slog.Warn("callback: ALB JWT validation failed",
 				"sid", sess.SessionID, "error", err)
@@ -344,7 +344,7 @@ func parseJWTHeader(tokenStr string) (albJWTHeader, error) {
 }
 
 // validateALBJWT verifies the ALB JWT signature, exp, iss, and signer field.
-func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signerField string) (auth.ALBClaims, error) {
+func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signerField, expectedIssuer string) (auth.ALBClaims, error) {
 	// Verify signer field from header matches expected ALB ARN.
 	if signerField != expectedARN {
 		return auth.ALBClaims{}, fmt.Errorf("signer mismatch: got %q, want %q", signerField, expectedARN)
@@ -371,6 +371,11 @@ func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signe
 	if err != nil {
 		return auth.ALBClaims{}, err
 	}
+
+	if expectedIssuer != "" && claims.Iss != expectedIssuer {
+		return auth.ALBClaims{}, fmt.Errorf("iss mismatch: got %q, want %q", claims.Iss, expectedIssuer)
+	}
+
 	return claims, nil
 }
 

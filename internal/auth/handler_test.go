@@ -303,8 +303,8 @@ func TestHandleConnectURLFormat(t *testing.T) {
 // a WEB_AUTH URL exceeding MaxWebAuthURLLen results in a deny with reason
 // "auth URL too long". Requirements: 3.3
 func TestHandleConnectURLTooLong(t *testing.T) {
-	// Construct a callback URL long enough that OPEN_URL: + url > MaxWebAuthURLLen.
-	// MaxWebAuthURLLen = 229; "OPEN_URL:" = 9 bytes; state blob ~128 bytes.
+	// Construct a callback URL long enough that the full auth URL > MaxWebAuthURLLen.
+	// MaxWebAuthURLLen = 229; state blob ~128 bytes.
 	// So callback URL of 100 bytes will push total well over 229.
 	longCallbackURL := "https://vpn-auth.example.com/callback/" + strings.Repeat("x", 100)
 	cfg := config.Config{
