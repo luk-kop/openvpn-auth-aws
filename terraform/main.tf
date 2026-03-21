@@ -84,7 +84,8 @@ resource "aws_eip" "vpn" {
   domain = "vpc"
 
   tags = {
-    Name = "${var.project_name}-vpn"
+    Name    = "${var.project_name}-vpn"
+    Project = var.project_name
   }
 }
 

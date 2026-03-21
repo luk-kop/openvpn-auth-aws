@@ -2,6 +2,7 @@ package mgmt
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -88,8 +89,10 @@ func (c *Client) authenticate(passwordFile string) error {
 	}
 
 	if string(buf) != "ENTER PASSWORD:" {
-		// No password required, read rest of line
-		c.scanner.Scan()
+		// No password required — the 15 bytes we consumed are part of the
+		// first protocol message. Rebuild the scanner with those bytes
+		// prepended so the message is not lost.
+		c.scanner = bufio.NewScanner(io.MultiReader(bytes.NewReader(buf), c.conn))
 		return nil
 	}
 

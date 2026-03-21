@@ -24,12 +24,18 @@ func NewReauthCache(ttl time.Duration) *ReauthCache {
 
 func (c *ReauthCache) Get(key string) (IdentityResult, bool) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	entry, ok := c.entries[key]
+	c.mu.RUnlock()
 	if !ok {
 		return IdentityResult{}, false
 	}
 	if time.Since(entry.result.CheckedAt) > c.ttl {
+		c.mu.Lock()
+		// Re-check under write lock — another goroutine may have refreshed it.
+		if e, ok := c.entries[key]; ok && time.Since(e.result.CheckedAt) > c.ttl {
+			delete(c.entries, key)
+		}
+		c.mu.Unlock()
 		return IdentityResult{}, false
 	}
 	return entry.result, true

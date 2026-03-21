@@ -77,14 +77,10 @@ func NewStaticChecker(checkGroups bool) *StaticChecker {
 }
 
 func (c *StaticChecker) CheckUser(_ context.Context, _ string, requiredGroup string, checkGroups bool) (auth.IdentityResult, error) {
-	result := auth.IdentityResult{
+	return auth.IdentityResult{
 		Exists:    true,
 		Enabled:   true,
-		InGroup:   !checkGroups || requiredGroup == "",
+		InGroup:   !checkGroups || requiredGroup == "" || c.checkGroups,
 		CheckedAt: time.Now().UTC(),
-	}
-	if c.checkGroups && checkGroups && requiredGroup != "" {
-		result.InGroup = true
-	}
-	return result, nil
+	}, nil
 }

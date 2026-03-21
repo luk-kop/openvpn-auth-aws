@@ -32,6 +32,12 @@ type Handler struct {
 	metrics  Metrics
 	cache    *ReauthCache
 
+	// timeoutSink is the daemon-level DecisionSink used by authTimeout
+	// goroutines. Unlike the per-connection sink passed to HandleEvent,
+	// this sink survives management socket reconnections so that timeout
+	// denials can be delivered on the new connection.
+	timeoutSink DecisionSink
+
 	mu            sync.Mutex
 	inFlight      map[string]context.CancelFunc // CID → cancel
 	cidToSID      map[string]string             // CID → session ID
@@ -61,6 +67,12 @@ func NewHandler(cfg config.Config, sessions *SessionStore, identity IdentityChec
 		cidToKID:      make(map[string]string),
 		cnToActiveCID: make(map[string]string),
 	}
+}
+
+// SetTimeoutSink sets the daemon-level sink used by authTimeout goroutines.
+// Must be called before any events are handled.
+func (h *Handler) SetTimeoutSink(sink DecisionSink) {
+	h.timeoutSink = sink
 }
 
 func (h *Handler) InFlight() int {
@@ -95,13 +107,13 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 	sso := strings.ToLower(event.Env["IV_SSO"])
 	if !strings.Contains(sso, "webauth") && !strings.Contains(sso, "openurl") {
 		h.metrics.AuthDenied("no_webauth")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "client does not support WebAuth"})
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "client does not support WebAuth"})
 		return
 	}
 	if event.CommonName() == "" {
 		slog.Warn("connect denied", "cid", event.CID, "reason", "missing common name")
 		h.metrics.AuthDenied("missing_common_name")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "missing common name"})
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "missing common name"})
 		return
 	}
 
@@ -121,7 +133,7 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 					action = "client-kill"
 				}
 				slog.Info("evict", "cn", event.CommonName(), "old_cid", existingCID, "new_cid", event.CID, "action", action)
-				sink.Send(d)
+				sendOrLog(sink, d)
 			}
 		}
 	}
@@ -129,7 +141,7 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 	sessionID, err := generateRandomToken(16)
 	if err != nil {
 		h.metrics.AuthDenied("internal_error")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "internal error"})
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "internal error"})
 		return
 	}
 
@@ -165,14 +177,14 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 			"url_len", len(authURL), "max", MaxWebAuthURLLen,
 			"cid", event.CID, "cn", event.CommonName())
 		h.metrics.AuthDenied("url_too_long")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "auth URL too long"})
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "auth URL too long"})
 		return
 	}
 
 	slog.Info("connect pending auth", "cid", event.CID, "cn", event.CommonName(), "timeout", h.cfg.AuthTimeout)
 	h.metrics.AuthAttempt("")
 	timeout := int(h.cfg.HandWindow.Seconds())
-	sink.Send(Decision{
+	sendOrLog(sink, Decision{
 		Type:    DecisionPending,
 		CID:     event.CID,
 		KID:     event.KID,
@@ -180,10 +192,15 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 		Timeout: timeout,
 	})
 
-	// Timeout goroutine: deny + cleanup if callback doesn't arrive in time
+	// Timeout goroutine: deny + cleanup if callback doesn't arrive in time.
+	// Use the daemon-level timeoutSink so denials survive socket reconnections.
+	tSink := h.timeoutSink
+	if tSink == nil {
+		tSink = sink // fallback for tests
+	}
 	timeoutCtx, cancel := context.WithCancel(ctx)
 	h.setInFlight(event.CID, sessionID, event.CommonName(), event.KID, cancel)
-	go h.authTimeout(timeoutCtx, session, sink)
+	go h.authTimeout(timeoutCtx, session, tSink)
 }
 
 func (h *Handler) authTimeout(ctx context.Context, session *PendingSession, sink DecisionSink) {
@@ -205,7 +222,7 @@ func (h *Handler) authTimeout(ctx context.Context, session *PendingSession, sink
 		h.sessions.MarkFailed(session.SessionID)
 		slog.Warn("connect auth timeout", "cid", session.CID, "cn", session.CommonName)
 		h.metrics.AuthDenied("timeout")
-		sink.Send(Decision{Type: DecisionDeny, CID: session.CID, KID: session.KID, Reason: "auth timeout"})
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: session.CID, KID: session.KID, Reason: "auth timeout"})
 	}
 }
 
@@ -214,11 +231,19 @@ func (h *Handler) handleReauth(ctx context.Context, event mgmt.Event, sink Decis
 	if lookup == "" {
 		slog.Warn("reauth denied", "cid", event.CID, "reason", "missing common name")
 		h.metrics.ReauthDenied("missing_common_name")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "missing common name"})
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "missing common name"})
 		return
 	}
 
 	slog.Info("reauth", "cid", event.CID, "cn", lookup)
+
+	if h.cfg.CognitoSkipReauth {
+		slog.Info("reauth allowed (skip-reauth)", "cid", event.CID, "cn", lookup)
+		h.metrics.ReauthSuccess()
+		sendOrLog(sink, Decision{Type: DecisionAllowNT, CID: event.CID, KID: event.KID})
+		return
+	}
+
 	checkCtx, cancel := context.WithTimeout(ctx, h.cfg.ReauthTimeout)
 	defer cancel()
 
@@ -235,38 +260,38 @@ func (h *Handler) handleReauth(ctx context.Context, event mgmt.Event, sink Decis
 		if cached, ok := h.cache.Get(lookup); ok && cached.Exists && cached.Enabled && (!h.cfg.CheckGroupsOnReauth || cached.InGroup) {
 			slog.Info("reauth allowed", "cid", event.CID, "cn", lookup, "source", "cache", "cognito_error", err)
 			h.metrics.ReauthCacheHit()
-			sink.Send(Decision{Type: DecisionAllowNT, CID: event.CID, KID: event.KID})
+			sendOrLog(sink, Decision{Type: DecisionAllowNT, CID: event.CID, KID: event.KID})
 			return
 		}
 	}
 
 	slog.Warn("reauth denied", "cid", event.CID, "cn", lookup, "reason", "cognito unavailable", "error", err)
 	h.metrics.ReauthDenied("cognito_error")
-	sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "cognito unavailable"})
+	sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "cognito unavailable"})
 }
 
 func (h *Handler) finishReauth(event mgmt.Event, result IdentityResult, sink DecisionSink) {
 	if !result.Exists {
 		slog.Warn("reauth denied", "cid", event.CID, "cn", event.CommonName(), "reason", "user not found")
 		h.metrics.ReauthDenied("user_not_found")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "user not found"})
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "user not found"})
 		return
 	}
 	if !result.Enabled {
 		slog.Warn("reauth denied", "cid", event.CID, "cn", event.CommonName(), "reason", "user disabled")
 		h.metrics.ReauthDenied("user_disabled")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "user disabled"})
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "user disabled"})
 		return
 	}
 	if h.cfg.CheckGroupsOnReauth && !result.InGroup {
 		slog.Warn("reauth denied", "cid", event.CID, "cn", event.CommonName(), "reason", "group denied", "group", h.cfg.RequiredGroup)
 		h.metrics.ReauthDenied("group_denied")
-		sink.Send(Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: fmt.Sprintf("not in required group: %s", h.cfg.RequiredGroup)})
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: fmt.Sprintf("not in required group: %s", h.cfg.RequiredGroup)})
 		return
 	}
 	slog.Info("reauth allowed", "cid", event.CID, "cn", event.CommonName())
 	h.metrics.ReauthSuccess()
-	sink.Send(Decision{Type: DecisionAllowNT, CID: event.CID, KID: event.KID})
+	sendOrLog(sink, Decision{Type: DecisionAllowNT, CID: event.CID, KID: event.KID})
 }
 
 // evictSession forcibly removes a session for a CID.
@@ -373,6 +398,15 @@ func (h *Handler) clearInFlight(cid string) {
 	delete(h.inFlight, cid)
 	delete(h.cidToSID, cid)
 	// Leave cidToCN, cidToKID, cnToActiveCID — DISCONNECT will clean those up.
+}
+
+// sendOrLog sends a decision and logs a warning if the send fails.
+// Used for handler-internal decisions (deny, pending, kill) where the
+// caller cannot recover from a send failure.
+func sendOrLog(sink DecisionSink, d Decision) {
+	if err := sink.Send(d); err != nil {
+		slog.Warn("failed to send decision", "type", d.Type, "cid", d.CID, "error", err)
+	}
 }
 
 func generateRandomToken(n int) (string, error) {

@@ -54,7 +54,7 @@ No modules.
 | <a name="input_ec2_root_volume_size"></a> [ec2\_root\_volume\_size](#input\_ec2\_root\_volume\_size) | Root EBS volume size in GB | `number` | `20` | no |
 | <a name="input_eip_allocation_id"></a> [eip\_allocation\_id](#input\_eip\_allocation\_id) | Pre-allocated Elastic IP allocation ID to associate after health checks pass | `string` | n/a | yes |
 | <a name="input_hand_window"></a> [hand\_window](#input\_hand\_window) | Seconds allowed for browser-based auth. Used in both OpenVPN server config and daemon --hand-window flag to keep them in sync. | `number` | `300` | no |
-| <a name="input_listeners"></a> [listeners](#input\_listeners) | Map of OpenVPN listeners keyed by protocol name (e.g. 'udp', 'tcp') | <pre>map(object({<br/>    openvpn_port = number<br/>    ip_protocol  = string<br/>    client_cidr  = string<br/>    daemon_port  = number<br/>  }))</pre> | n/a | yes |
+| <a name="input_listeners"></a> [listeners](#input\_listeners) | Map of OpenVPN listeners. Must contain exactly the keys 'udp' and 'tcp'. | <pre>map(object({<br/>    openvpn_port = number<br/>    ip_protocol  = string<br/>    client_cidr  = string<br/>    daemon_port  = number<br/>  }))</pre> | n/a | yes |
 | <a name="input_pki_secret_arns"></a> [pki\_secret\_arns](#input\_pki\_secret\_arns) | ARNs of PKI secrets in Secrets Manager (for IAM policy scoping) | `list(string)` | n/a | yes |
 | <a name="input_project_name"></a> [project\_name](#input\_project\_name) | Project name used for resource naming | `string` | n/a | yes |
 | <a name="input_required_group"></a> [required\_group](#input\_required\_group) | Cognito group required for VPN access, passed to daemon --required-group | `string` | `""` | no |

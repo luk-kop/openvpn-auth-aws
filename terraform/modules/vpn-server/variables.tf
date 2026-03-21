@@ -44,13 +44,18 @@ variable "server_name" {
 }
 
 variable "listeners" {
-  description = "Map of OpenVPN listeners keyed by protocol name (e.g. 'udp', 'tcp')"
+  description = "Map of OpenVPN listeners. Must contain exactly the keys 'udp' and 'tcp'."
   type = map(object({
     openvpn_port = number
     ip_protocol  = string
     client_cidr  = string
     daemon_port  = number
   }))
+
+  validation {
+    condition     = contains(keys(var.listeners), "udp") && contains(keys(var.listeners), "tcp")
+    error_message = "The listeners map must contain both 'udp' and 'tcp' keys."
+  }
 }
 
 variable "daemon_binary_s3_uri" {

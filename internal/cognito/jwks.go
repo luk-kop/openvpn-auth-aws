@@ -1,6 +1,7 @@
 package cognito
 
 import (
+	"context"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -52,13 +54,22 @@ func (c *JWKSCache) getKey(kid string) (*rsa.PublicKey, error) {
 }
 
 func (c *JWKSCache) refresh() error {
-	resp, err := http.Get(c.jwksURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.jwksURL, nil)
+	if err != nil {
+		return fmt.Errorf("build JWKS request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("fetch JWKS: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	const maxJWKSSize = 512 * 1024 // 512 KB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSSize))
 	if err != nil {
 		return fmt.Errorf("read JWKS: %w", err)
 	}
@@ -86,6 +97,10 @@ func (c *JWKSCache) refresh() error {
 			continue
 		}
 		newKeys[k.KID] = pub
+	}
+
+	if len(newKeys) == 0 {
+		return fmt.Errorf("JWKS response contained no usable RSA keys")
 	}
 
 	c.mu.Lock()

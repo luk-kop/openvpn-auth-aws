@@ -76,6 +76,10 @@ func main() {
 	// live socket state without coupling the callback package to the app package.
 	daemon := app.New(cfg, handler, nil, m)
 	daemonSink := app.DaemonSink{CmdCh: daemon.CmdCh()}
+
+	// Give the handler a daemon-level sink for authTimeout goroutines so that
+	// timeout denials survive management socket reconnections.
+	handler.SetTimeoutSink(daemonSink)
 	callbackSrv, err := callback.NewServer(
 		sessions,
 		signer,

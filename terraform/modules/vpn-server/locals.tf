@@ -14,6 +14,8 @@ locals {
     openvpn_tcp_port      = var.listeners["tcp"].openvpn_port
     openvpn_udp_cidr      = var.listeners["udp"].client_cidr
     openvpn_tcp_cidr      = var.listeners["tcp"].client_cidr
+    daemon_port_udp       = var.listeners["udp"].daemon_port
+    daemon_port_tcp       = var.listeners["tcp"].daemon_port
     hand_window           = var.hand_window
     daemon_binary_s3_uri  = var.daemon_binary_s3_uri
     callback_url_udp      = local.callback_urls["udp"]

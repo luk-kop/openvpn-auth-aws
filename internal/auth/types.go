@@ -85,5 +85,5 @@ type Decision struct {
 }
 
 type DecisionSink interface {
-	Send(Decision)
+	Send(Decision) error
 }

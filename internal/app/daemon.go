@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -35,32 +36,28 @@ type decisionSink struct {
 	done  <-chan struct{}
 }
 
-func (s decisionSink) Send(d auth.Decision) {
+func (s decisionSink) Send(d auth.Decision) error {
 	switch d.Type {
 	case auth.DecisionAllow:
-		lines := mgmt.ClientAuth(d.CID, d.KID)
-		for _, line := range lines {
-			select {
-			case s.cmdCh <- line:
-			case <-s.done:
-				return
-			}
-		}
+		return s.sendOne(mgmt.ClientAuth(d.CID, d.KID))
 	case auth.DecisionAllowNT:
-		s.sendOne(mgmt.ClientAuthNT(d.CID, d.KID))
+		return s.sendOne(mgmt.ClientAuthNT(d.CID, d.KID))
 	case auth.DecisionDeny:
-		s.sendOne(mgmt.ClientDeny(d.CID, d.KID, d.Reason))
+		return s.sendOne(mgmt.ClientDeny(d.CID, d.KID, d.Reason))
 	case auth.DecisionPending:
-		s.sendOne(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
+		return s.sendOne(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
 	case auth.DecisionKill:
-		s.sendOne(mgmt.ClientKill(d.CID))
+		return s.sendOne(mgmt.ClientKill(d.CID))
 	}
+	return nil
 }
 
-func (s decisionSink) sendOne(cmd string) {
+func (s decisionSink) sendOne(cmd string) error {
 	select {
 	case s.cmdCh <- cmd:
+		return nil
 	case <-s.done:
+		return fmt.Errorf("command dropped: connection closed")
 	}
 }
 
@@ -70,31 +67,31 @@ type DaemonSink struct {
 	CmdCh chan<- string
 }
 
-func (s DaemonSink) Send(d auth.Decision) {
+func (s DaemonSink) Send(d auth.Decision) error {
 	switch d.Type {
 	case auth.DecisionAllow:
-		lines := mgmt.ClientAuth(d.CID, d.KID)
-		for _, line := range lines {
-			s.trySend(line)
-		}
+		return s.trySend(mgmt.ClientAuth(d.CID, d.KID))
 	case auth.DecisionAllowNT:
-		s.trySend(mgmt.ClientAuthNT(d.CID, d.KID))
+		return s.trySend(mgmt.ClientAuthNT(d.CID, d.KID))
 	case auth.DecisionDeny:
-		s.trySend(mgmt.ClientDeny(d.CID, d.KID, d.Reason))
+		return s.trySend(mgmt.ClientDeny(d.CID, d.KID, d.Reason))
 	case auth.DecisionPending:
-		s.trySend(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
+		return s.trySend(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
 	case auth.DecisionKill:
-		s.trySend(mgmt.ClientKill(d.CID))
+		return s.trySend(mgmt.ClientKill(d.CID))
 	}
+	return nil
 }
 
-func (s DaemonSink) trySend(cmd string) {
+func (s DaemonSink) trySend(cmd string) error {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
 	case s.CmdCh <- cmd:
+		return nil
 	case <-timer.C:
 		slog.Warn("daemon cmdCh full, dropping command", "cmd", cmd)
+		return fmt.Errorf("command dropped: channel full after 5s")
 	}
 }
 
@@ -125,10 +122,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer d.shutdownCancel()
 	go d.heartbeatLoop(ctx)
 
-	// Start callback server
+	// Start callback server — bind the port synchronously so we fail fast
+	// if the port is already in use or the process lacks permission.
 	callbackAddr := fmt.Sprintf(":%d", d.cfg.CallbackPort)
+	ln, err := net.Listen("tcp", callbackAddr)
+	if err != nil {
+		return fmt.Errorf("callback server listen %s: %w", callbackAddr, err)
+	}
 	go func() {
-		if err := d.callbackServer.Start(callbackAddr); err != nil {
+		if err := d.callbackServer.Serve(ln); err != nil {
 			slog.Error("callback server error", "error", err)
 		}
 	}()
@@ -168,17 +170,24 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) error {
-	// Unblock scanner.Scan() when signal fires (read deadline expires
-	// immediately, but the socket stays writable for graceful shutdown).
+	// connCtx is cancelled when this connection ends (normal disconnect or
+	// process shutdown). The goroutine below uses it instead of the
+	// process-level ctx so it does not leak across reconnections.
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
+
+	// Unblock scanner.Scan() when the connection context is cancelled
+	// (either process shutdown or connection lost). The read deadline
+	// expires immediately, but the socket stays writable for graceful shutdown.
 	go func() {
-		<-ctx.Done()
+		<-connCtx.Done()
 		_ = client.SetReadDeadline(time.Now())
 	}()
 
 	cmdDone := make(chan struct{})
 	go func() {
 		defer close(cmdDone)
-		d.commandWriter(d.shutdownCtx, client)
+		d.commandWriter(connCtx, client)
 	}()
 
 	// Send hold release immediately

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,11 +14,23 @@ import (
 )
 
 type captureSink struct {
+	mu        sync.Mutex
 	decisions []Decision
 }
 
-func (c *captureSink) Send(d Decision) {
+func (c *captureSink) Send(d Decision) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.decisions = append(c.decisions, d)
+	return nil
+}
+
+func (c *captureSink) snapshot() []Decision {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := make([]Decision, len(c.decisions))
+	copy(cp, c.decisions)
+	return cp
 }
 
 func newTestHandler(cfg config.Config) *Handler {
@@ -45,14 +58,14 @@ func TestHandleConnectWithoutWebAuth(t *testing.T) {
 		Env:  map[string]string{},
 	}, sink)
 
-	if len(sink.decisions) != 1 {
-		t.Fatalf("expected 1 decision, got %d", len(sink.decisions))
+	if len(sink.snapshot()) != 1 {
+		t.Fatalf("expected 1 decision, got %d", len(sink.snapshot()))
 	}
-	if sink.decisions[0].Type != DecisionDeny {
-		t.Fatalf("expected DecisionDeny, got %d", sink.decisions[0].Type)
+	if sink.snapshot()[0].Type != DecisionDeny {
+		t.Fatalf("expected DecisionDeny, got %d", sink.snapshot()[0].Type)
 	}
-	if sink.decisions[0].Reason != "client does not support WebAuth" {
-		t.Fatalf("unexpected reason: %q", sink.decisions[0].Reason)
+	if sink.snapshot()[0].Reason != "client does not support WebAuth" {
+		t.Fatalf("unexpected reason: %q", sink.snapshot()[0].Reason)
 	}
 }
 
@@ -84,11 +97,11 @@ func TestHandleConnectAcceptsOpenURL(t *testing.T) {
 	cancel()
 	time.Sleep(5 * time.Millisecond)
 
-	if len(sink.decisions) < 1 {
-		t.Fatalf("expected at least 1 decision, got %d", len(sink.decisions))
+	if len(sink.snapshot()) < 1 {
+		t.Fatalf("expected at least 1 decision, got %d", len(sink.snapshot()))
 	}
-	if sink.decisions[0].Type != DecisionPending {
-		t.Fatalf("expected DecisionPending, got %d", sink.decisions[0].Type)
+	if sink.snapshot()[0].Type != DecisionPending {
+		t.Fatalf("expected DecisionPending, got %d", sink.snapshot()[0].Type)
 	}
 }
 
@@ -120,11 +133,11 @@ func TestHandleConnectAcceptsCSVWebAuth(t *testing.T) {
 	cancel()
 	time.Sleep(5 * time.Millisecond)
 
-	if len(sink.decisions) < 1 {
-		t.Fatalf("expected at least 1 decision, got %d", len(sink.decisions))
+	if len(sink.snapshot()) < 1 {
+		t.Fatalf("expected at least 1 decision, got %d", len(sink.snapshot()))
 	}
-	if sink.decisions[0].Type != DecisionPending {
-		t.Fatalf("expected DecisionPending, got %d", sink.decisions[0].Type)
+	if sink.snapshot()[0].Type != DecisionPending {
+		t.Fatalf("expected DecisionPending, got %d", sink.snapshot()[0].Type)
 	}
 }
 
@@ -149,11 +162,11 @@ func TestHandleConnectRejectsCrtext(t *testing.T) {
 		},
 	}, sink)
 
-	if len(sink.decisions) != 1 {
-		t.Fatalf("expected 1 decision, got %d", len(sink.decisions))
+	if len(sink.snapshot()) != 1 {
+		t.Fatalf("expected 1 decision, got %d", len(sink.snapshot()))
 	}
-	if sink.decisions[0].Type != DecisionDeny {
-		t.Fatalf("expected DecisionDeny, got %d", sink.decisions[0].Type)
+	if sink.snapshot()[0].Type != DecisionDeny {
+		t.Fatalf("expected DecisionDeny, got %d", sink.snapshot()[0].Type)
 	}
 }
 
@@ -187,13 +200,13 @@ func TestHandleConnectIgnoresPassword(t *testing.T) {
 	cancel()
 	time.Sleep(5 * time.Millisecond)
 
-	if len(sink.decisions) < 1 {
-		t.Fatalf("expected at least 1 decision, got %d", len(sink.decisions))
+	if len(sink.snapshot()) < 1 {
+		t.Fatalf("expected at least 1 decision, got %d", len(sink.snapshot()))
 	}
-	if sink.decisions[0].Type != DecisionPending {
-		t.Fatalf("expected DecisionPending (WebAuth flow), got %d", sink.decisions[0].Type)
+	if sink.snapshot()[0].Type != DecisionPending {
+		t.Fatalf("expected DecisionPending (WebAuth flow), got %d", sink.snapshot()[0].Type)
 	}
-	if sink.decisions[0].URL == "" {
+	if sink.snapshot()[0].URL == "" {
 		t.Fatal("expected WebAuth URL, got empty string")
 	}
 }
@@ -225,10 +238,10 @@ func TestHandleConnectStateBlob(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	cancel()
 
-	if len(sink.decisions) < 1 {
-		t.Fatalf("expected at least 1 decision, got %d", len(sink.decisions))
+	if len(sink.snapshot()) < 1 {
+		t.Fatalf("expected at least 1 decision, got %d", len(sink.snapshot()))
 	}
-	d := sink.decisions[0]
+	d := sink.snapshot()[0]
 	if d.Type != DecisionPending {
 		t.Fatalf("expected DecisionPending, got %d", d.Type)
 	}
@@ -273,10 +286,10 @@ func TestHandleConnectURLFormat(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	cancel()
 
-	if len(sink.decisions) < 1 {
-		t.Fatalf("expected at least 1 decision, got %d", len(sink.decisions))
+	if len(sink.snapshot()) < 1 {
+		t.Fatalf("expected at least 1 decision, got %d", len(sink.snapshot()))
 	}
-	d := sink.decisions[0]
+	d := sink.snapshot()[0]
 	if d.Type != DecisionPending {
 		t.Fatalf("expected DecisionPending, got %d", d.Type)
 	}
@@ -327,10 +340,10 @@ func TestHandleConnectURLTooLong(t *testing.T) {
 		},
 	}, sink)
 
-	if len(sink.decisions) != 1 {
-		t.Fatalf("expected 1 decision, got %d", len(sink.decisions))
+	if len(sink.snapshot()) != 1 {
+		t.Fatalf("expected 1 decision, got %d", len(sink.snapshot()))
 	}
-	d := sink.decisions[0]
+	d := sink.snapshot()[0]
 	if d.Type != DecisionDeny {
 		t.Fatalf("expected DecisionDeny, got %d", d.Type)
 	}
@@ -363,17 +376,17 @@ func TestHandleConnectTimeoutCleanup(t *testing.T) {
 	// Wait for timeout goroutine to fire
 	time.Sleep(80 * time.Millisecond)
 
-	if len(sink.decisions) < 2 {
-		t.Fatalf("expected at least 2 decisions (pending + deny), got %d", len(sink.decisions))
+	if len(sink.snapshot()) < 2 {
+		t.Fatalf("expected at least 2 decisions (pending + deny), got %d", len(sink.snapshot()))
 	}
-	if sink.decisions[0].Type != DecisionPending {
-		t.Fatalf("expected DecisionPending, got %d", sink.decisions[0].Type)
+	if sink.snapshot()[0].Type != DecisionPending {
+		t.Fatalf("expected DecisionPending, got %d", sink.snapshot()[0].Type)
 	}
-	if sink.decisions[1].Type != DecisionDeny {
-		t.Fatalf("expected DecisionDeny, got %d", sink.decisions[1].Type)
+	if sink.snapshot()[1].Type != DecisionDeny {
+		t.Fatalf("expected DecisionDeny, got %d", sink.snapshot()[1].Type)
 	}
-	if sink.decisions[1].Reason != "auth timeout" {
-		t.Fatalf("expected 'auth timeout', got %q", sink.decisions[1].Reason)
+	if sink.snapshot()[1].Reason != "auth timeout" {
+		t.Fatalf("expected 'auth timeout', got %q", sink.snapshot()[1].Reason)
 	}
 }
 
@@ -436,14 +449,14 @@ func TestHandleConnectRejectsMissingCommonName(t *testing.T) {
 		},
 	}, sink)
 
-	if len(sink.decisions) != 1 {
-		t.Fatalf("expected 1 decision, got %d", len(sink.decisions))
+	if len(sink.snapshot()) != 1 {
+		t.Fatalf("expected 1 decision, got %d", len(sink.snapshot()))
 	}
-	if sink.decisions[0].Type != DecisionDeny {
-		t.Fatalf("expected DecisionDeny, got %d", sink.decisions[0].Type)
+	if sink.snapshot()[0].Type != DecisionDeny {
+		t.Fatalf("expected DecisionDeny, got %d", sink.snapshot()[0].Type)
 	}
-	if sink.decisions[0].Reason != "missing common name" {
-		t.Fatalf("unexpected reason: %q", sink.decisions[0].Reason)
+	if sink.snapshot()[0].Reason != "missing common name" {
+		t.Fatalf("unexpected reason: %q", sink.snapshot()[0].Reason)
 	}
 }
 
@@ -529,7 +542,7 @@ func TestHandleConnectEvictsInFlightSessionOnReconnect(t *testing.T) {
 	}
 
 	var pending, deny int
-	for _, d := range sink.decisions {
+	for _, d := range sink.snapshot() {
 		switch d.Type {
 		case DecisionPending:
 			pending++
@@ -591,13 +604,13 @@ func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 	}
 
 	var kill int
-	for _, d := range sink.decisions {
+	for _, d := range sink.snapshot() {
 		if d.Type == DecisionKill && d.CID == "1" {
 			kill++
 		}
 	}
 	if kill != 1 {
-		t.Fatalf("expected 1 DecisionKill for established CID=1, got %d; decisions: %+v", kill, sink.decisions)
+		t.Fatalf("expected 1 DecisionKill for established CID=1, got %d; decisions: %+v", kill, sink.snapshot())
 	}
 }
 
@@ -636,12 +649,12 @@ func TestHandleConnectAllowsNewSessionAfterDisconnect(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	pending := 0
-	for _, d := range sink.decisions {
+	for _, d := range sink.snapshot() {
 		if d.Type == DecisionPending {
 			pending++
 		}
 	}
 	if pending != 2 {
-		t.Fatalf("expected 2 DecisionPending (one per connect), got %d; decisions: %+v", pending, sink.decisions)
+		t.Fatalf("expected 2 DecisionPending (one per connect), got %d; decisions: %+v", pending, sink.snapshot())
 	}
 }

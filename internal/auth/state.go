@@ -15,7 +15,11 @@ type StatePayload struct {
 }
 
 func EncodeState(payload StatePayload, signer StateSigner) string {
-	data, _ := json.Marshal(payload)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		// StatePayload contains only string and int64 — marshal cannot fail.
+		panic("auth: marshal StatePayload: " + err.Error())
+	}
 	encoded := base64.RawURLEncoding.EncodeToString(data)
 	mac := signer.Sign(encoded)
 	return encoded + "." + mac

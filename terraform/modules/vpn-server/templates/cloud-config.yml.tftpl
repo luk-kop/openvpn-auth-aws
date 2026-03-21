@@ -145,7 +145,7 @@ write_files:
 
       echo "PKI setup complete."
 
-  # --- UDP daemon systemd service (port 8080) ---
+  # --- UDP daemon systemd service ---
   - path: /etc/systemd/system/openvpn-auth-udp.service
     content: |
       [Unit]
@@ -161,7 +161,7 @@ write_files:
           --management-password-file=/etc/openvpn/management-pw \
           --callback-url=${callback_url_udp} \
           --alb-arn=${alb_arn} \
-          --callback-port=8080 \
+          --callback-port=${daemon_port_udp} \
           --cognito-user-pool-id=${cognito_user_pool_id} \
           --cognito-issuer-url=${cognito_issuer_url} \
           --aws-region=${aws_region} \
@@ -182,7 +182,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # --- TCP daemon systemd service (port 8081) ---
+  # --- TCP daemon systemd service ---
   - path: /etc/systemd/system/openvpn-auth-tcp.service
     content: |
       [Unit]
@@ -198,7 +198,7 @@ write_files:
           --management-password-file=/etc/openvpn/management-pw \
           --callback-url=${callback_url_tcp} \
           --alb-arn=${alb_arn} \
-          --callback-port=8081 \
+          --callback-port=${daemon_port_tcp} \
           --cognito-user-pool-id=${cognito_user_pool_id} \
           --cognito-issuer-url=${cognito_issuer_url} \
           --aws-region=${aws_region} \
@@ -246,14 +246,14 @@ write_files:
         UDP_STATE=$(aws elbv2 describe-target-health \
           --region "$REGION" \
           --target-group-arn "$TG_UDP_ARN" \
-          --targets Id="$INSTANCE_ID",Port=8080 \
+          --targets Id="$INSTANCE_ID",Port=${daemon_port_udp} \
           --query 'TargetHealthDescriptions[0].TargetHealth.State' \
           --output text 2>/dev/null || echo "unknown")
 
         TCP_STATE=$(aws elbv2 describe-target-health \
           --region "$REGION" \
           --target-group-arn "$TG_TCP_ARN" \
-          --targets Id="$INSTANCE_ID",Port=8081 \
+          --targets Id="$INSTANCE_ID",Port=${daemon_port_tcp} \
           --query 'TargetHealthDescriptions[0].TargetHealth.State' \
           --output text 2>/dev/null || echo "unknown")
 

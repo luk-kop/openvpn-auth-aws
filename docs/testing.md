@@ -148,7 +148,7 @@ func TestMyFeature(t *testing.T) {
     }
     sessions := auth.NewSessionStore()
     identity := cognito.NewStaticChecker(false)
-    signer := secrets.NewStaticSigner("test-secret")
+    signer, _ := secrets.NewStaticSigner("test-secret-key!!")
     m := metrics.NewEmitter(&strings.Builder{}, "test")
 
     handler := auth.NewHandler(cfg, sessions, identity, signer, m)

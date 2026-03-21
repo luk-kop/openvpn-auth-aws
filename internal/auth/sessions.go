@@ -2,9 +2,15 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
+)
+
+var (
+	ErrSessionNotFound  = errors.New("session not found")
+	ErrSessionNotPending = errors.New("session not pending")
 )
 
 type SessionStore struct {
@@ -31,10 +37,10 @@ func (s *SessionStore) TryProcess(sessionID string) (*PendingSession, error) {
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[sessionID]
 	if !ok {
-		return nil, fmt.Errorf("session not found")
+		return nil, ErrSessionNotFound
 	}
 	if sess.Status != SessionPending {
-		return nil, fmt.Errorf("session not pending: %d", sess.Status)
+		return nil, fmt.Errorf("%w: status %d", ErrSessionNotPending, sess.Status)
 	}
 	sess.Status = SessionProcessing
 	return sess, nil

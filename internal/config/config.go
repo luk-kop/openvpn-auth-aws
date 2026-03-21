@@ -113,9 +113,20 @@ func (c Config) Validate() error {
 	}
 	if c.CallbackURL == "" {
 		problems = append(problems, "callback-url is required")
+	} else if !strings.HasPrefix(c.CallbackURL, "https://") {
+		if c.ALBARN != "" {
+			problems = append(problems, "callback-url must use https:// scheme in production (alb-arn is set)")
+		} else {
+			slog.Warn("callback-url does not use https:// — acceptable for local dev only", "callback_url", c.CallbackURL)
+		}
 	}
-	if c.CognitoUserPoolID == "" && c.ALBARN != "" {
-		problems = append(problems, "cognito-user-pool-id is required when alb-arn is set")
+	if c.ALBARN != "" {
+		if c.CognitoUserPoolID == "" {
+			problems = append(problems, "cognito-user-pool-id is required when alb-arn is set")
+		}
+		if c.CognitoIssuerURL == "" {
+			problems = append(problems, "cognito-issuer-url is required when alb-arn is set (prevents cross-pool JWT acceptance)")
+		}
 	}
 	if c.CognitoUserPoolID == "" && !c.CognitoGroupsClaims && c.RequiredGroup != "" {
 		problems = append(problems, "cognito-user-pool-id is required when required-group is set without cognito-groups-from-claims")
@@ -134,6 +145,9 @@ func (c Config) Validate() error {
 	}
 	if c.AuthTimeout >= c.HandWindow {
 		slog.Warn("auth-timeout should be less than hand-window to ensure AUTH_FAILED reaches the client before it self-restarts", "auth_timeout", c.AuthTimeout, "hand_window", c.HandWindow)
+	}
+	if c.HMACSecret != "" && len(c.HMACSecret) < 16 {
+		problems = append(problems, fmt.Sprintf("hmac-secret must be at least 16 bytes, got %d", len(c.HMACSecret)))
 	}
 	// Estimate whether the WEB_AUTH URL will fit in the 229-byte OpenVPN CE
 	// INFOMSG buffer. The URL is: OPEN_URL:<callback-url>?state=<blob>

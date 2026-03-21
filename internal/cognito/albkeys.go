@@ -34,7 +34,9 @@ func FetchALBPublicKey(ctx context.Context, region, kid string) (*ecdsa.PublicKe
 		return nil, fmt.Errorf("albkeys: unexpected status %d fetching public key for kid %q", resp.StatusCode, kid)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// PEM public keys are small; cap reads at 8 KB to prevent unexpected large responses.
+	const maxKeySize = 8 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxKeySize))
 	if err != nil {
 		return nil, fmt.Errorf("albkeys: read response body for kid %q: %w", kid, err)
 	}

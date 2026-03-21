@@ -12,11 +12,9 @@ func TestClientPendingAuth(t *testing.T) {
 
 func TestClientAuth(t *testing.T) {
 	got := ClientAuth("1", "2")
-	if got[0] != "client-auth 1 2" {
-		t.Fatalf("ClientAuth()[0] = %q", got[0])
-	}
-	if got[1] != "END" {
-		t.Fatalf("ClientAuth()[1] = %q", got[1])
+	want := "client-auth 1 2\nEND"
+	if got != want {
+		t.Fatalf("ClientAuth() = %q, want %q", got, want)
 	}
 }
 
@@ -37,6 +35,14 @@ func TestClientDenyEmptyReason(t *testing.T) {
 	want := `client-deny 1 2 "denied"`
 	if got != want {
 		t.Fatalf("ClientDeny() with empty reason = %q, want %q", got, want)
+	}
+}
+
+func TestClientDenyReasonSanitized(t *testing.T) {
+	got := ClientDeny("1", "2", `not in group: foo"bar`)
+	want := `client-deny 1 2 "not in group: foo'bar"`
+	if got != want {
+		t.Fatalf("ClientDeny() with quotes in reason = %q, want %q", got, want)
 	}
 }
 

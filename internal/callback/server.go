@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -135,8 +136,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Step 2: Transition session from PENDING → PROCESSING.
 	sess, err := s.sessions.TryProcess(payload.SID)
 	if err != nil {
-		errStr := err.Error()
-		if strings.Contains(errStr, "not found") {
+		if errors.Is(err, auth.ErrSessionNotFound) {
 			slog.Info("callback: session not found", "sid", payload.SID)
 			s.metrics.CallbackRejected("session_not_found")
 			s.renderError(w, http.StatusNotFound, "Session Expired", "Your session has expired. Please try connecting again.", payload.SID)
@@ -183,7 +183,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		baseClaims, err := validateALBJWT(oidcData, pubKey, s.albARN, jwtHeader.Signer, s.cfg.CognitoIssuerURL)
+		baseClaims, groups, err := validateALBJWT(oidcData, pubKey, s.albARN, jwtHeader.Signer, s.cfg.CognitoIssuerURL, s.cfg.CognitoGroupsClaims)
 		if err != nil {
 			slog.Warn("callback: ALB JWT validation failed",
 				"sid", sess.SessionID, "error", err)
@@ -193,11 +193,10 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		claims.ALBClaims = baseClaims
-		if s.cfg.CognitoGroupsClaims {
-			claims.Groups = parseGroupsFromJWT(oidcData)
-		}
+		claims.Groups = groups
 	} else {
 		// Dev mode: skip signature validation, just parse claims.
+		slog.Warn("callback: JWT signature validation SKIPPED (no --alb-arn configured)", "sid", sess.SessionID)
 		baseClaims, groups, parseErr := parseJWTClaimsUnsafe(oidcData)
 		if parseErr != nil {
 			slog.Warn("callback: failed to parse JWT claims (dev mode)",
@@ -248,13 +247,19 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 9: All checks passed — allow.
-	s.sessions.MarkDone(sess.SessionID)
-	s.sink.Send(auth.Decision{
+	// Step 9: All checks passed — send allow decision first, only then mark done.
+	if err := s.sink.Send(auth.Decision{
 		Type: auth.DecisionAllow,
 		CID:  sess.CID,
 		KID:  sess.KID,
-	})
+	}); err != nil {
+		slog.Error("callback: failed to send auth decision", "sid", sess.SessionID, "error", err)
+		s.sessions.MarkFailed(sess.SessionID)
+		s.metrics.CallbackRejected("send_failed")
+		s.renderError(w, http.StatusServiceUnavailable, "Service Unavailable", "Failed to authorize VPN session. Please try again.", sess.SessionID)
+		return
+	}
+	s.sessions.MarkDone(sess.SessionID)
 	s.metrics.AuthSuccess()
 	slog.Info("callback: auth success", "sid", sess.SessionID, "email", claims.Email)
 	s.renderSuccess(w, claims.Email, sess.SessionID)
@@ -264,12 +269,12 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	connected := s.mgmtConnected()
 	uptime := int64(time.Since(s.startTime).Seconds())
-	inFlight := s.sessions.Len()
+	storedSessions := s.sessions.Len()
 
 	resp := healthzResponse{
-		MgmtConnected:    connected,
-		UptimeSeconds:    uptime,
-		StoredSessions: inFlight,
+		MgmtConnected:  connected,
+		UptimeSeconds:  uptime,
+		StoredSessions: storedSessions,
 	}
 
 	if connected {
@@ -288,12 +293,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // denySession marks the session as failed and sends client-deny.
 func (s *Server) denySession(sess *auth.PendingSession, reason string) {
 	s.sessions.MarkFailed(sess.SessionID)
-	s.sink.Send(auth.Decision{
+	if err := s.sink.Send(auth.Decision{
 		Type:   auth.DecisionDeny,
 		CID:    sess.CID,
 		KID:    sess.KID,
 		Reason: reason,
-	})
+	}); err != nil {
+		slog.Warn("callback: failed to send deny decision", "sid", sess.SessionID, "error", err)
+	}
 	s.metrics.AuthDenied(reason)
 }
 
@@ -344,10 +351,12 @@ func parseJWTHeader(tokenStr string) (albJWTHeader, error) {
 }
 
 // validateALBJWT verifies the ALB JWT signature, exp, iss, and signer field.
-func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signerField, expectedIssuer string) (auth.ALBClaims, error) {
+// It returns the base claims and, if extractGroups is true, the "cognito:groups"
+// claim from the already-parsed token (avoiding a second decode pass).
+func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signerField, expectedIssuer string, extractGroups bool) (auth.ALBClaims, []string, error) {
 	// Verify signer field from header matches expected ALB ARN.
 	if signerField != expectedARN {
-		return auth.ALBClaims{}, fmt.Errorf("signer mismatch: got %q, want %q", signerField, expectedARN)
+		return auth.ALBClaims{}, nil, fmt.Errorf("signer mismatch: got %q, want %q", signerField, expectedARN)
 	}
 
 	// Parse and verify the JWT using golang-jwt/jwt/v5.
@@ -359,24 +368,29 @@ func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signe
 		return pubKey, nil
 	}, jwt.WithExpirationRequired(), jwt.WithPaddingAllowed())
 	if err != nil {
-		return auth.ALBClaims{}, fmt.Errorf("jwt validation: %w", err)
+		return auth.ALBClaims{}, nil, fmt.Errorf("jwt validation: %w", err)
 	}
 
 	mapClaims, ok := token.Claims.(*jwt.MapClaims)
 	if !ok || !token.Valid {
-		return auth.ALBClaims{}, fmt.Errorf("invalid jwt claims")
+		return auth.ALBClaims{}, nil, fmt.Errorf("invalid jwt claims")
 	}
 
 	claims, err := extractALBClaims(mapClaims)
 	if err != nil {
-		return auth.ALBClaims{}, err
+		return auth.ALBClaims{}, nil, err
 	}
 
 	if expectedIssuer != "" && claims.Iss != expectedIssuer {
-		return auth.ALBClaims{}, fmt.Errorf("iss mismatch: got %q, want %q", claims.Iss, expectedIssuer)
+		return auth.ALBClaims{}, nil, fmt.Errorf("iss mismatch: got %q, want %q", claims.Iss, expectedIssuer)
 	}
 
-	return claims, nil
+	var groups []string
+	if extractGroups {
+		groups = extractGroupsFromRaw(map[string]interface{}(*mapClaims))
+	}
+
+	return claims, groups, nil
 }
 
 // parseJWTClaimsUnsafe parses JWT claims without signature verification (dev mode).
@@ -404,25 +418,6 @@ func parseJWTClaimsUnsafe(tokenStr string) (auth.ALBClaims, []string, error) {
 	}
 	groups := extractGroupsFromRaw(raw)
 	return claims, groups, nil
-}
-
-// parseGroupsFromJWT extracts the "cognito:groups" claim from a JWT without
-// verifying the signature. Used when CognitoGroupsClaims is true and the JWT
-// has already been signature-verified.
-func parseGroupsFromJWT(tokenStr string) []string {
-	parts := strings.Split(tokenStr, ".")
-	if len(parts) != 3 {
-		return nil
-	}
-	claimsBytes, err := decodeBase64URL(parts[1])
-	if err != nil {
-		return nil
-	}
-	var raw map[string]interface{}
-	if err := json.Unmarshal(claimsBytes, &raw); err != nil {
-		return nil
-	}
-	return extractGroupsFromRaw(raw)
 }
 
 // extractGroupsFromRaw reads the "cognito:groups" array from a raw claims map.
@@ -498,19 +493,24 @@ func (s *Server) checkGroup(ctx context.Context, sess *auth.PendingSession, clai
 
 // Start starts the HTTP server on the given address.
 func (s *Server) Start(addr string) error {
-	s.server = &http.Server{
-		Addr:              addr,
-		Handler:           s.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-	}
-
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	slog.Info("callback server listening", "addr", addr)
+	return s.Serve(ln)
+}
+
+// Serve accepts connections on the given listener. The caller is responsible
+// for binding the port (e.g. via net.Listen) so that bind errors are detected
+// synchronously before the daemon enters the event loop.
+func (s *Server) Serve(ln net.Listener) error {
+	s.server = &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+	}
 
 	if err := s.server.Serve(ln); err != http.ErrServerClosed {
 		return err

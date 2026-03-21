@@ -32,8 +32,9 @@ type captureSink struct {
 	decisions []auth.Decision
 }
 
-func (c *captureSink) Send(d auth.Decision) {
+func (c *captureSink) Send(d auth.Decision) error {
 	c.decisions = append(c.decisions, d)
+	return nil
 }
 
 type fakeMetrics struct {

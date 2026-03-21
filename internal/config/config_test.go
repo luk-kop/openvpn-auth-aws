@@ -10,9 +10,10 @@ func baseValidConfig() Config {
 	return Config{
 		ManagementSocket:       "/run/openvpn/management.sock",
 		ManagementPasswordFile: "/etc/openvpn/management-pw",
-		HMACSecret:             "test-secret",
+		HMACSecret:             "test-secret-key!!",
 		CallbackURL:            "https://vpn-auth.example.com/callback/01/udp",
 		CognitoUserPoolID:      "eu-west-1_TestPool",
+		CognitoIssuerURL:       "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_TestPool",
 		HandWindow:             300 * time.Second,
 		ReconnectMaxInterval:   5 * time.Second,
 		LogFormat:              "text",
@@ -97,6 +98,34 @@ func TestValidate_EmptyCognitoUserPoolID_WithRequiredGroup_ClaimsMode_NoError(t 
 	cfg.CognitoGroupsClaims = true
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected no error when using groups-from-claims without pool ID, got: %v", err)
+	}
+}
+
+func TestValidate_MissingIssuerURL_WithALB_Error(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.ALBARN = "arn:aws:elasticloadbalancing:eu-west-1:123456789012:loadbalancer/app/vpn-auth/abc123"
+	cfg.CognitoIssuerURL = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when CognitoIssuerURL is empty with ALB ARN set")
+	}
+}
+
+func TestValidate_CallbackURL_HTTPWithALB_Error(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.CallbackURL = "http://vpn-auth.example.com/callback"
+	cfg.ALBARN = "arn:aws:elasticloadbalancing:eu-west-1:123456789012:loadbalancer/app/vpn-auth/abc123"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when CallbackURL uses http:// with ALB ARN set")
+	}
+}
+
+func TestValidate_CallbackURL_HTTPWithoutALB_NoError(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.CallbackURL = "http://localhost:8080/callback"
+	cfg.ALBARN = ""
+	cfg.CognitoUserPoolID = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error when CallbackURL uses http:// in dev mode, got: %v", err)
 	}
 }
 
