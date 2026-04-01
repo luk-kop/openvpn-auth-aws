@@ -23,14 +23,14 @@ variable "vpn_group_name" {
   type        = string
 }
 
-variable "additional_callback_urls" {
-  description = "Additional OAuth2 callback URLs beyond the ALB default"
-  type        = list(string)
-  default     = []
+variable "alb_domain_name" {
+  description = "ALB domain name used to construct the OAuth2 callback URL (e.g. vpn-auth.example.com). The module constructs https://{domain}/oauth2/idpresponse automatically."
+  type        = string
+  default     = ""
 }
 
-variable "alb_callback_urls" {
-  description = "OAuth2 callback URLs for the ALB (e.g. https://vpn-auth.example.com/oauth2/idpresponse)"
+variable "additional_callback_urls" {
+  description = "Additional OAuth2 callback URLs beyond the ALB default (e.g. http://localhost:8080/callback for local dev)"
   type        = list(string)
   default     = []
 }

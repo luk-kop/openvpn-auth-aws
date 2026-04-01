@@ -159,7 +159,7 @@ write_files:
       ExecStart=/usr/local/bin/openvpn-auth-daemon \
           --management-socket=${management_socket_udp} \
           --management-password-file=/etc/openvpn/management-pw \
-          --callback-url=${callback_url_udp} \
+          --callback-url=$${VPN_AUTH_CALLBACK_URL_UDP} \
           --alb-arn=${alb_arn} \
           --callback-port=${daemon_port_udp} \
           --cognito-user-pool-id=${cognito_user_pool_id} \
@@ -196,7 +196,7 @@ write_files:
       ExecStart=/usr/local/bin/openvpn-auth-daemon \
           --management-socket=${management_socket_tcp} \
           --management-password-file=/etc/openvpn/management-pw \
-          --callback-url=${callback_url_tcp} \
+          --callback-url=$${VPN_AUTH_CALLBACK_URL_TCP} \
           --alb-arn=${alb_arn} \
           --callback-port=${daemon_port_tcp} \
           --cognito-user-pool-id=${cognito_user_pool_id} \
@@ -219,6 +219,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+%{ if enable_eip_association ~}
   # --- EIP association script ---
   - path: /usr/local/bin/eip-associate.sh
     permissions: "0755"
@@ -228,8 +229,6 @@ write_files:
 
       REGION="${aws_region}"
       EIP_ALLOC_ID="${eip_allocation_id}"
-      TG_UDP_ARN="${tg_udp_arn}"
-      TG_TCP_ARN="${tg_tcp_arn}"
 
       TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
         -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
@@ -240,27 +239,32 @@ write_files:
       INTERVAL=10
       ELAPSED=0
 
-      echo "Waiting for instance $INSTANCE_ID to become healthy in both target groups..."
+      echo "Waiting for instance $INSTANCE_ID to become healthy..."
 
       while true; do
+%{ if create_target_groups ~}
         UDP_STATE=$(aws elbv2 describe-target-health \
           --region "$REGION" \
-          --target-group-arn "$TG_UDP_ARN" \
+          --target-group-arn "${tg_udp_arn}" \
           --targets Id="$INSTANCE_ID",Port=${daemon_port_udp} \
           --query 'TargetHealthDescriptions[0].TargetHealth.State' \
           --output text 2>/dev/null || echo "unknown")
 
         TCP_STATE=$(aws elbv2 describe-target-health \
           --region "$REGION" \
-          --target-group-arn "$TG_TCP_ARN" \
+          --target-group-arn "${tg_tcp_arn}" \
           --targets Id="$INSTANCE_ID",Port=${daemon_port_tcp} \
           --query 'TargetHealthDescriptions[0].TargetHealth.State' \
           --output text 2>/dev/null || echo "unknown")
+%{ else ~}
+        UDP_STATE=$(curl -sf http://localhost:${daemon_port_udp}/healthz && echo "healthy" || echo "unhealthy")
+        TCP_STATE=$(curl -sf http://localhost:${daemon_port_tcp}/healthz && echo "healthy" || echo "unhealthy")
+%{ endif ~}
 
         echo "UDP: $UDP_STATE | TCP: $TCP_STATE (elapsed: $${ELAPSED}s)"
 
         if [ "$UDP_STATE" = "healthy" ] && [ "$TCP_STATE" = "healthy" ]; then
-          echo "Both target groups healthy. Associating EIP $EIP_ALLOC_ID..."
+          echo "Both healthy. Associating EIP $EIP_ALLOC_ID..."
           aws ec2 associate-address \
             --region "$REGION" \
             --allocation-id "$EIP_ALLOC_ID" \
@@ -271,7 +275,7 @@ write_files:
         fi
 
         if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-          echo "ERROR: Timed out after $${TIMEOUT}s waiting for healthy target groups." >&2
+          echo "ERROR: Timed out after $${TIMEOUT}s waiting for healthy state." >&2
           exit 1
         fi
 
@@ -283,7 +287,7 @@ write_files:
   - path: /etc/systemd/system/eip-associate.service
     content: |
       [Unit]
-      Description=Associate Elastic IP after ALB health checks pass
+      Description=Associate Elastic IP after health checks pass
       After=openvpn-auth-udp.service openvpn-auth-tcp.service
       Requires=openvpn-auth-udp.service openvpn-auth-tcp.service
 
@@ -297,6 +301,7 @@ write_files:
 
       [Install]
       WantedBy=multi-user.target
+%{ endif ~}
 
 runcmd:
   # --- Install AWS CLI v2 ---
@@ -338,9 +343,30 @@ runcmd:
   - chmod +x /usr/local/bin/openvpn-auth-daemon
 %{ endif ~}
 
+  # --- Write callback URLs to environment file ---
+%{ if callback_mode == "dynamic" ~}
+  - |
+    PRIVATE_IP=$(cloud-init query ds.meta_data.local_ipv4)
+    cat > /etc/openvpn-auth/env <<ENVEOF
+    VPN_AUTH_CALLBACK_URL_UDP=https://${alb_domain_name}/callback/$${PRIVATE_IP}/udp
+    VPN_AUTH_CALLBACK_URL_TCP=https://${alb_domain_name}/callback/$${PRIVATE_IP}/tcp
+    ENVEOF
+%{ else ~}
+  - |
+    cat > /etc/openvpn-auth/env <<ENVEOF
+    VPN_AUTH_CALLBACK_URL_UDP=${callback_url_udp}
+    VPN_AUTH_CALLBACK_URL_TCP=${callback_url_tcp}
+    ENVEOF
+%{ endif ~}
+
   # --- Enable and start all services ---
   # OpenVPN blocks on management-hold until auth daemon connects,
   # so start with --no-block to avoid blocking cloud-init.
   - systemctl daemon-reload
+%{ if enable_eip_association ~}
   - systemctl enable openvpn-server@udp openvpn-server@tcp openvpn-auth-udp openvpn-auth-tcp eip-associate
   - systemctl start --no-block openvpn-server@udp openvpn-server@tcp openvpn-auth-udp openvpn-auth-tcp eip-associate
+%{ else ~}
+  - systemctl enable openvpn-server@udp openvpn-server@tcp openvpn-auth-udp openvpn-auth-tcp
+  - systemctl start --no-block openvpn-server@udp openvpn-server@tcp openvpn-auth-udp openvpn-auth-tcp
+%{ endif ~}

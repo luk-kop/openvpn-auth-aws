@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"openvpn-auth-aws/internal/auth"
+	"openvpn-auth-aws/internal/cognito"
 	"openvpn-auth-aws/internal/config"
 	"openvpn-auth-aws/internal/secrets"
 
@@ -100,9 +101,9 @@ func newTestServerWithSessions(cfg config.Config, identity GroupsChecker) (*Serv
 		metrics:       m,
 		identity:      identity,
 		tmpl:          tmpl,
-		albARN:        cfg.ALBARN,
-		awsRegion:     cfg.AWSRegion,
-		keyCache:      make(map[string]*ecdsa.PublicKey),
+		albARN:              cfg.ALBARN,
+		albPublicKeyBaseURL: cognito.DefaultALBPublicKeyBaseURL(cfg.AWSRegion),
+		keyCache:            make(map[string]*ecdsa.PublicKey),
 		mgmtConnected: func() bool { return true },
 		startTime:     time.Now(),
 	}

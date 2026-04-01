@@ -60,10 +60,10 @@ type Server struct {
 	tmpl     *template.Template
 
 	// ALB validation
-	hostname      string
-	albARN        string
-	awsRegion     string
-	keyCache      map[string]*ecdsa.PublicKey
+	hostname           string
+	albARN             string
+	albPublicKeyBaseURL string
+	keyCache           map[string]*ecdsa.PublicKey
 	keyCacheMu    sync.RWMutex
 	mgmtConnected func() bool
 	startTime     time.Time
@@ -87,20 +87,24 @@ func NewServer(
 		return nil, fmt.Errorf("callback server: %w", err)
 	}
 	hostname, _ := os.Hostname()
+	albKeyBaseURL := cfg.ALBPublicKeyBaseURL
+	if albKeyBaseURL == "" {
+		albKeyBaseURL = cognito.DefaultALBPublicKeyBaseURL(cfg.AWSRegion)
+	}
 	return &Server{
-		sessions:      sessions,
-		signer:        signer,
-		sink:          sink,
-		cfg:           cfg,
-		metrics:       metrics,
-		identity:      identity,
-		tmpl:          tmpl,
-		hostname:      hostname,
-		albARN:        cfg.ALBARN,
-		awsRegion:     cfg.AWSRegion,
-		keyCache:      make(map[string]*ecdsa.PublicKey),
-		mgmtConnected: mgmtConnected,
-		startTime:     time.Now(),
+		sessions:            sessions,
+		signer:              signer,
+		sink:                sink,
+		cfg:                 cfg,
+		metrics:             metrics,
+		identity:            identity,
+		tmpl:                tmpl,
+		hostname:            hostname,
+		albARN:              cfg.ALBARN,
+		albPublicKeyBaseURL: albKeyBaseURL,
+		keyCache:            make(map[string]*ecdsa.PublicKey),
+		mgmtConnected:       mgmtConnected,
+		startTime:           time.Now(),
 	}, nil
 }
 
@@ -313,7 +317,7 @@ func (s *Server) getOrFetchKey(ctx context.Context, kid string) (*ecdsa.PublicKe
 		return key, nil
 	}
 
-	key, err := cognito.FetchALBPublicKey(ctx, s.awsRegion, kid)
+	key, err := cognito.FetchALBPublicKey(ctx, s.albPublicKeyBaseURL, kid)
 	if err != nil {
 		return nil, err
 	}

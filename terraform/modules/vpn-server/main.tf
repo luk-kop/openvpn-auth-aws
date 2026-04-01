@@ -44,17 +44,6 @@ resource "aws_iam_role_policy" "daemon" {
           Resource = [var.cognito_user_pool_arn]
         },
         {
-          Sid      = "EipAssociate"
-          Effect   = "Allow"
-          Action   = ["ec2:AssociateAddress"]
-          Resource = "*"
-          Condition = {
-            StringEquals = {
-              "aws:ResourceTag/Project" = var.project_name
-            }
-          }
-        },
-        {
           Sid      = "AlbTargetHealth"
           Effect   = "Allow"
           Action   = ["elasticloadbalancing:DescribeTargetHealth"]
@@ -67,6 +56,19 @@ resource "aws_iam_role_policy" "daemon" {
           Resource = var.pki_secret_arns
         },
       ],
+      var.enable_eip_association ? [
+        {
+          Sid      = "EipAssociate"
+          Effect   = "Allow"
+          Action   = ["ec2:AssociateAddress"]
+          Resource = "*"
+          Condition = {
+            StringEquals = {
+              "aws:ResourceTag/Project" = var.project_name
+            }
+          }
+        },
+      ] : [],
       var.daemon_binary_s3_uri != "" ? [
         {
           Sid      = "S3BinaryRead"
@@ -77,6 +79,18 @@ resource "aws_iam_role_policy" "daemon" {
       ] : [],
     )
   })
+}
+
+# --- Elastic IP for VPN server ---
+
+resource "aws_eip" "vpn" {
+  count  = var.enable_eip_association ? 1 : 0
+  domain = "vpc"
+
+  tags = {
+    Name    = "${var.project_name}-vpn"
+    Project = var.project_name
+  }
 }
 
 # --- Launch Template ---
@@ -156,9 +170,12 @@ resource "aws_autoscaling_group" "openvpn" {
   min_size            = var.asg_min_size
   max_size            = var.asg_max_size
   vpc_zone_identifier = var.subnet_ids
-  target_group_arns   = [for tg in aws_lb_target_group.this : tg.arn]
+  target_group_arns = concat(
+    var.create_target_groups ? [for tg in aws_lb_target_group.this : tg.arn] : [],
+    var.nlb_target_group_arns,
+  )
 
-  health_check_type         = "ELB"
+  health_check_type         = var.create_target_groups || length(var.nlb_target_group_arns) > 0 ? "ELB" : "EC2"
   health_check_grace_period = var.asg_health_check_grace_period
 
   launch_template {
@@ -187,10 +204,10 @@ resource "aws_autoscaling_group" "openvpn" {
   }
 }
 
-# --- Target Groups (one per listener) ---
+# --- Target Groups (one per listener, single-instance mode only) ---
 
 resource "aws_lb_target_group" "this" {
-  for_each = var.listeners
+  for_each = var.create_target_groups ? var.listeners : {}
 
   name        = "${var.project_name}-${each.key}"
   port        = each.value.daemon_port
@@ -210,5 +227,36 @@ resource "aws_lb_target_group" "this" {
   tags = {
     Name    = "${var.project_name}-${each.key}"
     Project = var.project_name
+  }
+}
+
+# --- ALB Listener Rules (static, single-instance mode only) ---
+
+resource "aws_lb_listener_rule" "vpn" {
+  for_each     = var.create_target_groups ? var.listeners : {}
+  listener_arn = var.alb_listener_arn
+  priority     = 100 + index(keys(var.listeners), each.key)
+
+  action {
+    type = "authenticate-cognito"
+
+    authenticate_cognito {
+      user_pool_arn       = var.cognito_user_pool_arn
+      user_pool_client_id = var.cognito_user_pool_client_id
+      user_pool_domain    = var.cognito_user_pool_domain
+      scope               = "openid email"
+      session_timeout     = var.auth_session_timeout
+    }
+  }
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.this[each.key].arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/callback/${var.server_name}/${each.key}"]
+    }
   }
 }

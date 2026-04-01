@@ -13,11 +13,6 @@ variable "subnet_ids" {
   type        = list(string)
 }
 
-variable "acm_certificate_arn" {
-  description = "ACM certificate ARN for the HTTPS listener"
-  type        = string
-}
-
 variable "cognito_user_pool_arn" {
   description = "Cognito User Pool ARN for the authenticate-cognito action"
   type        = string
@@ -33,11 +28,6 @@ variable "cognito_user_pool_domain" {
   type        = string
 }
 
-variable "daemon_security_group_id" {
-  description = "Security group ID of the daemon EC2 instance (used for ALB egress rules)"
-  type        = string
-}
-
 variable "listeners" {
   description = "Map of OpenVPN listeners (used for ALB egress rules to daemon ports)"
   type = map(object({
@@ -46,4 +36,30 @@ variable "listeners" {
     client_cidr  = string
     daemon_port  = number
   }))
+}
+
+# --- ACM / DNS ---
+
+variable "alb_domain_name" {
+  description = "Domain name for the ALB certificate and Route53 alias (e.g. vpn-auth.example.com)"
+  type        = string
+}
+
+variable "route53_hosted_zone_id" {
+  description = "Route53 hosted zone ID for ACM DNS validation and ALB alias record"
+  type        = string
+}
+
+# --- Daemon Security Group ---
+
+variable "openvpn_allowed_cidrs" {
+  description = "CIDR blocks allowed to connect to OpenVPN. Use [\"0.0.0.0/0\"] for public access."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "ssh_allowed_cidrs" {
+  description = "CIDR blocks allowed to SSH into the OpenVPN instance. Leave empty to disable SSH ingress."
+  type        = list(string)
+  default     = []
 }

@@ -31,8 +31,8 @@ No modules.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
-| <a name="input_additional_callback_urls"></a> [additional\_callback\_urls](#input\_additional\_callback\_urls) | Additional OAuth2 callback URLs beyond the ALB default | `list(string)` | `[]` | no |
-| <a name="input_alb_callback_urls"></a> [alb\_callback\_urls](#input\_alb\_callback\_urls) | OAuth2 callback URLs for the ALB (e.g. https://vpn-auth.example.com/oauth2/idpresponse) | `list(string)` | `[]` | no |
+| <a name="input_additional_callback_urls"></a> [additional\_callback\_urls](#input\_additional\_callback\_urls) | Additional OAuth2 callback URLs beyond the ALB default (e.g. http://localhost:8080/callback for local dev) | `list(string)` | `[]` | no |
+| <a name="input_alb_domain_name"></a> [alb\_domain\_name](#input\_alb\_domain\_name) | ALB domain name used to construct the OAuth2 callback URL (e.g. vpn-auth.example.com). The module constructs https://{domain}/oauth2/idpresponse automatically. | `string` | `""` | no |
 | <a name="input_aws_region"></a> [aws\_region](#input\_aws\_region) | AWS region | `string` | n/a | yes |
 | <a name="input_domain_prefix"></a> [domain\_prefix](#input\_domain\_prefix) | Cognito hosted UI domain prefix (must be globally unique) | `string` | n/a | yes |
 | <a name="input_project_name"></a> [project\_name](#input\_project\_name) | Project name used for resource naming | `string` | n/a | yes |

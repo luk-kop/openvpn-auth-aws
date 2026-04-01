@@ -1,6 +1,6 @@
 locals {
   tags = {
-    Project   = var.project_name
     ManagedBy = "terraform"
+    Project   = var.project_name
   }
 }

@@ -84,14 +84,7 @@ func TestFetchALBPublicKey(t *testing.T) {
 			srv := httptest.NewServer(tc.handler)
 			defer srv.Close()
 
-			// Override the HTTP client to point at our test server by patching
-			// the URL. We do this by temporarily replacing the default transport
-			// with one that rewrites the host.
-			origTransport := http.DefaultTransport
-			http.DefaultTransport = rewriteTransport{target: srv.URL, wrapped: origTransport}
-			defer func() { http.DefaultTransport = origTransport }()
-
-			key, err := FetchALBPublicKey(context.Background(), "us-east-1", "test-kid")
+			key, err := FetchALBPublicKey(context.Background(), srv.URL, "test-kid")
 
 			if tc.wantErr {
 				if err == nil {
@@ -157,18 +150,4 @@ func TestParseECPublicKey(t *testing.T) {
 			}
 		})
 	}
-}
-
-// rewriteTransport redirects all requests to a test server URL.
-type rewriteTransport struct {
-	target  string
-	wrapped http.RoundTripper
-}
-
-func (r rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Parse the target and replace scheme+host on the outgoing request.
-	cloned := req.Clone(req.Context())
-	cloned.URL.Scheme = "http"
-	cloned.URL.Host = strings.TrimPrefix(r.target, "http://")
-	return r.wrapped.RoundTrip(cloned)
 }

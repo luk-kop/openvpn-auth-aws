@@ -10,14 +10,19 @@ import (
 	"net/http"
 )
 
+// DefaultALBPublicKeyBaseURL returns the default ALB public key base URL for the given region.
+func DefaultALBPublicKeyBaseURL(region string) string {
+	return fmt.Sprintf("https://public-keys.auth.elb.%s.amazonaws.com", region)
+}
+
 // FetchALBPublicKey fetches the ECDSA public key for the given kid from the
 // ALB public key endpoint and returns it parsed as *ecdsa.PublicKey.
 //
-// The key is fetched from:
+// baseURL is the scheme + host portion, e.g.:
 //
-//	https://public-keys.auth.elb.{region}.amazonaws.com/{kid}
-func FetchALBPublicKey(ctx context.Context, region, kid string) (*ecdsa.PublicKey, error) {
-	url := fmt.Sprintf("https://public-keys.auth.elb.%s.amazonaws.com/%s", region, kid)
+//	https://public-keys.auth.elb.us-east-1.amazonaws.com
+func FetchALBPublicKey(ctx context.Context, baseURL, kid string) (*ecdsa.PublicKey, error) {
+	url := baseURL + "/" + kid
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

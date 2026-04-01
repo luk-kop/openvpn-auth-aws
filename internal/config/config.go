@@ -40,6 +40,7 @@ type Config struct {
 	CognitoUserPoolID string
 
 	// AWS configuration
+	ALBPublicKeyBaseURL  string
 	AWSRegion            string
 	SingleSessionPerUser bool
 	EMFMetrics           bool
@@ -84,6 +85,7 @@ func Parse() (Config, error) {
 	flag.StringVar(&cfg.CognitoUserPoolID, "cognito-user-pool-id", getenv("VPN_AUTH_COGNITO_USER_POOL_ID", ""), "Cognito User Pool ID")
 
 	// AWS configuration
+	flag.StringVar(&cfg.ALBPublicKeyBaseURL, "alb-public-key-base-url", getenv("VPN_AUTH_ALB_PUBLIC_KEY_BASE_URL", ""), "base URL for ALB public key endpoint (default: https://public-keys.auth.elb.{region}.amazonaws.com)")
 	flag.StringVar(&cfg.AWSRegion, "aws-region", getenv("AWS_REGION", "eu-west-1"), "AWS region")
 	flag.BoolVar(&cfg.SingleSessionPerUser, "single-session-per-user", getBool("VPN_AUTH_SINGLE_SESSION_PER_USER", true), "enforce one active VPN session per certificate CN")
 	flag.BoolVar(&cfg.EMFMetrics, "emf-metrics", getBool("VPN_AUTH_EMF_METRICS", false), "emit CloudWatch EMF metrics to stdout")

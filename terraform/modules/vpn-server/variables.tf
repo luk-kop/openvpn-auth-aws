@@ -38,9 +38,15 @@ variable "alb_domain_name" {
   type        = string
 }
 
-variable "server_name" {
-  description = "Unique server name used in ALB path routing (e.g. '01')"
+variable "alb_listener_arn" {
+  description = "ALB HTTPS listener ARN for creating static listener rules"
   type        = string
+}
+
+variable "server_name" {
+  description = "Unique server name used in ALB path routing (e.g. '01'). Required when callback_mode = 'static'."
+  type        = string
+  default     = ""
 }
 
 variable "listeners" {
@@ -60,6 +66,71 @@ variable "listeners" {
 
 variable "daemon_binary_s3_uri" {
   description = "S3 URI for the daemon binary"
+  type        = string
+  default     = ""
+}
+
+# --- Scaling mode ---
+
+variable "create_target_groups" {
+  description = "Create ALB target groups. Set to false in multi-instance mode (Lambda creates TGs dynamically)."
+  type        = bool
+  default     = true
+}
+
+variable "callback_mode" {
+  description = "How callback URLs are constructed. 'static' = Terraform-provided URL (single-instance), 'dynamic' = cloud-init resolves instance ID at boot (multi-instance)."
+  type        = string
+  default     = "static"
+
+  validation {
+    condition     = contains(["static", "dynamic"], var.callback_mode)
+    error_message = "callback_mode must be 'static' or 'dynamic'."
+  }
+}
+
+variable "nlb_target_group_arns" {
+  description = "NLB target group ARNs to attach to the ASG (multi-instance mode)"
+  type        = list(string)
+  default     = []
+}
+
+variable "enable_eip_association" {
+  description = "Enable EIP association service in cloud-config. Disable in multi-instance mode when NLB handles routing."
+  type        = bool
+  default     = true
+}
+
+# --- Cognito (for listener rules) ---
+
+variable "cognito_user_pool_client_id" {
+  description = "Cognito User Pool Client ID for ALB listener rule authenticate-cognito action"
+  type        = string
+}
+
+variable "cognito_user_pool_domain" {
+  description = "Cognito hosted UI domain FQDN for ALB listener rule authenticate-cognito action"
+  type        = string
+}
+
+variable "auth_session_timeout" {
+  description = "ALB authenticate-cognito session timeout in seconds"
+  type        = number
+  default     = 3600
+}
+
+variable "cognito_user_pool_id" {
+  description = "Cognito User Pool ID passed to daemon --cognito-user-pool-id"
+  type        = string
+}
+
+variable "cognito_issuer_url" {
+  description = "Cognito issuer URL for JWT validation (e.g. https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_abc123)"
+  type        = string
+}
+
+variable "required_group" {
+  description = "Cognito group required for VPN access, passed to daemon --required-group"
   type        = string
   default     = ""
 }
@@ -90,31 +161,10 @@ variable "ec2_root_volume_size" {
   default     = 20
 }
 
-variable "eip_allocation_id" {
-  description = "Pre-allocated Elastic IP allocation ID to associate after health checks pass"
-  type        = string
-}
-
 variable "hand_window" {
   description = "Seconds allowed for browser-based auth. Used in both OpenVPN server config and daemon --hand-window flag to keep them in sync."
   type        = number
   default     = 300
-}
-
-variable "cognito_user_pool_id" {
-  description = "Cognito User Pool ID passed to daemon --cognito-user-pool-id"
-  type        = string
-}
-
-variable "cognito_issuer_url" {
-  description = "Cognito issuer URL for JWT validation (e.g. https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_abc123)"
-  type        = string
-}
-
-variable "required_group" {
-  description = "Cognito group required for VPN access, passed to daemon --required-group"
-  type        = string
-  default     = ""
 }
 
 variable "pki_secret_arns" {

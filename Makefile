@@ -1,4 +1,4 @@
-.PHONY: test setup build clean \
+.PHONY: test setup build build-lambda clean \
 	stack-up stack-down stack-rebuild \
 	run-daemon run-alb-mock run-mgmt-mock \
 	pki-init pki-client pki-upload pki-client-config
@@ -76,6 +76,10 @@ build:
 clean:
 	rm -f openvpn-auth-daemon mgmt-mock alb-mock
 	go clean -testcache
+
+# Build Lambda Router binary for AWS Lambda (linux/arm64)
+build-lambda:
+	cd lambda-router && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -ldflags="-s -w" -o bootstrap . && zip lambda.zip bootstrap && rm bootstrap
 
 # --- PKI Management (offline, for AWS deployments) ---
 PKI_REGION ?= eu-west-1

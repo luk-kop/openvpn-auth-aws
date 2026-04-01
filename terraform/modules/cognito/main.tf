@@ -54,7 +54,7 @@ resource "aws_cognito_user_pool_domain" "this" {
 
 locals {
   all_callback_urls = compact(concat(
-    var.alb_callback_urls,
+    var.alb_domain_name != "" ? ["https://${var.alb_domain_name}/oauth2/idpresponse"] : [],
     var.additional_callback_urls,
   ))
 }
