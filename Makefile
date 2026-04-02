@@ -77,9 +77,10 @@ clean:
 	rm -f openvpn-auth-daemon mgmt-mock alb-mock
 	go clean -testcache
 
-# Build Lambda Router binary for AWS Lambda (linux/arm64)
+# Build Lambda Router binaries for AWS Lambda (linux/arm64 + linux/amd64)
 build-lambda:
-	cd lambda-router && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -ldflags="-s -w" -o bootstrap . && zip lambda.zip bootstrap && rm bootstrap
+	cd lambda-router && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -ldflags="-s -w" -o bootstrap . && zip lambda-arm64.zip bootstrap && rm bootstrap
+	cd lambda-router && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags lambda.norpc -ldflags="-s -w" -o bootstrap . && zip lambda-amd64.zip bootstrap && rm bootstrap
 
 # --- PKI Management (offline, for AWS deployments) ---
 PKI_REGION ?= eu-west-1

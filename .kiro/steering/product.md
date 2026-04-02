@@ -1,6 +1,6 @@
 # Product
 
-OpenVPN Auth Daemon (`openvpn-auth-aws`) is a Go daemon that authenticates OpenVPN clients via browser-based OIDC using AWS Cognito. It connects to OpenVPN's Unix management socket, receives client events, and orchestrates an authentication flow through an AWS Application Load Balancer (ALB) with Cognito authenticate action.
+OpenVPN Auth Daemon (`openvpn-auth-aws`) is a Go daemon that authenticates OpenVPN clients via browser-based OIDC using AWS Cognito. It connects to OpenVPN's Unix management socket, receives client events, and orchestrates an authentication flow through an AWS Application Load Balancer (ALB) with Cognito authenticate action. Includes an optional Lambda Router for multi-instance EC2 deployments.
 
 ## Core Capabilities
 
@@ -8,12 +8,14 @@ OpenVPN Auth Daemon (`openvpn-auth-aws`) is a Go daemon that authenticates OpenV
 - ALB + Cognito authenticate action: ALB handles the OAuth2 flow and injects a signed `x-amzn-oidc-data` JWT into the callback request
 - JWT validation: ES256 signature (ALB public key), expiry, issuer, `signer` field (ALB ARN)
 - Group membership check via `AdminListGroupsForUser` or JWT claims (`--cognito-groups-from-claims`)
-- TLS renegotiation reauth via Cognito `AdminGetUser` with optional cache for IdP outages
+- TLS renegotiation reauth via Cognito `AdminGetUser` with optional cache for IdP outages (`--reauth-cache`)
+- Reauth can be skipped entirely with `--cognito-skip-reauth`
 - Single-session-per-user enforcement (evicts stale sessions on new connect)
 - CN cross-check: certificate CN must match OIDC email claim
 - `/healthz` endpoint reflecting management socket connectivity
 - CloudWatch EMF metrics and structured logging (`log/slog`)
 - Graceful shutdown with in-flight session draining
+- Lambda Router for multi-instance EC2 callback routing (path-based IP routing, VPC CIDR validation)
 
 ## Auth Flow Summary
 

@@ -10,79 +10,80 @@ Each VPN server is an independent ASG (desired=1, max=2) with a pre-allocated EI
 
 ## Infrastructure
 
-```text
-All resources in a single AWS region.
-Server names (01, 02, ...) are logical identifiers, not region-based.
+```mermaid
+graph TD
+    subgraph ALB_Block["ALB (shared, public) — vpn-auth.example.com — ACM cert"]
+        direction TB
+        ALB_Auth("Cognito authenticate action on all /callback/* rules")
+        Rule1("/callback/01/udp → TG-01:8080")
+        Rule2("/callback/01/tcp → TG-01:8081")
+        Rule3("/callback/02/udp → TG-02:8080")
+        Rule4("/callback/02/tcp → TG-02:8081")
+    end
 
-                        ┌──────────────────────────────────────┐
-                        │       ALB (shared, public)           │
-                        │       vpn-auth.example.com           │
-                        │       ACM cert                       │
-                        │                                      │
-                        │  Cognito authenticate action         │
-                        │  on all /callback/* rules            │
-                        │                                      │
-                        │  /callback/01/udp  →  TG-01:8080    │
-                        │  /callback/01/tcp  →  TG-01:8081    │
-                        │  /callback/02/udp  →  TG-02:8080    │
-                        │  /callback/02/tcp  →  TG-02:8081    │
-                        └──────────────┬───────────────────────┘
-                                       │
-              ┌────────────────────────┼────────────────────────┐
-              │                        │                        │
-   ┌──────────┴──────────┐  ┌──────────┴──────────┐            ...
-   │ ASG "vpn-01"        │  │ ASG "vpn-02"        │
-   │ desired=1, max=2    │  │ desired=1, max=2    │
-   │ EIP: 1.2.3.4        │  │ EIP: 5.6.7.8        │
-   │                     │  │                     │
-   │ openvpn-udp  :1194  │  │ openvpn-udp  :1194  │
-   │ openvpn-tcp  :1195   │  │ openvpn-tcp  :1195   │
-   │ daemon-udp   :8080  │  │ daemon-udp   :8080  │
-   │ daemon-tcp   :8081  │  │ daemon-tcp   :8081  │
-   └─────────────────────┘  └─────────────────────┘
+    subgraph ASG1["ASG vpn-01 — desired=1, max=2 — EIP: 1.2.3.4"]
+        VPN1_UDP("openvpn-udp :1194")
+        VPN1_TCP("openvpn-tcp :1195")
+        D1_UDP("daemon-udp :8080")
+        D1_TCP("daemon-tcp :8081")
+    end
+
+    subgraph ASG2["ASG vpn-02 — desired=1, max=2 — EIP: 5.6.7.8"]
+        VPN2_UDP("openvpn-udp :1194")
+        VPN2_TCP("openvpn-tcp :1195")
+        D2_UDP("daemon-udp :8080")
+        D2_TCP("daemon-tcp :8081")
+    end
+
+    Rule1 --> D1_UDP
+    Rule2 --> D1_TCP
+    Rule3 --> D2_UDP
+    Rule4 --> D2_TCP
+
+    style ALB_Block fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style ASG1 fill:#1e8449,stroke:#186a3b,color:#fff
+    style ASG2 fill:#1e8449,stroke:#186a3b,color:#fff
+    style ALB_Auth fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style Rule1 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style Rule2 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style Rule3 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style Rule4 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+```
 
 Terraform modules:
-  1x  module "alb"          — shared ALB, listener, Cognito auth action
-  1x  module "cognito"      — user pool, app client, domain
-  Nx  module "vpn-server"   — ASG + launch template + EIP + 2x TG
-  ALB listener rules are created in the root module,
-  wiring each vpn-server's TG outputs to path-based rules.
-```
+
+| Count | Module | Purpose |
+|-------|--------|---------|
+| 1x | `module "cognito"` | User pool, app client, domain |
+| 1x | `module "alb"` | Shared ALB, listener, Cognito auth action, security groups |
+| 1x | `module "nlb"` | NLB for OpenVPN traffic (multi-instance mode only) |
+| Nx | `module "vpn-server"` | ASG + launch template + EIP + 2x TG |
+| 1x | `module "lambda-router"` | Lambda proxy for callback routing (multi-instance mode only) |
+| — | Root: `secrets.tf` | PKI secrets in Secrets Manager (ca-cert, server-cert, server-key, ta-key) |
+| — | Root: `cost_saving_mode` | Skips ALB, EIP, ASG when true (Cognito + secrets preserved) |
 
 ## Auth Flow
 
-```text
-┌───────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-│  Client   │     │ OpenVPN  │     │  Daemon  │     │   ALB    │
-│ (browser) │     │  Server  │     │  :8080   │     │ +Cognito │
-└────┬──────┘     └────┬─────┘     └────┬─────┘     └────┬─────┘
-     │  TLS connect    │               │                 │
-     │────────────────>│  >CLIENT:     │                 │
-     │                 │  CONNECT      │                 │
-     │                 │──────────────>│                 │
-     │                 │               │ create session  │
-     │                 │               │ sign state blob │
-     │                 │  client-      │                 │
-     │                 │  pending-auth │                 │
-     │                 │<──────────────│                 │
-     │  WEB_AUTH URL   │               │                 │
-     │<────────────────│               │                 │
-     │                 │               │                 │
-     │  open browser ───────────────────────────────────>│
-     │                 │               │                 │ Cognito
-     │                 │               │                 │ authenticate
-     │  login at       │               │                 │ action
-     │  Cognito  ───────────────────────────────────────>│
-     │                 │               │                 │
-     │                 │               │  GET /callback  │
-     │                 │               │  + ALB headers: │
-     │                 │               │  x-amzn-oidc-*  │
-     │                 │               │<────────────────│
-     │                 │               │ validate claims │
-     │                 │  client-auth  │                 │
-     │                 │<──────────────│                 │
-     │  tunnel up      │               │                 │
-     │<────────────────│               │                 │
+```mermaid
+sequenceDiagram
+    participant C as Client (browser)
+    participant V as OpenVPN Server
+    participant D as Daemon :8080
+    participant A as ALB + Cognito
+
+    C->>V: TLS connect
+    V->>D: >CLIENT:CONNECT (CID, KID, ENV)
+    Note over D: Create session, sign state blob
+    D->>V: client-pending-auth + WEB_AUTH URL
+    V->>C: WEB_AUTH URL
+    C->>A: Open browser → GET /callback?state=...
+    A->>A: Cognito authenticate action (OIDC)
+    C->>A: Login (username + password)
+    A->>A: Token exchange, add x-amzn-oidc-* headers
+    A->>D: GET /callback?state=... (with x-amzn-oidc-data JWT)
+    Note over D: Validate state HMAC, JWT, CN, groups
+    D->>V: client-auth (CID, KID)
+    V->>C: Tunnel up
 ```
 
 1. VPN client connects → OpenVPN sends `>CLIENT:CONNECT` via management socket
@@ -102,16 +103,13 @@ WEB_AUTH::https://vpn-auth.example.com/callback/01/udp?state=<state_blob>
 
 Byte budget (229-byte OpenVPN CE limit):
 
-```text
-Component                                          Bytes
-─────────────────────────────────────────────────────────
-OPEN_URL:                                              9
-https://vpn-auth.example.com/callback/01/udp?state=   52
-state blob (base64url JSON + "." + HMAC-SHA256)      ~162
-                                                  ───────
-Total                                               ~223
-Margin                                                ~6
-```
+| Component | Bytes |
+|-----------|------:|
+| `OPEN_URL:` | 9 |
+| `https://vpn-auth.example.com/callback/01/udp?state=` | 52 |
+| State blob (base64url JSON + `.` + HMAC-SHA256) | ~162 |
+| **Total** | **~223** |
+| **Margin** | **~6** |
 
 Short ALB domain and short server names (`01`, `02`) are important to stay within the 229-byte limit. The state blob no longer needs `code_challenge` or `nonce` (ALB/Cognito handles PKCE internally), which should yield a shorter blob than v1 and increase the margin. The exact savings depend on which fields are dropped — this should be validated during implementation.
 
@@ -180,9 +178,15 @@ Two options for resolving group membership:
 
 The daemon callback ports (8080/8081) must only be reachable from the ALB. Security group rules:
 
-```text
-daemon SG inbound:
-  TCP 8080-8081  ←  ALB security group only
+```mermaid
+graph LR
+    ALB_SG("ALB Security Group")
+    Daemon_SG("Daemon Security Group")
+
+    ALB_SG -->|"TCP 8080-8081 (ingress)"| Daemon_SG
+
+    style ALB_SG fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style Daemon_SG fill:#1e8449,stroke:#186a3b,color:#fff
 ```
 
 Without this, an attacker with network access could spoof `x-amzn-oidc-*` headers directly. The ALB JWT `signer` validation is a defense-in-depth check, not a substitute for network isolation.
@@ -191,35 +195,31 @@ Without this, an attacker with network access could spoof `x-amzn-oidc-*` header
 
 Each EC2 runs two OpenVPN servers (UDP + TCP), each with its own management socket. Two independent daemon processes handle them:
 
-```text
-┌─────────────────────────────────────────────────────┐
-│ EC2 instance                                        │
-│                                                     │
-│  systemd: openvpn-udp.service                       │
-│    openvpn --proto udp --port 1194                  │
-│    --management /run/openvpn/udp-mgmt.sock unix     │
-│                                                     │
-│  systemd: openvpn-tcp.service                       │
-│    openvpn --proto tcp --port 1195                   │
-│    --management /run/openvpn/tcp-mgmt.sock unix     │
-│                                                     │
-│  systemd: openvpn-auth-udp.service                  │
-│    openvpn-auth-daemon                              │
-│      --management-socket /run/openvpn/udp-mgmt.sock │
-│      --callback-port 8080                                        │
-│      --callback-url https://vpn-auth.example.com/callback/01/udp │
-│                                                                  │
-│  systemd: openvpn-auth-tcp.service                               │
-│    openvpn-auth-daemon                                           │
-│      --management-socket /run/openvpn/tcp-mgmt.sock              │
-│      --callback-port 8081                                        │
-│      --callback-url https://vpn-auth.example.com/callback/01/tcp │
-│                                                     │
-│  systemd: eip-associate.service (oneshot)            │
-│    After=openvpn-auth-udp.service                   │
-│    After=openvpn-auth-tcp.service                   │
-│    aws ec2 associate-address ...                    │
-└─────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph EC2["EC2 Instance"]
+        subgraph UDP_Stack["UDP Stack"]
+            OVPN_UDP("openvpn-udp.service\nproto udp, port 1194\nmgmt: /run/openvpn/udp-mgmt.sock")
+            AUTH_UDP("openvpn-auth-udp.service\ncallback-port 8080\ncallback-url .../callback/01/udp")
+        end
+
+        subgraph TCP_Stack["TCP Stack"]
+            OVPN_TCP("openvpn-tcp.service\nproto tcp, port 1195\nmgmt: /run/openvpn/tcp-mgmt.sock")
+            AUTH_TCP("openvpn-auth-tcp.service\ncallback-port 8081\ncallback-url .../callback/01/tcp")
+        end
+
+        EIP("eip-associate.service (oneshot)\nAfter=openvpn-auth-udp, openvpn-auth-tcp\naws ec2 associate-address ...")
+    end
+
+    OVPN_UDP <-->|"Unix socket"| AUTH_UDP
+    OVPN_TCP <-->|"Unix socket"| AUTH_TCP
+    AUTH_UDP -.->|"healthy"| EIP
+    AUTH_TCP -.->|"healthy"| EIP
+
+    style EC2 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style UDP_Stack fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style TCP_Stack fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style EIP fill:#b9770e,stroke:#9c640c,color:#fff
 ```
 
 Each daemon is fully independent — own session store, own mgmt socket connection, own callback port. No shared state between them.
@@ -230,15 +230,14 @@ Each daemon is fully independent — own session store, own mgmt socket connecti
 
 The daemon exposes a `GET /healthz` endpoint on its callback port. ALB target groups use this for health checks.
 
-```text
-ALB Target Group health check:
-  Path:                /healthz
-  Port:                traffic-port (8080 or 8081)
-  Interval:            30s
-  Timeout:             5s
-  HealthyThreshold:    3
-  UnhealthyThreshold:  3
-```
+| Setting | Value |
+|---------|-------|
+| Path | `/healthz` |
+| Port | traffic-port (8080 or 8081) |
+| Interval | 30s |
+| Timeout | 5s |
+| HealthyThreshold | 3 |
+| UnhealthyThreshold | 3 |
 
 Set these values explicitly in Terraform — AWS defaults differ (HealthyThreshold=5, UnhealthyThreshold=2) and may not match the desired behavior.
 
@@ -279,23 +278,35 @@ ASG `desired=1, max=2` means during replacement both old and new instances may b
 
 ### Replacement Sequence
 
-```text
-1. ASG launches new EC2 (old still running, still has EIP)
-2. New EC2 boots, starts OpenVPN + daemons
-3. ASG registers new EC2 in target groups
-4. Targets have status "initial" → ALB does not route traffic to new EC2
-   (initial targets receive no traffic until first successful health check)
-5. ALB health checks begin: GET /healthz every 30s
-6. After HealthyThreshold (3) × Interval (30s) = ~90s → targets become "healthy"
-   Note: ALB may start routing after the first successful check, not after
-   HealthyThreshold. The EIP script waits for full "healthy" status.
-7. EIP associate script detects healthy targets, runs associate-address
-   → EIP atomically moves to new instance
-   → Old instance loses public IP → all VPN tunnels drop
-   → VPN clients reconnect to new instance via EIP
-   → New auth flows go through ALB → routed to new (healthy) instance
-8. Old instance: no VPN connections, ASG terminates it
+```mermaid
+graph TD
+    S1("1. ASG launches new EC2\n(old still running, still has EIP)")
+    S2("2. New EC2 boots\nstarts OpenVPN + daemons")
+    S3("3. ASG registers new EC2 in target groups")
+    S4("4. Targets status: initial\nALB does not route traffic to new EC2")
+    S5("5. ALB health checks begin\nGET /healthz every 30s")
+    S6("6. After 3 x 30s = ~90s\ntargets become healthy")
+    S7("7. EIP associate script runs\nassociate-address → EIP moves")
+    S8("8. Old instance terminated by ASG")
+
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
+
+    S7 -->|"EIP moves"| E1("Old instance loses public IP\nall VPN tunnels drop")
+    E1 --> E2("VPN clients reconnect\nvia EIP to new instance")
+
+    style S1 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style S2 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style S3 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style S4 fill:#b9770e,stroke:#9c640c,color:#fff
+    style S5 fill:#b9770e,stroke:#9c640c,color:#fff
+    style S6 fill:#1e8449,stroke:#186a3b,color:#fff
+    style S7 fill:#1e8449,stroke:#186a3b,color:#fff
+    style S8 fill:#922b21,stroke:#7b241c,color:#fff
+    style E1 fill:#922b21,stroke:#7b241c,color:#fff
+    style E2 fill:#1e8449,stroke:#186a3b,color:#fff
 ```
+
+**Note:** ALB may start routing after the first successful check, not after HealthyThreshold. The EIP script waits for full "healthy" status.
 
 **Critical ordering:** EIP must NOT move before ALB considers the new targets healthy. Otherwise VPN clients reconnect, start auth flow, and ALB either has no healthy target or may fail-open to an unhealthy target. By default, ALB fail-opens when the number of healthy targets drops below `minimum_healthy_targets.count` (default: 1) — this is configurable via target group attributes (`target_group_health.unhealthy_state_routing`). The EIP script waits for `healthy` status to avoid both scenarios.
 
@@ -305,12 +316,18 @@ The `eip-associate.service` script polls target health before associating (see [
 
 The `/healthz` endpoint acts as a readiness probe for the entire stack. EIP association is gated on ALB healthy status, which implies the full dependency chain is satisfied:
 
-```text
-OpenVPN starts → opens management socket
-  → Daemon starts → connects to management socket
-    → /healthz returns 200 (mgmt_connected: true)
-      → ALB health check passes → target becomes healthy
-        → EIP script detects healthy → associate-address
+```mermaid
+graph LR
+    A("OpenVPN starts\nopens mgmt socket") --> B("Daemon starts\nconnects to mgmt socket")
+    B --> C("/healthz returns 200\nmgmt_connected: true")
+    C --> D("ALB health check passes\ntarget becomes healthy")
+    D --> E("EIP script detects healthy\nassociate-address")
+
+    style A fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style B fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style C fill:#b9770e,stroke:#9c640c,color:#fff
+    style D fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style E fill:#1e8449,stroke:#186a3b,color:#fff
 ```
 
 If OpenVPN is slow to start, the daemon retries the management socket connection (built-in reconnect loop). During this time `/healthz` returns 503, ALB keeps the target in `initial`/`unhealthy` state, and EIP does not move. No additional sleep or readiness probes are needed — the health check endpoint is the readiness probe.
@@ -431,9 +448,18 @@ Cognito app client needs only one callback URL: `https://vpn-auth.example.com/oa
 
 Unchanged from v1:
 
-```text
-SessionPending ──► SessionProcessing ──► SessionDone ──► (deleted on ESTABLISHED)
-                                    └──► SessionFailed
+```mermaid
+graph LR
+    P("SessionPending") --> PR("SessionProcessing")
+    PR --> D("SessionDone")
+    PR --> F("SessionFailed")
+    D --> DEL("Deleted on ESTABLISHED")
+
+    style P fill:#b9770e,stroke:#9c640c,color:#fff
+    style PR fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style D fill:#1e8449,stroke:#186a3b,color:#fff
+    style F fill:#922b21,stroke:#7b241c,color:#fff
+    style DEL fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
 ```
 
 The session store remains in-memory per daemon. No shared state between daemons or instances.
@@ -485,17 +511,27 @@ In v2, there is no Lambda — ALB handles OIDC and forwards authenticated reques
 
 ### Lab architecture (v2)
 
-```text
-Three-terminal setup (no Docker):
-  Terminal 1: make run-mgmt-mock
-  Terminal 2: make run-daemon    (--cognito-groups-from-claims, --cognito-skip-reauth, no --alb-arn)
-  Terminal 3: make run-alb-mock  (replaces run-lambda-mock)
+**Three-terminal setup (no Docker):**
 
-Docker stack:
-  openvpn → daemon → alb-mock
+| Terminal | Command | Notes |
+|----------|---------|-------|
+| 1 | `make run-mgmt-mock` | OpenVPN management socket simulator |
+| 2 | `make run-daemon` | `--cognito-groups-from-claims`, `--cognito-skip-reauth`, no `--alb-arn` |
+| 3 | `make run-alb-mock` | Replaces `run-lambda-mock` |
 
-  mgmt-mock terminal: connect 1 user@example.com
+**Docker stack:**
+
+```mermaid
+graph LR
+    OVPN("OpenVPN") --> D("Daemon")
+    D --> ALB("alb-mock")
+
+    style OVPN fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style D fill:#1e8449,stroke:#186a3b,color:#fff
+    style ALB fill:#b9770e,stroke:#9c640c,color:#fff
 ```
+
+In mgmt-mock terminal: `connect 1 user@example.com`
 
 ### `alb-mock` (replaces `lambda-mock`)
 
@@ -505,11 +541,11 @@ Simulates ALB + Cognito authenticate action. On receiving a request:
 2. Parses `{proto}` from the request path to determine which daemon port to forward to (`udp` → 8080, `tcp` → 8081)
 3. Adds fake ALB headers to the request:
 
-   ```text
-   x-amzn-oidc-data: <unsigned JWT with test claims>
-   x-amzn-oidc-identity: test-user-sub-uuid
-   x-amzn-oidc-accesstoken: mock-access-token
-   ```
+   | Header | Value |
+   |--------|-------|
+   | `x-amzn-oidc-data` | unsigned JWT with test claims |
+   | `x-amzn-oidc-identity` | `test-user-sub-uuid` |
+   | `x-amzn-oidc-accesstoken` | `mock-access-token` |
 
 4. Forwards to daemon's callback port
 
@@ -534,42 +570,35 @@ Local dev Makefile target:
 ```bash
 run-daemon:
     go run ./cmd/openvpn-auth-daemon \
-        --hmac-secret=test-secret \
-        --cognito-groups-from-claims \
+        --cn-cross-check=false \
+        --hmac-secret=test-secret-key!! \
+        --callback-url=http://localhost:8080/callback \
         --cognito-skip-reauth \
-        --callback-url=http://localhost:8080/callback/01/udp \
-        --callback-port=8081 \
+        --cognito-groups-from-claims \
         --management-socket=/tmp/openvpn-mgmt.sock \
         --management-password-file=/tmp/mgmt-pw \
+        --callback-port=8081 \
         --auth-timeout=120s \
         --hand-window=120s
 ```
 
-No `--alb-arn` → JWT not validated. `--hmac-secret` → local secret. `--cognito-skip-reauth` → no AdminGetUser on reauth. `--cognito-groups-from-claims` → groups from JWT claims instead of Cognito API.
+No `--alb-arn` → JWT not validated. `--hmac-secret` → local secret (min 16 bytes). `--cognito-skip-reauth` → no AdminGetUser on reauth. `--cognito-groups-from-claims` → groups from JWT claims instead of Cognito API.
 
 ### `callback/server.go` changes (v2)
 
-v1 handler:
+**v1 handler:**
 
-```text
-POST /callback  — body: {code, session_id, ts} + X-Internal-Token
-  → token exchange (code → tokens → JWT validation)
-  → nonce check, CN cross-check, group check
-GET /challenge   — returns PKCE code_challenge for Lambda
-```
+| Endpoint | Flow |
+|----------|------|
+| `POST /callback` | body: `{code, session_id, ts}` + `X-Internal-Token` -- token exchange -- nonce check, CN cross-check, group check |
+| `GET /challenge` | returns PKCE `code_challenge` for Lambda |
 
-v2 handler:
+**v2 handler:**
 
-```text
-GET /callback/{server}/{proto}?state=<blob>
-  → validate state HMAC → lookup session by SID
-  → read x-amzn-oidc-data JWT → validate ALB signature (skip if no --alb-arn)
-  → extract email/sub from claims
-  → resolve groups (AdminListGroupsForUser or claims, depending on --cognito-groups-from-claims)
-  → CN cross-check, group check
-  → client-auth / client-deny
-GET /healthz     — returns 200/503 based on mgmt socket status
-```
+| Endpoint | Flow |
+|----------|------|
+| `GET /callback/{path...}?state=<blob>` | validate state HMAC -- lookup session by SID -- read `x-amzn-oidc-data` JWT -- validate ALB signature (skip if no `--alb-arn`) -- extract email/sub from claims -- resolve groups -- CN cross-check, group check -- `client-auth` / `client-deny` |
+| `GET /healthz` | returns 200/503 based on mgmt socket status |
 
 Removed endpoints: `POST /callback`, `GET /challenge`
 
@@ -582,15 +611,16 @@ services:
 
   daemon:
     environment:
-      - VPN_AUTH_HMAC_SECRET=test-secret
+      - VPN_AUTH_CN_CROSS_CHECK=false
+      - VPN_AUTH_HMAC_SECRET=test-secret-key!!
+      - VPN_AUTH_CALLBACK_URL=http://localhost:8080/callback/01/udp
       - VPN_AUTH_COGNITO_SKIP_REAUTH=true
       - VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS=true
       - VPN_AUTH_MANAGEMENT_SOCKET=/run/openvpn/management.sock
       - VPN_AUTH_MANAGEMENT_PASSWORD_FILE=/etc/openvpn/management-pw
-      - VPN_AUTH_CALLBACK_PORT=8080
-      - VPN_AUTH_CALLBACK_URL=http://localhost:8080/callback/01/udp
+      - VPN_AUTH_CALLBACK_PORT=8081
+      - VPN_AUTH_SERVER_NAME=lab-dev
       # no VPN_AUTH_ALB_ARN → skips JWT validation
-      # removed: VPN_AUTH_USE_LOCAL_MOCKS, VPN_AUTH_API_GATEWAY_URL, VPN_AUTH_INSTANCE_IP
 
   alb-mock:  # replaces lambda-mock
     build:
@@ -599,14 +629,13 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - VPN_AUTH_HMAC_SECRET=test-secret
-      - MOCK_EMAIL=user@example.com
-      - MOCK_SUB=test-user-sub-uuid
+      - DAEMON_ADDR=daemon:8081
+      - MOCK_EMAIL=test@example.com
+      - MOCK_SUB=test-sub-123
       - MOCK_GROUPS=vpn-users
-      - DAEMON_ADDR=daemon:8080
 ```
 
-`VPN_AUTH_CALLBACK_URL` is the URL the daemon puts into WEB_AUTH — the browser opens it. In Docker, `localhost:8080` hits alb-mock (via port mapping), which adds `x-amzn-oidc-*` headers and forwards to `daemon:8080` (docker-internal).
+`VPN_AUTH_CALLBACK_URL` is the URL the daemon puts into WEB_AUTH — the browser opens it. In Docker, `localhost:8080` hits alb-mock (via port mapping), which adds `x-amzn-oidc-*` headers and forwards to `daemon:8081` (docker-internal).
 
 There is no hybrid mode (local daemon + real AWS ALB) because ALB requires targets in a VPC — it cannot reach a locally-running daemon. For real OIDC testing, deploy the full Terraform stack.
 
@@ -625,13 +654,30 @@ See [testing.md](testing.md) for a detailed comparison of what each mode covers.
 
 ## Terraform Module Structure
 
-```text
-terraform/
-  main.tf                          # root: wires modules together, ALB rules
-  modules/
-    cognito/                       # Cognito user pool, app client, domain
-    alb/                           # ALB, HTTPS listener, Cognito auth action, ACM cert
-    vpn-server/                    # ASG, launch template, EIP, 2x target group
-      variables.tf                 #   inputs: server_name, eip_alloc_id, subnet, ...
-      outputs.tf                   #   outputs: tg_udp_arn, tg_tcp_arn
+```mermaid
+graph TD
+    subgraph TF["terraform/"]
+        Root("main.tf — wires modules together\nsecrets.tf — PKI secrets in Secrets Manager")
+        subgraph Modules["modules/"]
+            Cognito("cognito/\nUser pool, app client, domain")
+            ALBMod("alb/\nALB, HTTPS listener, Cognito auth action\nACM cert, security groups")
+            NLBMod("nlb/\nNLB for OpenVPN UDP/TCP traffic\nmulti-instance mode only")
+            VPN("vpn-server/\nASG, launch template, EIP, target groups")
+            LR("lambda-router/\nLambda proxy for callback routing\nmulti-instance mode only")
+        end
+    end
+
+    Root --> Cognito
+    Root --> ALBMod
+    Root --> NLBMod
+    Root --> VPN
+    Root --> LR
+
+    style TF fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style Modules fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style Root fill:#b9770e,stroke:#9c640c,color:#fff
 ```
+
+Key toggles:
+- `cost_saving_mode = true` — skips ALB, NLB, EIP, and ASG; preserves Cognito and PKI secrets
+- `multi_instance_mode = true` — enables NLB and Lambda Router, disables EIP and static ALB listener rules

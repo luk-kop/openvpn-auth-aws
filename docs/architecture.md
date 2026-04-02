@@ -65,22 +65,70 @@ Before starting the OIDC flow, the daemon validates the `CLIENT:CONNECT` event:
 
 Each EC2 instance runs two independent daemon processes — one for UDP, one for TCP. They have separate management sockets, callback ports, and session stores with no shared state.
 
-```text
-EC2 Instance
-├── openvpn-auth-udp  (--callback-url .../callback/01/udp, port 8080)
-│   ├── GET /callback/01/udp
-│   ├── GET /healthz
-│   └── mgmt: /run/openvpn/udp/management.sock
-└── openvpn-auth-tcp  (--callback-url .../callback/01/tcp, port 8081)
-    ├── GET /callback/01/tcp
-    ├── GET /healthz
-    └── mgmt: /run/openvpn/tcp/management.sock
+### Single-instance mode (default)
 
-ALB
-├── Listener rule: /callback/01/udp → Target Group (EC2:8080)
-├── Listener rule: /callback/01/tcp → Target Group (EC2:8081)
-└── Default action: Cognito authenticate action
+Static ALB listener rules route callbacks by server name:
+
+```mermaid
+graph TD
+    subgraph EC2["EC2 Instance"]
+        subgraph UDP["openvpn-auth-udp — port 8080"]
+            UDP_CB("GET /callback/01/udp")
+            UDP_HZ("GET /healthz")
+            UDP_MGMT("mgmt: /run/openvpn/udp/management.sock")
+        end
+        subgraph TCP["openvpn-auth-tcp — port 8081"]
+            TCP_CB("GET /callback/01/tcp")
+            TCP_HZ("GET /healthz")
+            TCP_MGMT("mgmt: /run/openvpn/tcp/management.sock")
+        end
+    end
+
+    subgraph ALB["ALB"]
+        R_UDP("/callback/01/udp → TG EC2:8080")
+        R_TCP("/callback/01/tcp → TG EC2:8081")
+        R_DEF("Default: Cognito authenticate action")
+    end
+
+    R_UDP --> UDP_CB
+    R_TCP --> TCP_CB
+
+    style EC2 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
+    style UDP fill:#1e8449,stroke:#186a3b,color:#fff
+    style TCP fill:#1e8449,stroke:#186a3b,color:#fff
+    style ALB fill:#1a5276,stroke:#154360,color:#ecf0f1
 ```
+
+### Multi-instance mode
+
+When `multi_instance_mode = true`, multiple EC2 instances run behind an NLB for OpenVPN client traffic and a Lambda Router for callback routing:
+
+```mermaid
+graph TD
+    subgraph NLB["NLB — vpn-nlb.example.com"]
+        NLB_UDP("UDP :1194 → TG all EC2 instances")
+        NLB_TCP("TCP :1195 → TG all EC2 instances")
+    end
+
+    subgraph ALB["ALB — vpn.example.com"]
+        ALB_CB("/callback/* → Lambda Router")
+        ALB_DEF("Default: Cognito authenticate action")
+    end
+
+    subgraph LR["Lambda Router"]
+        LR_PARSE("Parse path: /callback/private-ip/udp|tcp")
+        LR_VALID("Validate IP in VPC CIDR")
+        LR_PROXY("Proxy HTTP to EC2 daemon on private IP")
+    end
+
+    ALB_CB --> LR_PARSE --> LR_VALID --> LR_PROXY
+
+    style NLB fill:#6c3483,stroke:#5b2c6f,color:#fff
+    style ALB fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style LR fill:#b9770e,stroke:#9c640c,color:#fff
+```
+
+Each EC2 instance uses its private IP in the callback URL (e.g. `/callback/10.0.1.42/udp`). The Lambda Router extracts the IP from the path, validates it against the VPC CIDR, and proxies the request directly to the daemon. See [Lambda Router](lambda-router-proxy.md) for details.
 
 ## Callback Verification Chain
 
@@ -88,41 +136,41 @@ When the daemon receives `GET /callback` from the ALB, it runs a multi-step veri
 
 ```mermaid
 flowchart TD
-    A["GET /callback?state=..."] --> B{"1. State HMAC</br>valid?"}
-    B -- no --> R1["400 Bad Request"]
+    A("GET /callback?state=...") --> B{"1. State HMAC</br>valid?"}
+    B -- no --> R1("400 Bad Request")
     B -- yes --> C{"2. Session exists</br>and PENDING?"}
-    C -- not found --> R2["404 Not Found"]
-    C -- not pending --> R3["409 Conflict"]
-    C -- yes --> D["Session → PROCESSING"]
+    C -- not found --> R2("404 Not Found")
+    C -- not pending --> R3("409 Conflict")
+    C -- yes --> D("Session → PROCESSING")
     D --> E{"3. x-amzn-oidc-data</br>header present?"}
-    E -- no --> R4["403 missing oidc header</br>client-deny"]
-    E -- yes --> F{"4. Parse JWT header</br>(kid, signer)"}
-    F -- error --> R5["403 invalid jwt header</br>client-deny"]
+    E -- no --> R4("403 missing oidc header</br>client-deny")
+    E -- yes --> F{"4. Parse JWT header</br>kid, signer"}
+    F -- error --> R5("403 invalid jwt header</br>client-deny")
     F -- ok --> G{"--alb-arn</br>set?"}
-    G -- "yes (prod)" --> H["5. Fetch ALB public key</br>(cache by kid)"]
-    H -- fetch error --> R6["503 retry</br>Session → PENDING"]
-    H -- ok --> I{"6. Validate JWT</br>ES256 signature</br>signer == ALB ARN\nexp not expired"}
-    I -- fail --> R7["403 jwt validation failed</br>client-deny"]
+    G -- "yes (prod)" --> H("5. Fetch ALB public key</br>cache by kid")
+    H -- fetch error --> R6("503 retry</br>Session → PENDING")
+    H -- ok --> I{"6. Validate JWT</br>ES256 signature</br>signer == ALB ARN</br>exp not expired"}
+    I -- fail --> R7("403 jwt validation failed</br>client-deny")
     I -- ok --> J{"7. CN cross-check</br>enabled?"}
-    G -- "no (dev)" --> P["Parse claims</br>without signature"]
+    G -- "no (dev)" --> P("Parse claims</br>without signature")
     P --> J
-    J -- "yes: email ≠ CN" --> R8["403 cn mismatch</br>client-deny"]
+    J -- "yes: email ≠ CN" --> R8("403 cn mismatch</br>client-deny")
     J -- "no / match" --> K{"8. Required group</br>configured?"}
-    K -- no --> L["9. Auth SUCCESS\</br>Session → DONE</br>client-auth"]
+    K -- no --> L("9. Auth SUCCESS</br>Session → DONE</br>client-auth")
     K -- yes --> M{"Check group</br>membership"}
-    M -- "not in group" --> R9["403 not in required group</br>client-deny"]
+    M -- "not in group" --> R9("403 not in required group</br>client-deny")
     M -- "in group" --> L
 
-    style L fill:#2d6,stroke:#184,color:#fff
-    style R1 fill:#d33,stroke:#911,color:#fff
-    style R2 fill:#d33,stroke:#911,color:#fff
-    style R3 fill:#d33,stroke:#911,color:#fff
-    style R4 fill:#d33,stroke:#911,color:#fff
-    style R5 fill:#d33,stroke:#911,color:#fff
-    style R6 fill:#f90,stroke:#a60,color:#fff
-    style R7 fill:#d33,stroke:#911,color:#fff
-    style R8 fill:#d33,stroke:#911,color:#fff
-    style R9 fill:#d33,stroke:#911,color:#fff
+    style L fill:#1e8449,stroke:#186a3b,color:#fff
+    style R1 fill:#922b21,stroke:#7b241c,color:#fff
+    style R2 fill:#922b21,stroke:#7b241c,color:#fff
+    style R3 fill:#922b21,stroke:#7b241c,color:#fff
+    style R4 fill:#922b21,stroke:#7b241c,color:#fff
+    style R5 fill:#922b21,stroke:#7b241c,color:#fff
+    style R6 fill:#b9770e,stroke:#9c640c,color:#fff
+    style R7 fill:#922b21,stroke:#7b241c,color:#fff
+    style R8 fill:#922b21,stroke:#7b241c,color:#fff
+    style R9 fill:#922b21,stroke:#7b241c,color:#fff
 ```
 
 ### Step-by-step
@@ -151,6 +199,8 @@ In dev mode (`--alb-arn` is absent), JWT signature validation is skipped — cla
 The callback port is only reachable from the ALB security group (no public ingress). JWT validation provides defense-in-depth — even if network isolation were compromised, an attacker would need a valid JWT signed by the correct ALB.
 
 ## ALB JWT Validation
+
+See [AWS docs: Authenticate users using an Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-authenticate-users.html) for the full ALB authenticate action reference.
 
 Before the daemon sees a normal callback request, the ALB's `authenticate-cognito` action performs the browser login flow with Cognito and stores its own session in `AWSELBAuthSessionCookie-*` cookies. In Terraform this repo configures:
 
@@ -183,19 +233,15 @@ At startup, the daemon also estimates the worst-case URL length from `--callback
 
 ### Byte budget
 
-```text
-Component                                          Bytes
-─────────────────────────────────────────────────────────
-OPEN_URL:                                              9
-https://<domain>/callback/01/udp?state=           45–65  (varies by domain)
-state blob:
-  base64url(JSON payload, ~60 bytes)                 ~80
-  "." separator                                        1
-  HMAC-SHA256 (32 bytes) → base64url, no padding      43
-                                                  ───────
-Total                                           178–198
-229-byte limit                                       229
-```
+| Component | Bytes |
+|-----------|------:|
+| `OPEN_URL:` | 9 |
+| `https://<domain>/callback/01/udp?state=` | 45-65 (varies by domain) |
+| State blob: base64url(JSON payload, ~60 bytes) | ~80 |
+| `.` separator | 1 |
+| HMAC-SHA256 (32 bytes) base64url, no padding | 43 |
+| **Total** | **178-198** |
+| **229-byte limit** | **229** |
 
 Keep `--callback-url` short. A custom domain (e.g. `vpn-auth.example.com`) is recommended over long auto-generated hostnames.
 
@@ -212,6 +258,8 @@ No authentication is required on `/healthz`.
 
 ## EIP Association
 
+> **Note:** EIP association is used only in single-instance mode (`multi_instance_mode = false`). In multi-instance mode, instances have no EIPs — OpenVPN client traffic reaches instances through the NLB.
+
 Each VPN server has a pre-allocated Elastic IP. After an instance replacement, the `eip-associate.service` systemd unit:
 
 1. Starts after both `openvpn-auth-udp.service` and `openvpn-auth-tcp.service` are active
@@ -222,9 +270,18 @@ This ensures VPN clients reconnecting after an instance replacement always reach
 
 ## Session Lifecycle
 
-```
-SessionPending ──► SessionProcessing ──► SessionDone ──► (deleted on ESTABLISHED)
-                                    └──► SessionFailed
+```mermaid
+graph LR
+    P("SessionPending") --> PR("SessionProcessing")
+    PR --> D("SessionDone")
+    PR --> F("SessionFailed")
+    D --> DEL("Deleted on ESTABLISHED")
+
+    style P fill:#b9770e,stroke:#9c640c,color:#fff
+    style PR fill:#1a5276,stroke:#154360,color:#ecf0f1
+    style D fill:#1e8449,stroke:#186a3b,color:#fff
+    style F fill:#922b21,stroke:#7b241c,color:#fff
+    style DEL fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
 ```
 
 - **SessionPending** — created on `>CLIENT:CONNECT`, waiting for browser callback
@@ -243,7 +300,7 @@ Sessions that never reach `ESTABLISHED` have a TTL of `2 × hand-window` and are
 
 Recommended values:
 
-```
+```text
 hand-window 300        # OpenVPN server config
 --auth-timeout 270s    # daemon (hand-window minus ~30s)
 ```

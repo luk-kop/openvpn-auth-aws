@@ -401,6 +401,47 @@ func TestHandlerOIDCHeadersForwarded(t *testing.T) {
 	}
 }
 
+func TestHandlerOIDCHeadersCaseInsensitive(t *testing.T) {
+	var receivedHeaders http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	host, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	oldPortMap := portMap
+	portMap = map[string]string{"udp": port, "tcp": port}
+	defer func() { portMap = oldPortMap }()
+
+	oldCIDR := vpcCIDR
+	_, cidr, _ := net.ParseCIDR("127.0.0.0/8")
+	vpcCIDR = cidr
+	defer func() { vpcCIDR = oldCIDR }()
+
+	// Simulate ALB event with mixed-case header keys
+	req := events.ALBTargetGroupRequest{
+		Path:                  fmt.Sprintf("/callback/%s/udp", host),
+		QueryStringParameters: map[string]string{"state": "s"},
+		Headers: map[string]string{
+			"X-Amzn-Oidc-Data":        "data-val",
+			"X-Amzn-Oidc-Accesstoken": "token-val",
+			"X-Amzn-Oidc-Identity":    "id-val",
+		},
+	}
+
+	_, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	for _, h := range []string{"X-Amzn-Oidc-Data", "X-Amzn-Oidc-Accesstoken", "X-Amzn-Oidc-Identity"} {
+		if receivedHeaders.Get(h) == "" {
+			t.Errorf("OIDC header %q was not forwarded (mixed-case input)", h)
+		}
+	}
+}
+
 func TestOIDCHeadersEnvOverride(t *testing.T) {
 	var receivedHeaders http.Header
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

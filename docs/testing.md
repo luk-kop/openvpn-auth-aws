@@ -94,14 +94,15 @@ make pki-client-config CN=user@example.com REMOTE=<EIP from terraform output>
 sudo openvpn --config pki/clients/user@example.com.ovpn
 ```
 
-### Terraform Partial Deploys
+### Terraform Deployment Modes
 
-Terraform variables `deploy_cognito` and `deploy_compute` allow deploying subsets of the infrastructure. Dependencies are enforced via validation (`deploy_compute` requires `deploy_cognito`):
+Terraform now exposes two high-level deployment toggles:
 
 | Scenario | Variables | Use case |
 |---|---|---|
-| Cognito only | `deploy_cognito=true, deploy_compute=false` | Create user pool for manual testing or external use |
-| Full stack | both `true` (default) | Production or end-to-end testing |
+| Cognito + Secrets only | `cost_saving_mode=true` | Bootstrap PKI secrets and Cognito without ALB, EC2, EIP, or Lambda Router |
+| Full single-instance stack | `cost_saving_mode=false`, `multi_instance_mode=false` | Default production or end-to-end testing flow |
+| Full multi-instance stack | `cost_saving_mode=false`, `multi_instance_mode=true` | Multi-instance deployment with NLB + Lambda Router callback proxy |
 
 ## Unit Tests
 
@@ -159,10 +160,11 @@ func TestMyFeature(t *testing.T) {
 ## CI/CD Recommendations
 
 ```yaml
-# .github/workflows/test.yml
+# .github/workflows/ci.yml
 jobs:
-  unit-tests:
+  test:
     runs-on: ubuntu-latest
     steps:
       - run: go test -v -short ./...
+      - run: cd lambda-router && go test -v -short ./...
 ```

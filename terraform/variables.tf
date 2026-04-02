@@ -162,6 +162,14 @@ variable "alb_auth_session_timeout" {
   default     = 3600
 }
 
+# --- OpenVPN ---
+
+variable "openvpn_version" {
+  description = "Pinned OpenVPN CE version for apt install (e.g. '2.6.19'). The distro suffix is appended automatically."
+  type        = string
+  default     = "2.6.19"
+}
+
 # --- EC2 ---
 
 variable "ec2_instance_type" {
@@ -209,7 +217,7 @@ variable "lambda_subnet_ids" {
 }
 
 variable "lambda_router_zip_path" {
-  description = "Local path to the pre-built Lambda Router zip file (lambda-router/lambda.zip)"
+  description = "Local path to the pre-built Lambda Router zip file (e.g. lambda-router/lambda-arm64.zip)"
   type        = string
   default     = ""
 }

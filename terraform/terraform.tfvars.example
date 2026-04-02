@@ -24,7 +24,7 @@ route53_hosted_zone_id = "ZXXXXXXXXXXXXXXXXXXXXX"
 # nlb_domain_name      = "vpn-nlb.example.com"   # NLB Route53 alias for OpenVPN traffic
 # vpc_cidr             = "10.0.0.0/16"
 # lambda_subnet_ids    = ["subnet-priv-aaa", "subnet-priv-bbb"]
-# lambda_router_zip_path = "lambda-router/lambda.zip"
+# lambda_router_zip_path = "lambda-router/lambda-arm64.zip"
 
 # --- Optional overrides ---
 # aws_region             = "eu-west-1"

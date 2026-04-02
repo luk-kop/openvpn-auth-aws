@@ -25,6 +25,7 @@ locals {
     cognito_user_pool_id  = var.cognito_user_pool_id
     cognito_issuer_url    = var.cognito_issuer_url
     required_group        = var.required_group
+    openvpn_version       = var.openvpn_version
     pki_secret_prefix     = "${var.project_name}/pki"
 
     # Scaling mode

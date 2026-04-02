@@ -2,6 +2,7 @@
 
 ```
 openvpn-auth-aws/
+├── .github/       # CI/CD workflows, Dependabot, PR labeler
 ├── cmd/
 │   ├── openvpn-auth-daemon/  # Main binary entry point
 │   ├── mgmt-mock/            # OpenVPN management socket simulator (dev/test)
@@ -15,22 +16,35 @@ openvpn-auth-aws/
 │   ├── metrics/    # CloudWatch EMF metrics
 │   ├── mgmt/       # OpenVPN management socket protocol (parser + command writer)
 │   └── secrets/    # HMAC signing via static secret
-├── docs/           # Architecture, configuration, security, testing docs
-└── lab/            # Docker Compose stack, PKI setup scripts, test configs
+├── lambda-router/ # Go Lambda proxy for multi-instance EC2 callback routing
+├── terraform/     # AWS infrastructure (modules: alb, cognito, lambda-router, nlb, vpn-server)
+├── scripts/       # PKI management script (pki.sh)
+├── pki/           # Generated PKI artifacts (CA, server/client certs, TLS auth key)
+├── docs/          # Architecture, configuration, security, testing docs
+├── notes/         # Design notes and architecture explorations
+└── lab/           # Docker Compose stack, PKI setup scripts, test configs
 ```
 
 ## Key Files
 
-- `internal/auth/types.go` — all shared interfaces (`IdentityChecker`, `StateSigner`, `Metrics`, `DecisionSink`) and domain types (`PendingSession`, `Decision`, `SessionStatus`, `ALBClaims`)
+- `internal/auth/types.go` — all shared interfaces (`IdentityChecker`, `StateSigner`, `Metrics`, `DecisionSink`) and domain types (`PendingSession`, `Decision`, `DecisionType`, `SessionStatus`, `ALBClaims`, `IdentityResult`)
 - `internal/auth/handler.go` — central auth orchestration; handles `CLIENT:CONNECT`, `CLIENT:REAUTH`, `CLIENT:DISCONNECT`, `CLIENT:ESTABLISHED`
 - `internal/auth/sessions.go` — in-memory session store with TTL reaper
 - `internal/auth/state.go` — HMAC-signed state blob encode/decode (`StatePayload`: `SID`, `IAT`, `EXP`)
+- `internal/auth/cache.go` — `ReauthCache` with TTL for caching `IdentityResult` during IdP outages
 - `internal/callback/server.go` — `GET /callback` (ALB JWT validation, group check, session resolution) and `GET /healthz`
 - `internal/callback/render.go` — HTML template loading (`//go:embed`), rendering with buffer-first pattern, plain text fallback
 - `internal/callback/templates/` — embedded HTML templates (`success.html`, `error.html`) with inline CSS and dark mode
 - `internal/cognito/albkeys.go` — fetches ALB EC public keys from `public-keys.auth.elb.{region}.amazonaws.com`
+- `internal/cognito/client.go` — `Checker` (Cognito `AdminListGroupsForUser` / `AdminGetUser`) and `StaticChecker` (local dev mode)
+- `internal/cognito/jwks.go` — `JWKSCache` for Cognito JWKS key fetching and `ValidateIDToken` (RSA)
+- `internal/mgmt/parser.go` — OpenVPN management protocol line parser
+- `internal/mgmt/events.go` — management event types
+- `internal/mgmt/commands.go` — management command writer (client-auth, client-deny, etc.)
+- `internal/mgmt/client.go` — management socket connection, read loop, reconnection
 - `internal/app/daemon.go` — top-level daemon wiring, reconnect loop, graceful shutdown
 - `internal/config/config.go` — single `Config` struct, all flags and env vars
+- `lambda-router/main.go` — Lambda proxy for multi-instance EC2 callback routing
 
 ## Conventions
 

@@ -37,6 +37,7 @@ lab/aws.env
 .idea/
 .vscode/
 .kiro/specs/
+.codex
 
 # Python
 __pycache__/

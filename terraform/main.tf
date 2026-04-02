@@ -65,6 +65,7 @@ module "vpn_server" {
   server_name            = var.multi_instance_mode ? "" : var.server_name
   nlb_target_group_arns  = var.multi_instance_mode ? module.nlb[0].target_group_arns : []
 
+  openvpn_version      = var.openvpn_version
   ec2_instance_type    = var.ec2_instance_type
   ec2_ami_id           = var.ec2_ami_id
   ec2_key_name         = var.ec2_key_name

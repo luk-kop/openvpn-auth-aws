@@ -11,6 +11,7 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--callback-url` | `VPN_AUTH_CALLBACK_URL` | — | Full callback URL including path (e.g. `https://vpn-auth.example.com/callback/01/udp`). The daemon appends `?state=...` and nothing else. Required. |
 | `--callback-port` | `VPN_AUTH_CALLBACK_PORT` | `8080` | Port the daemon listens on for ALB-forwarded `GET /callback` requests |
 | `--alb-arn` | `VPN_AUTH_ALB_ARN` | — | ALB ARN used to validate the `signer` field in ALB JWTs. If absent, JWT signature validation is skipped (dev/test only). Always set in production. |
+| `--alb-public-key-base-url` | `VPN_AUTH_ALB_PUBLIC_KEY_BASE_URL` | — | Base URL for fetching ALB public keys. Default: `https://public-keys.auth.elb.{region}.amazonaws.com` (derived from `--aws-region`). Override for AWS China partition (e.g. `https://public-keys.auth.elb.cn-north-1.amazonaws.com.cn`). |
 | `--hmac-secret` | `VPN_AUTH_HMAC_SECRET` | — | HMAC secret for signing state blobs |
 | `--aws-region` | `AWS_REGION` | `eu-west-1` | AWS region |
 | `--cognito-user-pool-id` | `VPN_AUTH_COGNITO_USER_POOL_ID` | — | Cognito User Pool ID |
@@ -20,6 +21,9 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--required-group` | `VPN_AUTH_REQUIRED_GROUP` | — | Required Cognito group for VPN access |
 | `--hand-window` | `VPN_AUTH_HAND_WINDOW` | `5m` | OpenVPN `hand-window` — time allowed for the full TLS handshake including auth. Must match the OpenVPN server config |
 | `--auth-timeout` | `VPN_AUTH_AUTH_TIMEOUT` | `4m30s` | How long the daemon waits for the browser auth callback. Must be less than `--hand-window` so `AUTH_FAILED` reaches the client before it self-restarts |
+| `--reneg-interval` | `VPN_AUTH_RENEG_INTERVAL` | `1h` | OpenVPN `reneg-sec` value. Used to compute reauth cache TTL (`reneg-interval + 10m`) |
+| `--reconnect-max-interval` | `VPN_AUTH_RECONNECT_MAX_INTERVAL` | `5s` | Max backoff between management socket reconnect attempts |
+| `--shutdown-grace-period` | `VPN_AUTH_SHUTDOWN_GRACE_PERIOD` | `5m` | Grace period for in-flight session draining during graceful shutdown |
 | `--cn-cross-check` | `VPN_AUTH_CN_CROSS_CHECK` | `true` | Require ALB JWT email claim to match the certificate CN |
 | `--check-groups-on-reauth` | `VPN_AUTH_CHECK_GROUPS_ON_REAUTH` | `false` | Check required group during `CLIENT:REAUTH` |
 | `--reauth-cache` | `VPN_AUTH_REAUTH_CACHE` | `false` | Allow cached reauth decisions during IdP outage |
@@ -33,6 +37,21 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--instance-id` | `VPN_AUTH_INSTANCE_ID` | `local-dev` | Instance identifier used in EMF metrics |
 
 See `--help` for the full list.
+
+## Lambda Router Environment Variables
+
+The Lambda Router (used in multi-instance mode) is configured via environment variables set by Terraform:
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `VPC_CIDR` | yes | — | CIDR VPC for IP validation (e.g. `10.0.0.0/16`) |
+| `DAEMON_PORT_UDP` | no | `8080` | Daemon port for UDP listeners |
+| `DAEMON_PORT_TCP` | no | `8081` | Daemon port for TCP listeners |
+| `UPSTREAM_TIMEOUT` | no | `10s` | HTTP timeout to upstream daemon (`time.ParseDuration` format) |
+| `OIDC_HEADERS` | no | `["x-amzn-oidc-data","x-amzn-oidc-accesstoken","x-amzn-oidc-identity"]` | JSON array of OIDC header names to forward to daemon |
+| `LOG_LEVEL` | no | `info` | Log level: `debug`, `info`, `warn`, `error` |
+
+See [Lambda Router](lambda-router-proxy.md) for architecture, security model, and troubleshooting.
 
 ## Dev vs Production Flag Matrix
 
@@ -110,6 +129,7 @@ All metrics are emitted under the `VPNAuth` namespace with `InstanceId` as the p
 | `ReauthDenied` | counter | `missing_common_name`, `user_not_found`, `user_disabled`, `group_denied`, `cognito_error` | Reauth denied |
 | `ReauthCacheHit` | counter | — | Reauth allowed from cache (Cognito unavailable) |
 | `CallbackReceived` | counter | — | Any callback request received (before validation) |
+| `TokenExchangeError` | counter | *(reason)* | Token exchange or identity provider error (defined but not yet emitted) |
 
 ### CallbackRejected reasons
 

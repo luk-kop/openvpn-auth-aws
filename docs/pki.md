@@ -25,14 +25,14 @@ All `make pki-*` commands must be run from the repository root.
 # 1. Generate CA + server cert + TLS auth key
 make pki-init
 
-# 2. Deploy Cognito + Secrets Manager (no EC2 yet)
-cd terraform && terraform apply -var="deploy_compute=false" && cd ..
+# 2. Deploy Cognito + Secrets Manager only (no ALB/EC2 yet)
+cd terraform && terraform apply -var="cost_saving_mode=true" && cd ..
 
 # 3. Upload PKI artifacts to the secrets Terraform created
 make pki-upload PKI_REGION=eu-west-1 PKI_PREFIX=openvpn-auth-aws
 
-# 4. Deploy compute (EC2 boots with certs already in Secrets Manager)
-cd terraform && terraform apply && cd ..
+# 4. Deploy the full stack (EC2 boots with certs already in Secrets Manager)
+cd terraform && terraform apply -var="cost_saving_mode=false" && cd ..
 
 # 5. Generate a client certificate
 make pki-client CN=user@example.com
@@ -99,7 +99,7 @@ Creates or updates these secrets:
 | `{prefix}/pki/server-key` | Server private key (PEM) |
 | `{prefix}/pki/ta-key` | TLS auth static key |
 
-Secrets Manager secrets are always created by Terraform (independent of `deploy_compute`); this command populates them with `put-secret-value`.
+Secrets Manager secrets are always created by Terraform, including when `cost_saving_mode=true`; this command populates them with `put-secret-value`.
 
 ### `make pki-client-config CN=<email> REMOTE=<host|ip>[:port]`
 
@@ -121,14 +121,14 @@ The file includes inline `<ca>`, `<cert>`, `<key>`, and `<tls-auth>` blocks — 
 # 1. Initialize PKI
 make pki-init
 
-# 2. Deploy Cognito + Secrets Manager (no EC2 yet)
-cd terraform && terraform apply -var="deploy_compute=false" && cd ..
+# 2. Deploy Cognito + Secrets Manager only (no ALB/EC2 yet)
+cd terraform && terraform apply -var="cost_saving_mode=true" && cd ..
 
 # 3. Upload PKI artifacts to the secrets Terraform created
 make pki-upload
 
-# 4. Deploy compute (EC2 boots with certs already in place)
-cd terraform && terraform apply && cd ..
+# 4. Deploy the full stack (EC2 boots with certs already in place)
+cd terraform && terraform apply -var="cost_saving_mode=false" && cd ..
 ```
 
 ### Adding a new user

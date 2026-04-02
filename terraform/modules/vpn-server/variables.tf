@@ -135,6 +135,14 @@ variable "required_group" {
   default     = ""
 }
 
+# --- OpenVPN ---
+
+variable "openvpn_version" {
+  description = "Pinned OpenVPN CE version for apt install (e.g. '2.6.19'). The distro suffix is appended automatically."
+  type        = string
+  default     = "2.6.19"
+}
+
 # --- EC2 ---
 
 variable "ec2_ami_id" {

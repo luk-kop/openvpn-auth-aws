@@ -19,7 +19,7 @@ variable "lambda_subnet_ids" {
 }
 
 variable "lambda_zip_path" {
-  description = "Local path to the pre-built lambda.zip (output of make build-lambda)"
+  description = "Local path to the pre-built Lambda zip (e.g. lambda-router/lambda-arm64.zip). Must match the module's architectures setting (arm64)."
   type        = string
 }
 

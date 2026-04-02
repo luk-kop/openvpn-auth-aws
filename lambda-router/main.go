@@ -227,10 +227,16 @@ func handler(ctx context.Context, req events.ALBTargetGroupRequest) (events.ALBT
 	upstreamURL := fmt.Sprintf("http://%s:%s/callback?state=%s", ip, port, url.QueryEscape(state))
 
 	// Step 5: Collect OIDC headers to forward
+	// Build lowercase lookup map — ALB Lambda integration lowercases headers,
+	// but we normalize defensively in case casing varies.
+	lowerHeaders := make(map[string]string, len(req.Headers))
+	for k, v := range req.Headers {
+		lowerHeaders[strings.ToLower(k)] = v
+	}
 	forwardHeaders := make(map[string]string, len(oidcHeaders))
 	var present, missing []string
 	for _, h := range oidcHeaders {
-		if v, ok := req.Headers[h]; ok {
+		if v, ok := lowerHeaders[strings.ToLower(h)]; ok {
 			forwardHeaders[h] = v
 			present = append(present, h)
 		} else {

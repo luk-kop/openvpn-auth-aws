@@ -1,5 +1,16 @@
 # OpenVPN Server Configuration
 
+## Tested Version
+
+This project is tested with **OpenVPN CE 2.6.19** (installed from the [official OpenVPN repository](https://build.openvpn.net/debian/openvpn/release/2.6)). The version is pinned and configurable:
+
+| Environment | How to change | Default |
+|-------------|---------------|---------|
+| Docker lab | `OPENVPN_VERSION` build arg in `lab/Dockerfile.openvpn` | `2.6.19` |
+| Terraform | `openvpn_version` variable in `terraform/variables.tf` | `"2.6.19"` |
+
+**Minimum required:** OpenVPN 2.6+ — earlier versions do not support the `IV_SSO webauth` mechanism used for browser-based authentication.
+
 ## Required Directives
 
 The server config must include these directives for the auth daemon to work:
