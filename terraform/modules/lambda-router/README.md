@@ -49,7 +49,7 @@ No modules.
 | <a name="input_daemon_ports"></a> [daemon\_ports](#input\_daemon\_ports) | Map of protocol to daemon HTTP port (e.g. {udp = 8080, tcp = 8081}) | `map(number)` | n/a | yes |
 | <a name="input_daemon_security_group_id"></a> [daemon\_security\_group\_id](#input\_daemon\_security\_group\_id) | Security group ID of the EC2 daemon instances (ingress rules will be added) | `string` | n/a | yes |
 | <a name="input_lambda_subnet_ids"></a> [lambda\_subnet\_ids](#input\_lambda\_subnet\_ids) | Subnet IDs for Lambda VPC configuration | `list(string)` | n/a | yes |
-| <a name="input_lambda_zip_path"></a> [lambda\_zip\_path](#input\_lambda\_zip\_path) | Local path to the pre-built lambda.zip (output of make build-lambda) | `string` | n/a | yes |
+| <a name="input_lambda_zip_path"></a> [lambda\_zip\_path](#input\_lambda\_zip\_path) | Local path to the pre-built Lambda zip (e.g. lambda-router/lambda-arm64.zip). Must match the module's architectures setting (arm64). | `string` | n/a | yes |
 | <a name="input_project_name"></a> [project\_name](#input\_project\_name) | Project name used for resource naming | `string` | n/a | yes |
 | <a name="input_upstream_timeout"></a> [upstream\_timeout](#input\_upstream\_timeout) | HTTP timeout for Lambda proxy requests to upstream daemon (time.ParseDuration format) | `string` | `"10s"` | no |
 | <a name="input_vpc_cidr"></a> [vpc\_cidr](#input\_vpc\_cidr) | VPC CIDR block passed to Lambda as VPC\_CIDR env var for IP validation | `string` | n/a | yes |

@@ -44,7 +44,7 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 
 | Name | Version |
 |------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.38.0 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.0 |
 
 ## Modules
 
@@ -86,12 +86,13 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 | <a name="input_ec2_key_name"></a> [ec2\_key\_name](#input\_ec2\_key\_name) | SSH key pair name (optional if using SSM only) | `string` | `""` | no |
 | <a name="input_ec2_root_volume_size"></a> [ec2\_root\_volume\_size](#input\_ec2\_root\_volume\_size) | Root EBS volume size in GB | `number` | `20` | no |
 | <a name="input_hand_window"></a> [hand\_window](#input\_hand\_window) | Seconds allowed for browser-based auth. Synced between OpenVPN server config and daemon --hand-window. | `number` | `300` | no |
-| <a name="input_lambda_router_zip_path"></a> [lambda\_router\_zip\_path](#input\_lambda\_router\_zip\_path) | Local path to the pre-built Lambda Router zip file (lambda-router/lambda.zip) | `string` | `""` | no |
+| <a name="input_lambda_router_zip_path"></a> [lambda\_router\_zip\_path](#input\_lambda\_router\_zip\_path) | Local path to the pre-built Lambda Router zip file (e.g. lambda-router/lambda-arm64.zip) | `string` | `""` | no |
 | <a name="input_lambda_subnet_ids"></a> [lambda\_subnet\_ids](#input\_lambda\_subnet\_ids) | Subnet IDs for the Lambda Router function (private subnets with VPC routing) | `list(string)` | `[]` | no |
 | <a name="input_multi_instance_mode"></a> [multi\_instance\_mode](#input\_multi\_instance\_mode) | Enable multi-instance ASG mode. When true: Lambda manages ALB rules dynamically, EIP association is disabled, callback URLs are resolved at boot from instance ID. When false (default): static ALB rules, EIP association enabled, single server\_name used in callback path. | `bool` | `false` | no |
 | <a name="input_nlb_domain_name"></a> [nlb\_domain\_name](#input\_nlb\_domain\_name) | Domain name for the NLB Route53 alias (e.g. vpn-nlb.example.com). Used only in multi-instance mode. | `string` | `""` | no |
 | <a name="input_openvpn_allowed_cidrs"></a> [openvpn\_allowed\_cidrs](#input\_openvpn\_allowed\_cidrs) | CIDR blocks allowed to connect to OpenVPN | `list(string)` | <pre>[<br/>  "0.0.0.0/0"<br/>]</pre> | no |
 | <a name="input_openvpn_listeners"></a> [openvpn\_listeners](#input\_openvpn\_listeners) | Map of OpenVPN listeners. Must contain 'udp' and 'tcp' keys. | <pre>map(object({<br/>    openvpn_port = number<br/>    ip_protocol  = string<br/>    client_cidr  = string<br/>    daemon_port  = number<br/>  }))</pre> | <pre>{<br/>  "tcp": {<br/>    "client_cidr": "10.8.1.0/24",<br/>    "daemon_port": 8081,<br/>    "ip_protocol": "tcp",<br/>    "openvpn_port": 1195<br/>  },<br/>  "udp": {<br/>    "client_cidr": "10.8.0.0/24",<br/>    "daemon_port": 8080,<br/>    "ip_protocol": "udp",<br/>    "openvpn_port": 1194<br/>  }<br/>}</pre> | no |
+| <a name="input_openvpn_version"></a> [openvpn\_version](#input\_openvpn\_version) | Pinned OpenVPN CE version for apt install (e.g. '2.6.19'). The distro suffix is appended automatically. | `string` | `"2.6.19"` | no |
 | <a name="input_project_name"></a> [project\_name](#input\_project\_name) | Project name used for resource naming and tagging | `string` | `"openvpn-auth-aws"` | no |
 | <a name="input_required_group"></a> [required\_group](#input\_required\_group) | Cognito group required for VPN access, passed to daemon --required-group | `string` | `"vpn-users"` | no |
 | <a name="input_route53_hosted_zone_id"></a> [route53\_hosted\_zone\_id](#input\_route53\_hosted\_zone\_id) | Route53 hosted zone ID for ACM DNS validation and ALB alias record | `string` | n/a | yes |
