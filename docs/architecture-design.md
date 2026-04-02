@@ -641,6 +641,13 @@ Why it was attractive:
 - Static path-based callback routing with predictable server names
 - Simple mental model for EIP movement during instance replacement
 
+How target group registration would work in that model:
+
+- Each per-server ASG would attach directly to its own pair of daemon target groups, one for UDP daemon callbacks and one for TCP daemon callbacks
+- Instances launched by that ASG would be registered automatically in those target groups through the ASG `target_group_arns` setting
+- ALB listener rules for `/callback/<server_name>/udp` and `/callback/<server_name>/tcp` would forward only to that server's target groups
+- During replacement, the old and new instances could briefly coexist in the same per-server target groups until the new instance became healthy and the EIP moved
+
 Why it is not the current implementation:
 
 - More infrastructure duplication across otherwise similar server stacks
@@ -648,3 +655,33 @@ Why it is not the current implementation:
 - Poorer fit for the current multi-instance model, where callback routing is based on private IP and handled by Lambda Router
 
 The current repository instead uses a single `module "vpn_server"` and switches behavior with `multi_instance_mode`.
+
+## Historical Alternative: Dynamic ALB Path Rules Without Lambda Router
+
+Another design option for multi-instance deployments kept a single shared ASG, but avoided Lambda Router by creating dynamic ALB path rules for each instance at runtime.
+
+In that model:
+
+- each EC2 instance would derive a stable callback identity at boot, for example from instance ID or private IP
+- the instance lifecycle automation would create ALB listener rules such as `/callback/<instance-id>/udp` and `/callback/<instance-id>/tcp`
+- each rule would forward to instance-specific daemon target groups, or to shared target groups with explicit target registration for that instance
+- the daemon callback URL would be generated per instance to match those runtime-created ALB paths
+
+How target registration would work in that model:
+
+- the replacement workflow would need control-plane automation to create or update listener rules and target groups when instances launch
+- the new instance would need to be registered in the correct daemon callback target groups before its callback URLs became usable
+- instance termination would need cleanup of listener rules, target registrations, and possibly target groups to avoid stale ALB configuration
+
+Why this approach was considered:
+
+- it preserved path-based routing all the way to the daemon, without introducing an extra request proxy hop
+- callback URLs could still encode instance identity directly
+- it fit naturally with the existing ALB authenticate-cognito flow
+
+Why it is not the current implementation:
+
+- significantly more lifecycle orchestration was required around ASG scale-out and replacement
+- ALB listener rule management becomes operationally heavier as instance churn increases
+- rule priority allocation, cleanup, and eventual consistency become part of the critical path
+- Lambda Router with a single static `/callback/*` rule is simpler and better aligned with one-ASG multi-instance mode

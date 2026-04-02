@@ -23,7 +23,7 @@ variable "cost_saving_mode" {
 # --- Scaling mode ---
 
 variable "multi_instance_mode" {
-  description = "Enable multi-instance ASG mode. When true: Lambda manages ALB rules dynamically, EIP association is disabled, callback URLs are resolved at boot from instance ID. When false (default): static ALB rules, EIP association enabled, single server_name used in callback path."
+  description = "Enable multi-instance ASG mode. When true: NLB is used for OpenVPN client traffic, Lambda Router handles callback routing through a single /callback/* ALB rule, EIP association is disabled, and callback URLs are resolved at boot from the instance private IP. When false (default): static ALB rules are created per listener, EIP association is enabled, and a single server_name is used in the callback path."
   type        = bool
   default     = false
 }
