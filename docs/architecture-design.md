@@ -4,9 +4,14 @@
 
 The daemon runs on EC2 behind an ALB with Cognito authenticate action. ALB handles the entire OIDC flow — the daemon receives pre-authenticated requests with user claims in ALB headers.
 
-Each VPN server is an independent ASG (desired=1, max=2) with a pre-allocated EIP. All instances run in a single AWS region. Two OpenVPN instances per EC2 (UDP + TCP), each with its own auth daemon process.
+Current implementation summary:
 
-**Single active target invariant:** Each Target Group has exactly one active (healthy) target at any time. The `max=2` exists only for ASG replacement mechanics — during instance replacement there is a brief window where auth callbacks are unavailable. See [Instance Replacement](#instance-replacement) for details.
+- Single-instance mode: one ASG, static ALB callback paths using `server_name`, EIP enabled
+- Multi-instance mode: one ASG, NLB for OpenVPN client traffic, Lambda Router for callback routing by private IP, EIP disabled
+
+All instances run in a single AWS region. Each EC2 instance runs two OpenVPN listeners (UDP + TCP), each with its own auth daemon process.
+
+**Single active target invariant:** In single-instance mode, each daemon target group has exactly one active (healthy) target at any time. `max=2` exists only for ASG replacement mechanics. See [Instance Replacement](#instance-replacement) for details.
 
 ## Infrastructure
 
@@ -50,14 +55,14 @@ graph TD
     style Rule4 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
 ```
 
-Terraform modules:
+Terraform modules in the current implementation:
 
 | Count | Module | Purpose |
 |-------|--------|---------|
 | 1x | `module "cognito"` | User pool, app client, domain |
 | 1x | `module "alb"` | Shared ALB, listener, Cognito auth action, security groups |
 | 1x | `module "nlb"` | NLB for OpenVPN traffic (multi-instance mode only) |
-| Nx | `module "vpn-server"` | ASG + launch template + EIP + 2x TG |
+| 1x | `module "vpn-server"` | ASG + launch template + EIP/target groups in single-instance mode, or ASG attached to NLB in multi-instance mode |
 | 1x | `module "lambda-router"` | Lambda proxy for callback routing (multi-instance mode only) |
 | — | Root: `secrets.tf` | PKI secrets in Secrets Manager (ca-cert, server-cert, server-key, ta-key) |
 | — | Root: `cost_saving_mode` | Skips ALB, EIP, ASG when true (Cognito + secrets preserved) |
@@ -624,3 +629,22 @@ graph TD
 Key toggles:
 - `cost_saving_mode = true` — skips ALB, NLB, EIP, and ASG; preserves Cognito and PKI secrets
 - `multi_instance_mode = true` — enables NLB and Lambda Router, disables EIP and static ALB listener rules
+## Historical Alternative: Per-Server ASGs
+
+An earlier design option used multiple independent VPN server stacks, where each logical server had its own ASG, its own EIP, and static ALB callback rules such as `/callback/01/udp`, `/callback/02/tcp`.
+
+That model is useful to remember because it explains some of the path-based callback examples in this document and the earlier thinking around server identity encoded in callback URLs.
+
+Why it was attractive:
+
+- Clear ownership per VPN server
+- Static path-based callback routing with predictable server names
+- Simple mental model for EIP movement during instance replacement
+
+Why it is not the current implementation:
+
+- More infrastructure duplication across otherwise similar server stacks
+- More static ALB rule management as the number of servers grows
+- Poorer fit for the current multi-instance model, where callback routing is based on private IP and handled by Lambda Router
+
+The current repository instead uses a single `module "vpn_server"` and switches behavior with `multi_instance_mode`.
