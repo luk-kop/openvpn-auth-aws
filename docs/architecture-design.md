@@ -1,8 +1,8 @@
-# Architecture v2 — ALB + Cognito (no Lambda/API Gateway)
+# Architecture — ALB + Cognito
 
 ## Overview
 
-Simplified architecture that eliminates API Gateway and Lambda. The daemon runs on EC2 behind an ALB with Cognito authenticate action. ALB handles the entire OIDC flow — the daemon receives pre-authenticated requests with user claims in ALB headers.
+The daemon runs on EC2 behind an ALB with Cognito authenticate action. ALB handles the entire OIDC flow — the daemon receives pre-authenticated requests with user claims in ALB headers.
 
 Each VPN server is an independent ASG (desired=1, max=2) with a pre-allocated EIP. All instances run in a single AWS region. Two OpenVPN instances per EC2 (UDP + TCP), each with its own auth daemon process.
 
@@ -62,6 +62,7 @@ Terraform modules:
 | — | Root: `secrets.tf` | PKI secrets in Secrets Manager (ca-cert, server-cert, server-key, ta-key) |
 | — | Root: `cost_saving_mode` | Skips ALB, EIP, ASG when true (Cognito + secrets preserved) |
 
+
 ## Auth Flow
 
 ```mermaid
@@ -111,7 +112,7 @@ Byte budget (229-byte OpenVPN CE limit):
 | **Total** | **~223** |
 | **Margin** | **~6** |
 
-Short ALB domain and short server names (`01`, `02`) are important to stay within the 229-byte limit. The state blob no longer needs `code_challenge` or `nonce` (ALB/Cognito handles PKCE internally), which should yield a shorter blob than v1 and increase the margin. The exact savings depend on which fields are dropped — this should be validated during implementation.
+Short ALB domain and short server names (`01`, `02`) are important to stay within the 229-byte limit.
 
 ## ALB Headers
 
@@ -190,6 +191,7 @@ graph LR
 ```
 
 Without this, an attacker with network access could spoof `x-amzn-oidc-*` headers directly. The ALB JWT `signer` validation is a defense-in-depth check, not a substitute for network isolation.
+
 
 ## Two Daemons per EC2
 
@@ -332,6 +334,7 @@ graph LR
 
 If OpenVPN is slow to start, the daemon retries the management socket connection (built-in reconnect loop). During this time `/healthz` returns 503, ALB keeps the target in `initial`/`unhealthy` state, and EIP does not move. No additional sleep or readiness probes are needed — the health check endpoint is the readiness probe.
 
+
 ## EIP Management
 
 Each ASG has a pre-allocated EIP. The EC2 instance associates it on boot via a systemd oneshot unit that runs after both daemons are ready:
@@ -446,8 +449,6 @@ Cognito app client needs only one callback URL: `https://vpn-auth.example.com/oa
 
 ## Session Lifecycle
 
-Unchanged from v1:
-
 ```mermaid
 graph LR
     P("SessionPending") --> PR("SessionProcessing")
@@ -462,54 +463,9 @@ graph LR
     style DEL fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
 ```
 
-The session store remains in-memory per daemon. No shared state between daemons or instances.
-
-## What Changes from v1
-
-### Removed
-
-- API Gateway (REST API, custom domain, stages)
-- Lambda function (`/auth` endpoint, PKCE orchestration, `/callback` proxy)
-- PKCE/OIDC token exchange code from `internal/cognito/` (JWKS validation, code_verifier/code_challenge — handled by ALB)
-- PKCE flow in daemon (ALB/Cognito handles this internally)
-- `/challenge` endpoint (no longer needed — daemon doesn't expose code_challenge to Lambda)
-
-### Changed
-
-- Callback handler — reads user identity from ALB `x-amzn-oidc-*` headers instead of performing token exchange. Group membership resolved via `AdminListGroupsForUser` (same as reauth flow).
-- State blob — simplified, no longer carries PKCE-related fields
-- WEB_AUTH URL — points to ALB `/callback/{server_name}/{proto}` instead of API Gateway `/auth`
-- Config — new flags `--callback-url` (full URL, e.g. `https://vpn-auth.example.com/callback/01/udp`), `--alb-arn`, `--cognito-groups-from-claims`, `--cognito-skip-reauth`; drops `--use-local-mocks`, `--api-gateway-url`, `--cognito-token-endpoint`, `--cognito-redirect-uri`. Local dev behavior is inferred from config: no `--alb-arn` → skip JWT validation; no `--cognito-user-pool-id` → use static identity checker automatically
-
-### Added
-
-- `/healthz` endpoint on daemon
-- ALB JWT validation (ES256, `signer` field check, public key from `public-keys.auth.elb.<region>.amazonaws.com`)
-- EIP association systemd unit
-- ALB + Cognito Terraform modules
-
-### Simplified
-
-- `internal/cognito/` — token exchange and JWKS validation removed; Cognito Admin API calls (`AdminGetUser`, `AdminListGroupsForUser`) retained for reauth and group membership checks
-
-### Unchanged
-
-- Management socket protocol handling (`internal/mgmt/`)
-- Session store and lifecycle (`internal/auth/`)
-- HMAC state signing (`internal/secrets/`)
-- Reauth flow (still calls Cognito `AdminGetUser` directly)
-- Single-session-per-user eviction logic
-- Daemon reconnection and graceful shutdown
+The session store is in-memory per daemon. No shared state between daemons or instances.
 
 ## Local Development
-
-### What changes from v1 lab
-
-v1 lab uses `lambda-mock` to simulate API Gateway + Lambda: it verifies state HMAC, fetches PKCE challenge from daemon, and POSTs a fake auth code to daemon's `/callback`. The daemon then does token exchange via `TokenExchanger` interface.
-
-In v2, there is no Lambda — ALB handles OIDC and forwards authenticated requests with `x-amzn-oidc-*` headers. The daemon reads claims from headers instead of doing token exchange.
-
-### Lab architecture (v2)
 
 **Three-terminal setup (no Docker):**
 
@@ -517,7 +473,7 @@ In v2, there is no Lambda — ALB handles OIDC and forwards authenticated reques
 |----------|---------|-------|
 | 1 | `make run-mgmt-mock` | OpenVPN management socket simulator |
 | 2 | `make run-daemon` | `--cognito-groups-from-claims`, `--cognito-skip-reauth`, no `--alb-arn` |
-| 3 | `make run-alb-mock` | Replaces `run-lambda-mock` |
+| 3 | `make run-alb-mock` | ALB + Cognito simulator |
 
 **Docker stack:**
 
@@ -533,7 +489,7 @@ graph LR
 
 In mgmt-mock terminal: `connect 1 user@example.com`
 
-### `alb-mock` (replaces `lambda-mock`)
+### `alb-mock`
 
 Simulates ALB + Cognito authenticate action. On receiving a request:
 
@@ -551,15 +507,15 @@ Simulates ALB + Cognito authenticate action. On receiving a request:
 
 The mock skips actual Cognito login — it auto-authenticates with a configurable test identity (email, sub, groups via env vars). The routing logic (path → port) lives only in alb-mock, not in the daemon.
 
-### No `--use-local-mocks` in v2
+### Config-driven local behavior
 
-The v1 `--use-local-mocks` flag is removed. Instead, the daemon infers behavior from its configuration — no hidden "mode" switch:
+The daemon infers local dev behavior from its configuration — no hidden mode switch:
 
 | Config state | Behavior |
 |---|---|
 | `--alb-arn` omitted | Skip ALB JWT signature and `signer` validation (accepts unsigned JWTs from alb-mock) |
 | `--hmac-secret` set (no `--hmac-secret-arn`) | Use local HMAC secret, skip Secrets Manager |
-| `--cognito-user-pool-id` omitted | Use static identity checker automatically — no AWS credentials needed (local dev mode) |
+| `--cognito-user-pool-id` omitted | Use static identity checker automatically — no AWS credentials needed |
 | `--cognito-groups-from-claims` | Read groups from `x-amzn-oidc-data` JWT claims instead of calling `AdminListGroupsForUser`. Use with SAML `custom:groups` mapping or in local dev. |
 | `--cognito-skip-reauth` | Skip `AdminGetUser` call on reauth — auto-approve renegotiation without verifying user status in Cognito. |
 
@@ -582,27 +538,14 @@ run-daemon:
         --hand-window=120s
 ```
 
-No `--alb-arn` → JWT not validated. `--hmac-secret` → local secret (min 16 bytes). `--cognito-skip-reauth` → no AdminGetUser on reauth. `--cognito-groups-from-claims` → groups from JWT claims instead of Cognito API.
-
-### `callback/server.go` changes (v2)
-
-**v1 handler:**
+### `callback/server.go` endpoints
 
 | Endpoint | Flow |
 |----------|------|
-| `POST /callback` | body: `{code, session_id, ts}` + `X-Internal-Token` -- token exchange -- nonce check, CN cross-check, group check |
-| `GET /challenge` | returns PKCE `code_challenge` for Lambda |
-
-**v2 handler:**
-
-| Endpoint | Flow |
-|----------|------|
-| `GET /callback/{path...}?state=<blob>` | validate state HMAC -- lookup session by SID -- read `x-amzn-oidc-data` JWT -- validate ALB signature (skip if no `--alb-arn`) -- extract email/sub from claims -- resolve groups -- CN cross-check, group check -- `client-auth` / `client-deny` |
+| `GET /callback/{path...}?state=<blob>` | validate state HMAC → lookup session by SID → read `x-amzn-oidc-data` JWT → validate ALB signature (skip if no `--alb-arn`) → extract email/sub from claims → resolve groups → CN cross-check, group check → `client-auth` / `client-deny` |
 | `GET /healthz` | returns 200/503 based on mgmt socket status |
 
-Removed endpoints: `POST /callback`, `GET /challenge`
-
-### `docker-compose.yml` changes (v2)
+### `docker-compose.yml`
 
 ```yaml
 services:
@@ -622,7 +565,7 @@ services:
       - VPN_AUTH_SERVER_NAME=lab-dev
       # no VPN_AUTH_ALB_ARN → skips JWT validation
 
-  alb-mock:  # replaces lambda-mock
+  alb-mock:
     build:
       context: ..
       dockerfile: lab/Dockerfile.alb-mock
