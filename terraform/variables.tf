@@ -65,7 +65,7 @@ variable "alb_subnet_ids" {
   type        = list(string)
 }
 
-variable "daemon_subnet_ids" {
+variable "ec2_subnet_ids" {
   description = "Subnet IDs for the VPN server ASG (public subnets with IGW route required)"
   type        = list(string)
 }
@@ -94,12 +94,6 @@ variable "openvpn_allowed_cidrs" {
   description = "CIDR blocks allowed to connect to OpenVPN"
   type        = list(string)
   default     = ["0.0.0.0/0"]
-}
-
-variable "ssh_allowed_cidrs" {
-  description = "CIDR blocks allowed to SSH into the VPN instance. Empty = no SSH ingress."
-  type        = list(string)
-  default     = []
 }
 
 # --- OpenVPN listeners ---
@@ -180,12 +174,6 @@ variable "ec2_instance_type" {
 
 variable "ec2_ami_id" {
   description = "Custom AMI ID. Leave empty to use latest Ubuntu 24.04 LTS."
-  type        = string
-  default     = ""
-}
-
-variable "ec2_key_name" {
-  description = "SSH key pair name (optional if using SSM only)"
   type        = string
   default     = ""
 }

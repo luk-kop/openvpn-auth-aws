@@ -55,32 +55,21 @@ resource "aws_iam_role_policy" "cloudwatch_logs" {
   })
 }
 
-# --- Lambda Security Group ---
-
-resource "aws_security_group" "lambda" {
-  name        = local.function_name
-  description = "Lambda router - egress to daemon SG on callback ports and CloudWatch Logs"
-  vpc_id      = var.vpc_id
-
-  tags = {
-    Name    = local.function_name
-    Project = var.project_name
-  }
-}
+# --- Lambda Security Group Rules ---
 
 resource "aws_vpc_security_group_egress_rule" "lambda_to_daemon" {
   for_each = var.daemon_ports
 
-  security_group_id            = aws_security_group.lambda.id
+  security_group_id            = var.lambda_security_group_id
   description                  = "Lambda to ${each.key} daemon"
   from_port                    = each.value
   to_port                      = each.value
   ip_protocol                  = "tcp"
-  referenced_security_group_id = var.daemon_security_group_id
+  referenced_security_group_id = var.ec2_security_group_id
 }
 
 resource "aws_vpc_security_group_egress_rule" "lambda_to_cloudwatch" {
-  security_group_id = aws_security_group.lambda.id
+  security_group_id = var.lambda_security_group_id
   description       = "Lambda to CloudWatch Logs endpoint"
   from_port         = 443
   to_port           = 443
@@ -93,12 +82,12 @@ resource "aws_vpc_security_group_egress_rule" "lambda_to_cloudwatch" {
 resource "aws_vpc_security_group_ingress_rule" "daemon_from_lambda" {
   for_each = var.daemon_ports
 
-  security_group_id            = var.daemon_security_group_id
+  security_group_id            = var.ec2_security_group_id
   description                  = "Lambda router to ${each.key} daemon"
   from_port                    = each.value
   to_port                      = each.value
   ip_protocol                  = "tcp"
-  referenced_security_group_id = aws_security_group.lambda.id
+  referenced_security_group_id = var.lambda_security_group_id
 }
 
 # --- Lambda Function ---
@@ -116,7 +105,7 @@ resource "aws_lambda_function" "router" {
 
   vpc_config {
     subnet_ids         = var.lambda_subnet_ids
-    security_group_ids = [aws_security_group.lambda.id]
+    security_group_ids = [var.lambda_security_group_id]
   }
 
   environment {
@@ -203,7 +192,23 @@ resource "aws_lb_listener_rule" "callback" {
 
   condition {
     path_pattern {
-      values = ["/callback/*"]
+      regex_values = ["/callback/\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/(udp|tcp)"]
+    }
+  }
+
+  # Require state query param in {base64url_payload}.{base64url_hmac} format.
+  # ALB query_string only supports wildcards, so *.* is the best we can enforce here;
+  # full HMAC validation happens in the daemon.
+  condition {
+    query_string {
+      key   = "state"
+      value = "*.*"
+    }
+  }
+
+  condition {
+    http_request_method {
+      values = ["GET"]
     }
   }
 }

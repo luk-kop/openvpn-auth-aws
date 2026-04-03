@@ -81,6 +81,70 @@ resource "aws_iam_role_policy" "daemon" {
   })
 }
 
+# --- EC2 Security Group Rules ---
+
+resource "aws_vpc_security_group_ingress_rule" "ec2_from_alb" {
+  for_each = var.listeners
+
+  security_group_id            = var.ec2_security_group_id
+  description                  = "ALB callback to ${each.key} daemon"
+  from_port                    = each.value.daemon_port
+  to_port                      = each.value.daemon_port
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = var.alb_security_group_id
+}
+
+# Single-instance mode: OpenVPN ingress directly from allowed CIDRs
+resource "aws_vpc_security_group_ingress_rule" "ec2_openvpn_cidr" {
+  for_each = var.multi_instance_mode ? {} : {
+    for pair in setproduct(keys(var.listeners), var.openvpn_allowed_cidrs) :
+    "${pair[0]}-${pair[1]}" => {
+      listener = var.listeners[pair[0]]
+      cidr     = pair[1]
+      proto    = pair[0]
+    }
+  }
+
+  security_group_id = var.ec2_security_group_id
+  description       = "OpenVPN ${each.value.proto} from ${each.value.cidr}"
+  from_port         = each.value.listener.openvpn_port
+  to_port           = each.value.listener.openvpn_port
+  ip_protocol       = each.value.listener.ip_protocol
+  cidr_ipv4         = each.value.cidr
+}
+
+# Multi-instance mode: OpenVPN ingress from NLB SG
+resource "aws_vpc_security_group_ingress_rule" "ec2_openvpn_from_nlb" {
+  for_each = var.multi_instance_mode ? var.listeners : {}
+
+  security_group_id            = var.ec2_security_group_id
+  description                  = "OpenVPN ${each.key} from NLB"
+  from_port                    = each.value.openvpn_port
+  to_port                      = each.value.openvpn_port
+  ip_protocol                  = each.value.ip_protocol
+  referenced_security_group_id = var.nlb_security_group_id
+}
+
+# Multi-instance mode: NLB health check ingress
+resource "aws_vpc_security_group_ingress_rule" "ec2_health_check_from_nlb" {
+  for_each = var.multi_instance_mode ? var.listeners : {}
+
+  security_group_id            = var.ec2_security_group_id
+  description                  = "NLB health check to ${each.key} daemon"
+  from_port                    = each.value.daemon_port
+  to_port                      = each.value.daemon_port
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = var.nlb_security_group_id
+}
+
+#trivy:ignore:AVD-AWS-0104
+resource "aws_vpc_security_group_egress_rule" "ec2_all" {
+  security_group_id = var.ec2_security_group_id
+  description       = "All outbound"
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
 # --- Elastic IP for VPN server ---
 
 resource "aws_eip" "vpn" {
@@ -103,7 +167,6 @@ resource "aws_launch_template" "openvpn" {
   name_prefix   = "${local.name_prefix}-"
   image_id      = var.ec2_ami_id != "" ? var.ec2_ami_id : data.aws_ssm_parameter.ubuntu.value
   instance_type = var.ec2_instance_type
-  key_name      = var.ec2_key_name != "" ? var.ec2_key_name : null
   user_data     = local.user_data_base64
 
   iam_instance_profile {
@@ -112,7 +175,7 @@ resource "aws_launch_template" "openvpn" {
 
   network_interfaces {
     associate_public_ip_address = var.associate_public_ip
-    security_groups             = [var.daemon_security_group_id]
+    security_groups             = [var.ec2_security_group_id]
   }
 
   block_device_mappings {
@@ -165,7 +228,7 @@ resource "aws_launch_template" "openvpn" {
 # --- Auto Scaling Group ---
 
 resource "aws_autoscaling_group" "openvpn" {
-  name                = local.name_prefix
+  name_prefix         = local.name_prefix
   desired_capacity    = var.asg_desired_capacity
   min_size            = var.asg_min_size
   max_size            = var.asg_max_size
@@ -257,6 +320,22 @@ resource "aws_lb_listener_rule" "vpn" {
   condition {
     path_pattern {
       values = ["/callback/${var.server_name}/${each.key}"]
+    }
+  }
+
+  # Require state query param in {base64url_payload}.{base64url_hmac} format.
+  # ALB query_string only supports wildcards, so *.* is the best we can enforce here;
+  # full HMAC validation happens in the daemon.
+  condition {
+    query_string {
+      key   = "state"
+      value = "*.*"
+    }
+  }
+
+  condition {
+    http_request_method {
+      values = ["GET"]
     }
   }
 }

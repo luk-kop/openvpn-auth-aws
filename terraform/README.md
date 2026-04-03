@@ -44,7 +44,7 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 
 | Name | Version |
 |------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.0 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.39.0 |
 
 ## Modules
 
@@ -61,6 +61,10 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 | Name | Type |
 |------|------|
 | [aws_secretsmanager_secret.pki](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
+| [aws_security_group.alb](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
+| [aws_security_group.ec2](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
+| [aws_security_group.lambda](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
+| [aws_security_group.nlb](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 
 ## Inputs
 
@@ -79,12 +83,11 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 | <a name="input_cognito_vpn_group_name"></a> [cognito\_vpn\_group\_name](#input\_cognito\_vpn\_group\_name) | Cognito group name required for VPN access | `string` | `"vpn-users"` | no |
 | <a name="input_cost_saving_mode"></a> [cost\_saving\_mode](#input\_cost\_saving\_mode) | Skip ALB, EIP, and compute resources (ASG). Secrets and Cognito are preserved. | `bool` | `false` | no |
 | <a name="input_daemon_binary_s3_uri"></a> [daemon\_binary\_s3\_uri](#input\_daemon\_binary\_s3\_uri) | S3 URI for the daemon binary (e.g. s3://bucket/openvpn-auth-daemon) | `string` | `""` | no |
-| <a name="input_daemon_subnet_ids"></a> [daemon\_subnet\_ids](#input\_daemon\_subnet\_ids) | Subnet IDs for the VPN server ASG (public subnets with IGW route required) | `list(string)` | n/a | yes |
 | <a name="input_ec2_ami_id"></a> [ec2\_ami\_id](#input\_ec2\_ami\_id) | Custom AMI ID. Leave empty to use latest Ubuntu 24.04 LTS. | `string` | `""` | no |
 | <a name="input_ec2_associate_public_ip"></a> [ec2\_associate\_public\_ip](#input\_ec2\_associate\_public\_ip) | Assign a temporary public IP at launch for cloud-init internet access. The EIP replaces it once ALB health checks pass. | `bool` | `true` | no |
 | <a name="input_ec2_instance_type"></a> [ec2\_instance\_type](#input\_ec2\_instance\_type) | EC2 instance type for the VPN server | `string` | `"t3.small"` | no |
-| <a name="input_ec2_key_name"></a> [ec2\_key\_name](#input\_ec2\_key\_name) | SSH key pair name (optional if using SSM only) | `string` | `""` | no |
 | <a name="input_ec2_root_volume_size"></a> [ec2\_root\_volume\_size](#input\_ec2\_root\_volume\_size) | Root EBS volume size in GB | `number` | `20` | no |
+| <a name="input_ec2_subnet_ids"></a> [ec2\_subnet\_ids](#input\_ec2\_subnet\_ids) | Subnet IDs for the VPN server ASG (public subnets with IGW route required) | `list(string)` | n/a | yes |
 | <a name="input_hand_window"></a> [hand\_window](#input\_hand\_window) | Seconds allowed for browser-based auth. Synced between OpenVPN server config and daemon --hand-window. | `number` | `300` | no |
 | <a name="input_lambda_router_zip_path"></a> [lambda\_router\_zip\_path](#input\_lambda\_router\_zip\_path) | Local path to the pre-built Lambda Router zip file (e.g. lambda-router/lambda-arm64.zip) | `string` | `""` | no |
 | <a name="input_lambda_subnet_ids"></a> [lambda\_subnet\_ids](#input\_lambda\_subnet\_ids) | Subnet IDs for the Lambda Router function (private subnets with VPC routing) | `list(string)` | `[]` | no |
@@ -97,7 +100,6 @@ The cookie lifetime is controlled by `alb_auth_session_timeout_hours` and defaul
 | <a name="input_required_group"></a> [required\_group](#input\_required\_group) | Cognito group required for VPN access, passed to daemon --required-group | `string` | `"vpn-users"` | no |
 | <a name="input_route53_hosted_zone_id"></a> [route53\_hosted\_zone\_id](#input\_route53\_hosted\_zone\_id) | Route53 hosted zone ID for ACM DNS validation and ALB alias record | `string` | n/a | yes |
 | <a name="input_server_name"></a> [server\_name](#input\_server\_name) | Unique server name used in static ALB callback path (e.g. '01'). Used only when multi\_instance\_mode = false. | `string` | `"01"` | no |
-| <a name="input_ssh_allowed_cidrs"></a> [ssh\_allowed\_cidrs](#input\_ssh\_allowed\_cidrs) | CIDR blocks allowed to SSH into the VPN instance. Empty = no SSH ingress. | `list(string)` | `[]` | no |
 | <a name="input_vpc_cidr"></a> [vpc\_cidr](#input\_vpc\_cidr) | VPC CIDR block used by Lambda Router to validate EC2 private IPs (e.g. 10.0.0.0/16) | `string` | `""` | no |
 | <a name="input_vpc_id"></a> [vpc\_id](#input\_vpc\_id) | VPC ID for ALB and VPN server | `string` | n/a | yes |
 

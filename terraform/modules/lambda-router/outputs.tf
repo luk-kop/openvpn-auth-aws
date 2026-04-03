@@ -8,10 +8,6 @@ output "lambda_function_name" {
   value       = aws_lambda_function.router.function_name
 }
 
-output "lambda_security_group_id" {
-  description = "Security group ID of the Lambda router"
-  value       = aws_security_group.lambda.id
-}
 
 output "target_group_arn" {
   description = "ARN of the Lambda target group"

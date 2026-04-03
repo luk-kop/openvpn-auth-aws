@@ -3,11 +3,6 @@ variable "project_name" {
   type        = string
 }
 
-variable "vpc_id" {
-  description = "VPC ID for the Lambda security group"
-  type        = string
-}
-
 variable "vpc_cidr" {
   description = "VPC CIDR block passed to Lambda as VPC_CIDR env var for IP validation"
   type        = string
@@ -28,8 +23,13 @@ variable "alb_listener_arn" {
   type        = string
 }
 
-variable "daemon_security_group_id" {
-  description = "Security group ID of the EC2 daemon instances (ingress rules will be added)"
+variable "lambda_security_group_id" {
+  description = "Security group ID for the Lambda router"
+  type        = string
+}
+
+variable "ec2_security_group_id" {
+  description = "Security group ID of the EC2 instances (ingress rules will be added)"
   type        = string
 }
 

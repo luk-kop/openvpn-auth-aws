@@ -8,9 +8,31 @@ variable "aws_region" {
   type        = string
 }
 
-variable "daemon_security_group_id" {
-  description = "Security group ID for the daemon EC2 instance"
+variable "ec2_security_group_id" {
+  description = "Security group ID for the EC2 instance"
   type        = string
+}
+
+variable "alb_security_group_id" {
+  description = "Security group ID of the ALB (used for EC2 ingress from ALB)"
+  type        = string
+}
+
+variable "nlb_security_group_id" {
+  description = "Security group ID of the NLB (used for EC2 ingress from NLB in multi-instance mode)"
+  type        = string
+}
+
+variable "multi_instance_mode" {
+  description = "Enable multi-instance mode. Controls whether OpenVPN ingress uses NLB SG (true) or allowed CIDRs (false)."
+  type        = bool
+  default     = false
+}
+
+variable "openvpn_allowed_cidrs" {
+  description = "CIDR blocks allowed to connect to OpenVPN directly (single-instance mode). Use [\"0.0.0.0/0\"] for public access."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
 }
 
 variable "vpc_id" {
@@ -155,12 +177,6 @@ variable "ec2_instance_type" {
   description = "EC2 instance type"
   type        = string
   default     = "t3.small"
-}
-
-variable "ec2_key_name" {
-  description = "SSH key pair name (optional if using SSM only)"
-  type        = string
-  default     = ""
 }
 
 variable "ec2_root_volume_size" {

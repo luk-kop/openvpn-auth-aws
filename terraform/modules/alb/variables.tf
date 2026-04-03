@@ -3,11 +3,6 @@ variable "project_name" {
   type        = string
 }
 
-variable "vpc_id" {
-  description = "VPC ID where the ALB will be deployed"
-  type        = string
-}
-
 variable "subnet_ids" {
   description = "List of public subnet IDs for the ALB (minimum 2 AZs)"
   type        = list(string)
@@ -50,16 +45,14 @@ variable "route53_hosted_zone_id" {
   type        = string
 }
 
-# --- Daemon Security Group ---
+# --- Security Group IDs ---
 
-variable "openvpn_allowed_cidrs" {
-  description = "CIDR blocks allowed to connect to OpenVPN. Use [\"0.0.0.0/0\"] for public access."
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
+variable "alb_security_group_id" {
+  description = "Security group ID for the ALB"
+  type        = string
 }
 
-variable "ssh_allowed_cidrs" {
-  description = "CIDR blocks allowed to SSH into the OpenVPN instance. Leave empty to disable SSH ingress."
-  type        = list(string)
-  default     = []
+variable "ec2_security_group_id" {
+  description = "Security group ID for the EC2 instances (used in ALB egress rules)"
+  type        = string
 }

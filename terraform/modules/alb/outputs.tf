@@ -18,15 +18,6 @@ output "listener_arn" {
   value       = aws_lb_listener.https.arn
 }
 
-output "alb_security_group_id" {
-  description = "Security group ID of the ALB (used to scope daemon ingress rules)"
-  value       = aws_security_group.alb.id
-}
-
-output "daemon_security_group_id" {
-  description = "Security group ID for the daemon EC2 instance"
-  value       = aws_security_group.daemon.id
-}
 
 output "cognito_user_pool_arn" {
   description = "Cognito User Pool ARN (pass-through for listener rules)"

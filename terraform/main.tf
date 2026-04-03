@@ -15,7 +15,6 @@ module "alb" {
   source = "./modules/alb"
 
   project_name = var.project_name
-  vpc_id       = var.vpc_id
   subnet_ids   = var.alb_subnet_ids
   listeners    = var.openvpn_listeners
 
@@ -26,8 +25,8 @@ module "alb" {
   cognito_user_pool_client_id = module.cognito.client_id
   cognito_user_pool_domain    = module.cognito.domain_fqdn
 
-  openvpn_allowed_cidrs = var.openvpn_allowed_cidrs
-  ssh_allowed_cidrs     = var.ssh_allowed_cidrs
+  alb_security_group_id = aws_security_group.alb.id
+  ec2_security_group_id = aws_security_group.ec2.id
 }
 
 module "vpn_server" {
@@ -37,11 +36,15 @@ module "vpn_server" {
   project_name = var.project_name
   aws_region   = var.aws_region
   vpc_id       = var.vpc_id
-  subnet_ids   = var.daemon_subnet_ids
+  subnet_ids   = var.ec2_subnet_ids
   listeners    = var.openvpn_listeners
 
-  daemon_security_group_id = module.alb[0].daemon_security_group_id
-  pki_secret_arns          = [for s in aws_secretsmanager_secret.pki : s.arn]
+  ec2_security_group_id = aws_security_group.ec2.id
+  alb_security_group_id = aws_security_group.alb.id
+  nlb_security_group_id = aws_security_group.nlb.id
+  multi_instance_mode   = var.multi_instance_mode
+  openvpn_allowed_cidrs = var.openvpn_allowed_cidrs
+  pki_secret_arns       = [for s in aws_secretsmanager_secret.pki : s.arn]
 
   alb_arn          = module.alb[0].alb_arn
   alb_domain_name  = var.alb_domain_name
@@ -68,7 +71,6 @@ module "vpn_server" {
   openvpn_version      = var.openvpn_version
   ec2_instance_type    = var.ec2_instance_type
   ec2_ami_id           = var.ec2_ami_id
-  ec2_key_name         = var.ec2_key_name
   ec2_root_volume_size = var.ec2_root_volume_size
   associate_public_ip  = var.ec2_associate_public_ip
 
@@ -96,6 +98,10 @@ module "nlb" {
 
   nlb_domain_name        = var.nlb_domain_name
   route53_hosted_zone_id = var.route53_hosted_zone_id
+
+  nlb_security_group_id = aws_security_group.nlb.id
+  ec2_security_group_id = aws_security_group.ec2.id
+  openvpn_allowed_cidrs = var.openvpn_allowed_cidrs
 }
 
 # Lambda Router — only deployed in multi-instance mode
@@ -104,13 +110,13 @@ module "lambda_router" {
   source = "./modules/lambda-router"
 
   project_name      = var.project_name
-  vpc_id            = var.vpc_id
   vpc_cidr          = var.vpc_cidr
   lambda_subnet_ids = var.lambda_subnet_ids
   lambda_zip_path   = var.lambda_router_zip_path
 
   alb_listener_arn         = module.alb[0].listener_arn
-  daemon_security_group_id = module.alb[0].daemon_security_group_id
+  lambda_security_group_id = aws_security_group.lambda.id
+  ec2_security_group_id    = aws_security_group.ec2.id
 
   daemon_ports = {
     for k, v in var.openvpn_listeners : k => v.daemon_port

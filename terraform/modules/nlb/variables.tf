@@ -31,3 +31,19 @@ variable "route53_hosted_zone_id" {
   description = "Route53 hosted zone ID for the NLB alias record"
   type        = string
 }
+
+variable "nlb_security_group_id" {
+  description = "Security group ID for the NLB"
+  type        = string
+}
+
+variable "ec2_security_group_id" {
+  description = "Security group ID of the EC2 instances (NLB egress target)"
+  type        = string
+}
+
+variable "openvpn_allowed_cidrs" {
+  description = "CIDR blocks allowed to connect to OpenVPN via the NLB. Use [\"0.0.0.0/0\"] for public access."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}

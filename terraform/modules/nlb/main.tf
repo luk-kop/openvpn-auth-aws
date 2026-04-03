@@ -1,10 +1,53 @@
+# --- NLB Security Group Rules ---
+
+resource "aws_vpc_security_group_ingress_rule" "nlb_openvpn" {
+  for_each = {
+    for pair in setproduct(keys(var.listeners), var.openvpn_allowed_cidrs) :
+    "${pair[0]}-${pair[1]}" => {
+      listener = var.listeners[pair[0]]
+      cidr     = pair[1]
+      proto    = pair[0]
+    }
+  }
+
+  security_group_id = var.nlb_security_group_id
+  description       = "OpenVPN ${each.value.proto} from ${each.value.cidr}"
+  from_port         = each.value.listener.openvpn_port
+  to_port           = each.value.listener.openvpn_port
+  ip_protocol       = each.value.listener.ip_protocol
+  cidr_ipv4         = each.value.cidr
+}
+
+resource "aws_vpc_security_group_egress_rule" "nlb_to_ec2_openvpn" {
+  for_each = var.listeners
+
+  security_group_id            = var.nlb_security_group_id
+  description                  = "NLB to ${each.key} OpenVPN targets"
+  from_port                    = each.value.openvpn_port
+  to_port                      = each.value.openvpn_port
+  ip_protocol                  = each.value.ip_protocol
+  referenced_security_group_id = var.ec2_security_group_id
+}
+
+resource "aws_vpc_security_group_egress_rule" "nlb_to_ec2_health_check" {
+  for_each = var.listeners
+
+  security_group_id            = var.nlb_security_group_id
+  description                  = "Health check to ${each.key} daemon"
+  from_port                    = each.value.daemon_port
+  to_port                      = each.value.daemon_port
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = var.ec2_security_group_id
+}
+
 # --- Network Load Balancer (multi-instance OpenVPN traffic) ---
 
 resource "aws_lb" "this" {
   name               = "${var.project_name}-nlb"
-  internal           = false
+  internal           = false #trivy:ignore:aws-elb-alb-not-public -- public NLB for VPN client access
   load_balancer_type = "network"
   subnets            = var.subnet_ids
+  security_groups    = [var.nlb_security_group_id]
 
   tags = {
     Name    = "${var.project_name}-nlb"
@@ -39,8 +82,10 @@ resource "aws_lb_target_group" "this" {
 
   health_check {
     enabled  = true
-    protocol = "TCP"
+    protocol = "HTTP"
     port     = each.value.daemon_port
+    path     = "/healthz"
+    matcher  = "200"
   }
 
   tags = {
