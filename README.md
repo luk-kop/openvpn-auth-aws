@@ -8,6 +8,12 @@
 
 Go daemon that authenticates OpenVPN clients via browser-based OIDC (AWS Cognito). Connects to the OpenVPN management socket, receives client events, and drives authentication through an ALB with a Cognito authenticate action. Includes an optional Lambda Router for multi-instance EC2 deployments.
 
+## Inspiration
+
+This project was inspired in part by [`jkroepke/openvpn-auth-oauth2`](https://github.com/jkroepke/openvpn-auth-oauth2), a very good and mature OpenVPN/OIDC project that served as a useful reference while shaping this implementation.
+
+The implementation here uses a different architecture centered around an OpenVPN management-interface daemon, ALB `authenticate-cognito`, and AWS-native infrastructure managed with Terraform.
+
 ## Features
 
 - Browser-based OIDC authentication via WebAuth (`WEB_AUTH::` URL)

@@ -125,9 +125,9 @@ After Cognito authentication, ALB adds these headers to the forwarded request:
 
 | Header                  | Content                                                      |
 |-------------------------|--------------------------------------------------------------|
-| `x-amzn-oidc-data`     | JWT signed by ALB (ES256). Contains user info endpoint claims (sub, email, etc.). This is NOT the Cognito ID token — it does not contain `cognito:groups`. |
+| `x-amzn-oidc-data`     | JWT signed by ALB (ES256). In the tested native-Cognito flow it contained `email`, `sub`, `username`, `exp`, `iss`. This is NOT the Cognito ID token. |
 | `x-amzn-oidc-identity` | The `sub` field from the user info endpoint (always `sub`, not email). |
-| `x-amzn-oidc-accesstoken` | Cognito access token (plain text).                        |
+| `x-amzn-oidc-accesstoken` | Cognito access token (plain text). In the tested native-Cognito flow it contained `sub`, `username`, `scope`, `client_id`, `token_use`, `auth_time`, `exp`, `iat`, `iss`, `jti`, `origin_jti`, `version`. |
 
 ### JWT Validation
 
@@ -141,11 +141,11 @@ The daemon must validate the `x-amzn-oidc-data` JWT:
 
 ### Group Membership
 
-Cognito `cognito:groups` is present in the ID token, but ALB does not forward the ID token to the backend. The user info endpoint does not return groups by default.
+Cognito `cognito:groups` can be present in the ID token, but ALB does not forward the ID token to the backend. In the tested native-Cognito flow, neither `x-amzn-oidc-data` nor `x-amzn-oidc-accesstoken` contained `cognito:groups`, even after the user was added to a Cognito User Pool group.
 
 Two options for resolving group membership:
 
-1. **Cognito API call (simpler):** Daemon calls `AdminListGroupsForUser` using the `sub` from `x-amzn-oidc-identity` as the `Username` parameter. AWS documentation confirms that `sub` is accepted as `Username` for local users; for federated/SAML users this should also work but should be verified empirically. Same approach as reauth flow — consistent, no extra infrastructure. Adds ~10-50ms latency per connect (Cognito API call).
+1. **Cognito API call (default):** Daemon resolves the Cognito lookup username from callback claims, preferring `cognito:username` when present and falling back to `username`, then calls Cognito Admin APIs (`AdminGetUser`, `AdminListGroupsForUser`). In the tested native-Cognito flow, `username` was the working lookup key and `cognito:username` was absent. For federated/SAML users the exact forwarded claims must be verified empirically. This is the default and most reliable approach. Adds ~10-50ms latency per connect (Cognito API call).
 
 2. **Pre-token generation Lambda trigger (no API call on connect):** Configure a Cognito [pre-token generation Lambda trigger](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-token-generation.html) to inject `cognito:groups` into the access token claims. The daemon then parses groups directly from `x-amzn-oidc-accesstoken` — no Cognito API call needed on the connect path. Trade-offs: requires a Lambda trigger in Cognito, `x-amzn-oidc-accesstoken` is signed by Cognito (not ALB) so validation uses Cognito JWKS instead of ALB public keys, and **access token customization requires Cognito Essentials or Plus feature plan** (`user_pool_tier = "ESSENTIALS"`) with event version V2_0 or V3_0. The Lite plan does not support access token customization.
 
@@ -177,7 +177,7 @@ Two options for resolving group membership:
    - `custom:groups` is a string, max 2048 chars (Cognito custom string attribute limit) — behavior when the value exceeds this limit is not documented; verify during implementation
    - Value is set at federation (login) — if groups change in IdP, Cognito updates the attribute on next login (which in this flow is every connect, so effectively real-time)
    - `custom:groups` (SAML-mapped attribute) is different from `cognito:groups` (Cognito native groups) — userInfo returns the former but not the latter
-   - If Cognito native groups are needed (e.g. for other AWS services), use option 1 (`AdminListGroupsForUser`)
+   - If Cognito native groups are needed (e.g. for other AWS services), use option 1 (Cognito Admin API lookup)
    - The app client used by ALB must have `custom:groups` in `ReadAttributes`. New app clients have read access to all attributes by default, but if permissions are later restricted, `custom:groups` must be explicitly included — otherwise the userInfo endpoint silently omits it
 
 ### Network Trust Model
@@ -547,7 +547,7 @@ run-daemon:
 
 | Endpoint | Flow |
 |----------|------|
-| `GET /callback/{path...}?state=<blob>` | validate state HMAC → lookup session by SID → read `x-amzn-oidc-data` JWT → validate ALB signature (skip if no `--alb-arn`) → extract email/sub from claims → resolve groups → CN cross-check, group check → `client-auth` / `client-deny` |
+| `GET /callback/{path...}?state=<blob>` | validate state HMAC → lookup session by SID → read `x-amzn-oidc-data` JWT → validate ALB signature (skip if no `--alb-arn`) → extract email and Cognito lookup username from claims → resolve groups → CN cross-check, group check → `client-auth` / `client-deny` |
 | `GET /healthz` | returns 200/503 based on mgmt socket status |
 
 ### `docker-compose.yml`
