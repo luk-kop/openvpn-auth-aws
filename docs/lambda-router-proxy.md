@@ -15,8 +15,8 @@ graph TD
 
     Browser -->|"GET /callback/10.0.1.42/udp?state=..."| ALB
     ALB -->|"authenticate-cognito + forward"| Lambda
-    Lambda -->|"HTTP GET http://10.0.1.42:8080/callback?state=..."| EC2_1
-    Lambda -->|"HTTP GET http://10.0.2.100:8081/callback?state=..."| EC2_2
+    Lambda -->|"HTTP GET http://10.0.1.42:8080/callback?state=... (UDP)"| EC2_1
+    Lambda -->|"HTTP GET http://10.0.2.100:8081/callback?state=... (TCP)"| EC2_2
     Lambda -->|"logs"| CW
 
     subgraph VPC
@@ -55,6 +55,8 @@ sequenceDiagram
     L-->>ALB: ALBTargetGroupResponse (200, headers, body)
     ALB-->>B: 200 OK + HTML
 ```
+
+The diagram shows two independent callbacks to two different EC2 instances — one for a UDP session (routed to port `DAEMON_PORT_UDP`, default 8080) and one for a TCP session (routed to port `DAEMON_PORT_TCP`, default 8081). Each EC2 instance runs daemons on both ports; the port is chosen by the protocol segment in the path.
 
 Processing steps in Lambda:
 

@@ -338,6 +338,8 @@ OpenVPN triggers `>CLIENT:REAUTH` on TLS renegotiation (controlled by `reneg-sec
 
 Reauth results can be cached (`--reauth-cache=true`) to survive brief Cognito outages. The reauth flow does not depend on ALB headers or the callback server.
 
+**Federated users:** For federated Cognito users the certificate CN does not match the Cognito username (which has the form `providerName_externalId`). At authentication time the daemon stores the `cognito:username` claim from the ALB JWT alongside the session, then uses that stored value — rather than the CN — when calling `AdminGetUser` on reauth. See [Cognito Federation](cognito-federation.md) for known limitations with federated identities.
+
 ## Docker Compose Stack
 
 ```mermaid
