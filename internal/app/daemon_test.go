@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -45,7 +47,7 @@ func TestRunFailsWhenCallbackPortBusy(t *testing.T) {
 	m := metrics.NewEmitter(&strings.Builder{}, "test")
 	handler := auth.NewHandler(cfg, sessions, nil, signer, m)
 
-	cbSrv, err := callback.NewServer(sessions, signer, &DaemonSink{CmdCh: make(chan string, 1)}, cfg, m, nil, func() bool { return true })
+	cbSrv, err := callback.NewServer(sessions, signer, &DaemonSink{CmdCh: make(chan string, 1)}, handler, cfg, m, nil, func() bool { return true })
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -98,7 +100,13 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 		var cmds []string
 		scanner := newLineScanner(conn)
 		for scanner.Scan() {
-			cmds = append(cmds, scanner.Text())
+			line := scanner.Text()
+			cmds = append(cmds, line)
+			if strings.TrimSpace(line) == "status 3" {
+				_, _ = fmt.Fprintf(conn, "TITLE,OpenVPN 2.6 mock\n")
+				_, _ = fmt.Fprintf(conn, "HEADER,CLIENT_LIST,Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since (time_t),Username,Client ID,Peer ID\n")
+				_, _ = fmt.Fprintf(conn, "END\n")
+			}
 		}
 		_ = conn.Close()
 		conn1Cmds <- cmds
@@ -112,12 +120,16 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 		buf2 := make([]byte, 256)
 		_, _ = conn2.Read(buf2)
 		_, _ = fmt.Fprintf(conn2, "SUCCESS: password is correct\n")
-		// Send a HOLD notification so the daemon proceeds.
-		_, _ = fmt.Fprintf(conn2, ">HOLD:Waiting for hold release\n")
 		var cmds2 []string
 		scanner2 := newLineScanner(conn2)
 		for scanner2.Scan() {
-			cmds2 = append(cmds2, scanner2.Text())
+			line := scanner2.Text()
+			cmds2 = append(cmds2, line)
+			if strings.TrimSpace(line) == "status 3" {
+				_, _ = fmt.Fprintf(conn2, "TITLE,OpenVPN 2.6 mock\n")
+				_, _ = fmt.Fprintf(conn2, "HEADER,CLIENT_LIST,Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since (time_t),Username,Client ID,Peer ID\n")
+				_, _ = fmt.Fprintf(conn2, "END\n")
+			}
 		}
 		_ = conn2.Close()
 		conn2Cmds <- cmds2
@@ -145,7 +157,7 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 	}
 	defer func() { _ = cbLn.Close() }()
 
-	cbSrv, err := callback.NewServer(sessions, signer, &DaemonSink{CmdCh: make(chan string, 256)}, cfg, m, nil, func() bool { return true })
+	cbSrv, err := callback.NewServer(sessions, signer, &DaemonSink{CmdCh: make(chan string, 256)}, handler, cfg, m, nil, func() bool { return true })
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -167,7 +179,8 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 	// handleConnection in a goroutine; it will return when conn1 closes.
 	conn1Done := make(chan error, 1)
 	go func() {
-		conn1Done <- daemon.handleConnection(ctx, client1)
+		_, err := daemon.handleConnection(ctx, client1)
+		conn1Done <- err
 	}()
 
 	// Give writer time to send "hold release".
@@ -196,7 +209,8 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 
 	conn2Done := make(chan error, 1)
 	go func() {
-		conn2Done <- daemon.handleConnection(ctx, client2)
+		_, err := daemon.handleConnection(ctx, client2)
+		conn2Done <- err
 	}()
 
 	// Give time for hold release + hold response processing.
@@ -286,4 +300,77 @@ func (s *lineScanner) Scan() bool {
 
 func (s *lineScanner) Text() string {
 	return s.text
+}
+
+// TestPreservation_NoCNCrossCheckWarn verifies that daemon.Run does NOT emit
+// a federation WARN log when cfg.CNCrossCheck=false.
+//
+// On unfixed code: no WARN is emitted (CNCrossCheck=false) — test PASSES.
+// On fixed code:   WARN is only emitted when CNCrossCheck=true — test still PASSES.
+//
+// Property: for all daemon startups where cfg.CNCrossCheck=false, no federation
+// WARN about cn-cross-check is emitted.
+//
+// EXPECTED OUTCOME: PASSES on unfixed code (baseline behavior to preserve).
+//
+// Validates: Requirements 3.7
+func TestPreservation_NoCNCrossCheckWarn(t *testing.T) {
+	// Capture slog output by redirecting the default logger to a buffer.
+	var buf bytes.Buffer
+	origHandler := slog.Default().Handler()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	})))
+	defer slog.SetDefault(slog.New(origHandler))
+
+	// Occupy a port so daemon.Run fails fast on net.Listen (port-bind error).
+	// This lets us observe whether any WARN was emitted BEFORE the bind attempt.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	cfg := config.Config{
+		ManagementSocket:       "/tmp/nonexistent-pres.sock",
+		ManagementPasswordFile: "/tmp/nonexistent-pres-pw",
+		CallbackPort:           port,
+		CNCrossCheck:           false, // preservation: no WARN expected
+		HandWindow:             300 * time.Second,
+		AuthTimeout:            270 * time.Second,
+		ReconnectMaxInterval:   1 * time.Second,
+		LogFormat:              "text",
+	}
+
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
+	sessions := auth.NewSessionStore()
+	m := metrics.NewEmitter(&strings.Builder{}, "test")
+	handler := auth.NewHandler(cfg, sessions, nil, signer, m)
+
+	cbSrv, err := callback.NewServer(
+		sessions, signer,
+		&DaemonSink{CmdCh: make(chan string, 1)},
+		handler, cfg, m, nil,
+		func() bool { return true },
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	daemon := New(cfg, handler, sessions, cbSrv, m)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Run will fail fast with a port-bind error. We only care about what was
+	// logged BEFORE that error.
+	_ = daemon.Run(ctx)
+
+	logged := buf.String()
+
+	// Preservation: when CNCrossCheck=false, no federation WARN must be emitted.
+	if strings.Contains(logged, "cn-cross-check") {
+		t.Errorf("Preservation FAILED: daemon.Run emitted cn-cross-check WARN when CNCrossCheck=false; logged: %q", logged)
+	}
 }

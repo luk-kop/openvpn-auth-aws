@@ -62,6 +62,7 @@ No modules.
 | <a name="input_create_target_groups"></a> [create\_target\_groups](#input\_create\_target\_groups) | Create ALB target groups. Set to false in multi-instance mode (Lambda creates TGs dynamically). | `bool` | `true` | no |
 | <a name="input_daemon_binary_s3_uri"></a> [daemon\_binary\_s3\_uri](#input\_daemon\_binary\_s3\_uri) | S3 URI for the daemon binary | `string` | `""` | no |
 | <a name="input_ec2_ami_id"></a> [ec2\_ami\_id](#input\_ec2\_ami\_id) | Custom AMI ID. Leave empty for latest Ubuntu 24.04 LTS. | `string` | `""` | no |
+| <a name="input_ec2_architecture"></a> [ec2\_architecture](#input\_ec2\_architecture) | CPU architecture for AMI lookup and package repos: amd64 or arm64 | `string` | `"amd64"` | no |
 | <a name="input_ec2_instance_type"></a> [ec2\_instance\_type](#input\_ec2\_instance\_type) | EC2 instance type | `string` | `"t3.small"` | no |
 | <a name="input_ec2_root_volume_size"></a> [ec2\_root\_volume\_size](#input\_ec2\_root\_volume\_size) | Root EBS volume size in GB | `number` | `20` | no |
 | <a name="input_ec2_security_group_id"></a> [ec2\_security\_group\_id](#input\_ec2\_security\_group\_id) | Security group ID for the EC2 instance | `string` | n/a | yes |

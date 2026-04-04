@@ -43,9 +43,9 @@ type albJWTClaims struct {
 
 // healthzResponse is the JSON body returned by GET /healthz.
 type healthzResponse struct {
-	Status           string `json:"status"`
-	MgmtConnected    bool   `json:"mgmt_connected"`
-	UptimeSeconds    int64  `json:"uptime_seconds"`
+	Status         string `json:"status"`
+	MgmtConnected  bool   `json:"mgmt_connected"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
 	StoredSessions int    `json:"stored_sessions"`
 }
 
@@ -54,16 +54,21 @@ type Server struct {
 	sessions *auth.SessionStore
 	signer   auth.StateSigner
 	sink     auth.DecisionSink
+	tracker  auth.AuthSuccessTracker
 	cfg      config.Config
 	metrics  auth.Metrics
 	identity GroupsChecker
 	tmpl     *template.Template
 
 	// ALB validation
-	hostname           string
-	albARN             string
+	hostname            string
+	albARN              string
 	albPublicKeyBaseURL string
-	keyCache           map[string]*ecdsa.PublicKey
+	// keyCache stores ALB ECDSA public keys by kid. Unbounded by design:
+	// entries are added only after a successful fetch from the AWS public-key
+	// endpoint, so growth is naturally limited to the small number of keys
+	// AWS actually serves for a given ALB region.
+	keyCache      map[string]*ecdsa.PublicKey
 	keyCacheMu    sync.RWMutex
 	mgmtConnected func() bool
 	startTime     time.Time
@@ -77,6 +82,7 @@ func NewServer(
 	sessions *auth.SessionStore,
 	signer auth.StateSigner,
 	sink auth.DecisionSink,
+	tracker auth.AuthSuccessTracker,
 	cfg config.Config,
 	metrics auth.Metrics,
 	identity GroupsChecker,
@@ -95,6 +101,7 @@ func NewServer(
 		sessions:            sessions,
 		signer:              signer,
 		sink:                sink,
+		tracker:             tracker,
 		cfg:                 cfg,
 		metrics:             metrics,
 		identity:            identity,
@@ -263,6 +270,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, http.StatusServiceUnavailable, "Service Unavailable", "Failed to authorize VPN session. Please try again.", sess.SessionID)
 		return
 	}
+	if s.tracker != nil {
+		s.tracker.MarkAuthenticated(sess.CID, claims.CognitoUsername)
+	}
 	s.sessions.MarkDone(sess.SessionID)
 	s.metrics.AuthSuccess()
 	slog.Info("callback: auth success", "sid", sess.SessionID, "email", claims.Email)
@@ -334,7 +344,6 @@ func decodeBase64URL(s string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
 }
 
-
 // parseJWTHeader parses the header segment of a JWT (without verifying signature).
 func parseJWTHeader(tokenStr string) (albJWTHeader, error) {
 	parts := strings.Split(tokenStr, ".")
@@ -398,6 +407,9 @@ func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signe
 }
 
 // parseJWTClaimsUnsafe parses JWT claims without signature verification (dev mode).
+// Expiry (exp) is intentionally not checked — dev/test tokens use alg:none and
+// may carry synthetic or omitted exp values. In production the ALB JWT path
+// (validateALBJWT) enforces expiry via jwt.WithExpirationRequired().
 // Returns the ALBClaims and any groups found in the "cognito:groups" claim.
 func parseJWTClaimsUnsafe(tokenStr string) (auth.ALBClaims, []string, error) {
 	parts := strings.Split(tokenStr, ".")
@@ -450,6 +462,7 @@ func extractALBClaims(mc *jwt.MapClaims) (auth.ALBClaims, error) {
 	email, _ := raw["email"].(string)
 	sub, _ := raw["sub"].(string)
 	iss, _ := raw["iss"].(string)
+	cognitoUsername, _ := raw["cognito:username"].(string)
 
 	if email == "" {
 		return auth.ALBClaims{}, fmt.Errorf("missing or empty email claim")
@@ -465,10 +478,11 @@ func extractALBClaims(mc *jwt.MapClaims) (auth.ALBClaims, error) {
 	}
 
 	return auth.ALBClaims{
-		Sub:   sub,
-		Email: email,
-		Exp:   exp,
-		Iss:   iss,
+		Sub:             sub,
+		Email:           email,
+		Exp:             exp,
+		Iss:             iss,
+		CognitoUsername: cognitoUsername,
 	}, nil
 }
 
@@ -488,9 +502,16 @@ func (s *Server) checkGroup(ctx context.Context, sess *auth.PendingSession, clai
 		return false, fmt.Errorf("no identity checker configured")
 	}
 
-	result, err := s.identity.CheckUser(ctx, claims.Sub, sess.RequiredGroup, true)
+	// Use CognitoUsername (cognito:username claim) — AdminGetUser requires the
+	// actual Cognito username. For native users this is their email; for federated
+	// users it is "{ProviderName}_{identifier}". Sub (UUID) only works for native
+	// users and fails with UserNotFoundException for federated accounts.
+	result, err := s.identity.CheckUser(ctx, claims.CognitoUsername, sess.RequiredGroup, true)
 	if err != nil {
 		return false, err
+	}
+	if !result.Enabled {
+		return false, fmt.Errorf("user disabled or unconfirmed")
 	}
 	return result.InGroup, nil
 }

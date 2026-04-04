@@ -84,6 +84,7 @@ func main() {
 		sessions,
 		signer,
 		daemonSink,
+		handler,
 		cfg,
 		m,
 		identity,

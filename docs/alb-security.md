@@ -87,6 +87,44 @@ Useful for auditing auth attempts and debugging WAF rule false positives.
 
 ---
 
+## VPC-Internal Traffic (not encrypted)
+
+### Current situation
+
+The full callback request path is:
+
+```
+Browser → ALB (HTTPS/TLS 1.2+)
+ALB → Lambda (AWS internal invoke — not HTTP, no plaintext exposure)
+Lambda → EC2 daemon (plain HTTP)
+ALB → EC2 daemon directly (plain HTTP — target group protocol = "HTTP")
+```
+
+The first hop (browser → ALB) is encrypted. The ALB-to-Lambda leg is not HTTP at all — ALB invokes Lambda via the AWS Lambda API as a JSON event payload, so there is no plaintext HTTP on that path regardless.
+
+The two unencrypted hops are both VPC-internal:
+
+- `lambda-router/main.go` constructs `http://{ec2-ip}:{port}/callback/` — OIDC headers (`x-amzn-oidc-data`, `x-amzn-oidc-accesstoken`) are forwarded over plain HTTP from Lambda to the daemon.
+- `terraform/modules/vpn-server/main.tf` defines the ALB target group with `protocol = "HTTP"` — in single-instance mode the ALB forwards the callback directly to the daemon over plain HTTP.
+
+In both cases the `x-amzn-oidc-data` JWT is already ES256-signed by the ALB's EC key, so a network-level attacker cannot forge or replay it. The confidentiality of the token (not its integrity) is the concern.
+
+### Why this is acceptable for now
+
+The security group configuration already enforces that only the ALB security group and the Lambda security group can reach the daemon ports — no other source can initiate a connection to those ports. Passive sniffing within the VPC requires a compromised EC2 instance or a compromised VPC flow path, which is outside the current threat model.
+
+### How to harden (future work)
+
+To encrypt the VPC-internal hops, the daemon's callback server would need to serve TLS. The changes required:
+
+1. Add `--callback-tls-cert` and `--callback-tls-key` flags to the daemon config and switch `http.Serve` to `http.ServeTLS` in `internal/callback/server.go`.
+2. In `lambda-router/main.go`, change `http://` to `https://` in the upstream URL and configure the `httpClient` transport with either `InsecureSkipVerify: true` (encrypts the wire, skips cert verification) or a pinned CA cert loaded from an environment variable (full mutual verification).
+3. In `terraform/modules/vpn-server/main.tf`, change the target group `protocol` from `"HTTP"` to `"HTTPS"` and set `protocol_version = "HTTP1"`. The ALB supports HTTPS target groups with optional cert verification via `load_balancing.tls.cert_bound_responses`.
+
+The existing PKI infrastructure (`pki/ca.crt`, managed via SSM) could serve as the CA for daemon TLS certs, avoiding the need for a separate certificate authority.
+
+---
+
 ## AWS WAF
 
 ### Managed Rule Groups

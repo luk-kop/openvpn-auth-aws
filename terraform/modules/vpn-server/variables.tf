@@ -179,6 +179,17 @@ variable "ec2_instance_type" {
   default     = "t3.small"
 }
 
+variable "ec2_architecture" {
+  description = "CPU architecture for AMI lookup and package repos: amd64 or arm64"
+  type        = string
+  default     = "amd64"
+
+  validation {
+    condition     = contains(["amd64", "arm64"], var.ec2_architecture)
+    error_message = "ec2_architecture must be amd64 or arm64"
+  }
+}
+
 variable "ec2_root_volume_size" {
   description = "Root EBS volume size in GB"
   type        = number

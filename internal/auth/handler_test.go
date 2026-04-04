@@ -614,6 +614,735 @@ func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 	}
 }
 
+// --- Session expiry tests ---
+
+func TestStrayEstablishedDoesNotStartExpiryTimer(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: 20 * time.Millisecond,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	// Send ESTABLISHED for a CID that was never in inFlight (stray/duplicate).
+	handler.HandleEvent(context.Background(), mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "99",
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.mu.Lock()
+	_, hasExpiry := handler.cidToExpiry["99"]
+	handler.mu.Unlock()
+
+	if hasExpiry {
+		t.Fatal("stray ESTABLISHED must not create an expiry timer")
+	}
+
+	// Wait past the would-be expiry to confirm no DecisionKill fires.
+	time.Sleep(50 * time.Millisecond)
+
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionKill && d.CID == "99" {
+			t.Fatal("stray ESTABLISHED must not produce DecisionKill")
+		}
+	}
+}
+
+func TestEstablishedStartsExpiryTimer(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: 5 * time.Second, // long enough not to fire during test
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "test@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.mu.Lock()
+	_, hasExpiry := handler.cidToExpiry["1"]
+	handler.mu.Unlock()
+
+	if !hasExpiry {
+		t.Fatal("expected cidToExpiry entry after ESTABLISHED with max-session-duration")
+	}
+}
+
+func TestExpiryTimerFiresDecisionKill(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: 20 * time.Millisecond,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	handler.HandleEvent(context.Background(), mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "test@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.HandleEvent(context.Background(), mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+
+	// Wait for expiry timer to fire
+	time.Sleep(80 * time.Millisecond)
+
+	var kill int
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionKill && d.CID == "1" {
+			kill++
+		}
+	}
+	if kill != 1 {
+		t.Fatalf("expected 1 DecisionKill from expiry timer, got %d; decisions: %+v", kill, sink.snapshot())
+	}
+}
+
+func TestDisconnectCancelsExpiryTimer(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: 50 * time.Millisecond,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "test@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	// Disconnect before expiry fires
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventDisconnect, CID: "1",
+	}, sink)
+
+	// Wait past what would have been the expiry time
+	time.Sleep(80 * time.Millisecond)
+
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionKill {
+			t.Fatalf("expected no DecisionKill after disconnect, but got one: %+v", d)
+		}
+	}
+}
+
+func TestEvictionCancelsExpiryTimer(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:           "test-secret-key!!",
+		HandWindow:           5 * time.Second,
+		AuthTimeout:          5 * time.Second,
+		CallbackPort:         8080,
+		SingleSessionPerUser: true,
+		MaxSessionDuration:   100 * time.Millisecond,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Connect and establish CID=1
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	// New connect for same CN evicts CID=1
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "2", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	// Count kills — should be exactly 1 from eviction, not 2 (no timer fire)
+	time.Sleep(150 * time.Millisecond)
+
+	var kills int
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionKill && d.CID == "1" {
+			kills++
+		}
+	}
+	if kills != 1 {
+		t.Fatalf("expected exactly 1 DecisionKill for CID=1 (from eviction), got %d; decisions: %+v", kills, sink.snapshot())
+	}
+}
+
+func TestReauthBackstopDeniesExpiredSession(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: time.Millisecond, // extremely short to expire immediately
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "test@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+
+	// Use replaceExpiryState instead of mutating the pointer in-place to
+	// respect the production contract: old *sessionExpiry is never modified.
+	handler.replaceExpiryState("1", time.Now().Add(-24*time.Hour))
+
+	// Send REAUTH — backstop should deny
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventReauth, CID: "1", KID: "2",
+		Env: map[string]string{"common_name": "test@example.com"},
+	}, sink)
+
+	handler.WaitReauth()
+	time.Sleep(5 * time.Millisecond)
+
+	var deny int
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionDeny && d.Reason == "session expired" {
+			deny++
+		}
+	}
+	if deny != 1 {
+		t.Fatalf("expected 1 DecisionDeny with 'session expired', got %d; decisions: %+v", deny, sink.snapshot())
+	}
+}
+
+func TestReauthBackstopSkippedWhenDurationZero(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: 0, // disabled
+		CognitoSkipReauth:  true,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "test@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	// REAUTH with duration=0 should follow normal flow (skip-reauth allows it)
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventReauth, CID: "1", KID: "2",
+		Env: map[string]string{"common_name": "test@example.com"},
+	}, sink)
+
+	handler.WaitReauth()
+	time.Sleep(5 * time.Millisecond)
+
+	var allow int
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionAllowNT {
+			allow++
+		}
+	}
+	if allow != 1 {
+		t.Fatalf("expected 1 DecisionAllowNT (skip-reauth), got %d; decisions: %+v", allow, sink.snapshot())
+	}
+}
+
+func TestReauthBackstopFiresBeforeSkipReauth(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: time.Millisecond,
+		CognitoSkipReauth:  true,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "test@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+
+	// Use replaceExpiryState instead of mutating the pointer in-place to
+	// respect the production contract: old *sessionExpiry is never modified.
+	handler.replaceExpiryState("1", time.Now().Add(-24*time.Hour))
+
+	// REAUTH — backstop should deny even though skip-reauth is enabled
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventReauth, CID: "1", KID: "2",
+		Env: map[string]string{"common_name": "test@example.com"},
+	}, sink)
+
+	handler.WaitReauth()
+	time.Sleep(5 * time.Millisecond)
+
+	var deny int
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionDeny && d.Reason == "session expired" {
+			deny++
+		}
+	}
+	if deny != 1 {
+		t.Fatalf("expected backstop to fire before skip-reauth; got %d denials; decisions: %+v", deny, sink.snapshot())
+	}
+}
+
+func TestReauthBackstopFiresBeforeCache(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		ReauthTimeout:      time.Millisecond,
+		CallbackPort:       8080,
+		MaxSessionDuration: time.Millisecond,
+		ReauthCache:        true,
+		RenegInterval:      time.Hour,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "test@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+
+	// Populate cache with a valid entry
+	handler.cache.Put("test@example.com", IdentityResult{
+		Exists: true, Enabled: true, InGroup: true, CheckedAt: time.Now(),
+	})
+
+	// Use replaceExpiryState instead of mutating the pointer in-place to
+	// respect the production contract: old *sessionExpiry is never modified.
+	handler.replaceExpiryState("1", time.Now().Add(-24*time.Hour))
+
+	// REAUTH — backstop should deny despite valid cache entry
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventReauth, CID: "1", KID: "2",
+		Env: map[string]string{"common_name": "test@example.com"},
+	}, sink)
+
+	handler.WaitReauth()
+	time.Sleep(5 * time.Millisecond)
+
+	var deny int
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionDeny && d.Reason == "session expired" {
+			deny++
+		}
+	}
+	if deny != 1 {
+		t.Fatalf("expected backstop to fire before cache lookup; got %d denials; decisions: %+v", deny, sink.snapshot())
+	}
+}
+
+func TestReauthFailsClosedWhenTrackingMissing(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: time.Hour,
+		CognitoSkipReauth:  true,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	handler.HandleEvent(context.Background(), mgmt.Event{
+		Type: mgmt.EventReauth, CID: "1", KID: "2",
+		Env: map[string]string{"common_name": "test@example.com"},
+	}, sink)
+
+	handler.WaitReauth()
+	time.Sleep(5 * time.Millisecond)
+
+	var deny int
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionDeny && d.Reason == "session revalidation required; reconnect" {
+			deny++
+		}
+	}
+	if deny != 1 {
+		t.Fatalf("expected reauth to fail closed when tracking is missing; got %d denials; decisions: %+v", deny, sink.snapshot())
+	}
+}
+
+func TestNoExpiryTimerWhenDurationZero(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: 0, // disabled
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "test@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.mu.Lock()
+	_, hasExpiry := handler.cidToExpiry["1"]
+	handler.mu.Unlock()
+
+	if hasExpiry {
+		t.Fatal("expected no cidToExpiry entry when MaxSessionDuration=0")
+	}
+}
+
+func TestMarkAuthenticatedPromotesButDefersExpiry(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: 5 * time.Second,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "test@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.MarkAuthenticated("1", "")
+
+	handler.mu.Lock()
+	_, inFlight := handler.inFlight["1"]
+	_, isPromoted := handler.promoted["1"]
+	_, hasExpiry := handler.cidToExpiry["1"]
+	handler.mu.Unlock()
+
+	if inFlight {
+		t.Fatal("expected in-flight state to be cleared after callback success promotion")
+	}
+	if !isPromoted {
+		t.Fatal("expected CID to be in promoted set after MarkAuthenticated")
+	}
+	if hasExpiry {
+		t.Fatal("expiry timer must not start until ESTABLISHED arrives")
+	}
+
+	// Now send ESTABLISHED — expiry timer should start.
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.mu.Lock()
+	_, isPromoted = handler.promoted["1"]
+	exp, hasExpiry := handler.cidToExpiry["1"]
+	handler.mu.Unlock()
+
+	if isPromoted {
+		t.Fatal("expected promoted marker to be cleared after ESTABLISHED")
+	}
+	if !hasExpiry || exp == nil {
+		t.Fatal("expected expiry tracking to start after ESTABLISHED")
+	}
+}
+
+// TestPromotedCIDSurvivesReconnectBootstrap verifies that a CID promoted via
+// MarkAuthenticated (callback success) but not yet ESTABLISHED is preserved
+// across a management socket reconnect (RebuildSessionTrackingFromStatus).
+func TestPromotedCIDSurvivesReconnectBootstrap(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:           "test-secret-key!!",
+		HandWindow:           5 * time.Second,
+		AuthTimeout:          5 * time.Second,
+		CallbackPort:         8080,
+		MaxSessionDuration:   time.Hour,
+		SingleSessionPerUser: true,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// CONNECT → MarkAuthenticated (callback success before ESTABLISHED).
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventConnect, CID: "1", KID: "1",
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"},
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+	handler.MarkAuthenticated("1", "")
+
+	// Simulate management socket reconnect with an empty snapshot
+	// (the CID isn't in status 3 yet because ESTABLISHED hasn't fired).
+	handler.RebuildSessionTrackingFromStatus(nil)
+
+	handler.mu.Lock()
+	cn := handler.cidToCN["1"]
+	activeCID := handler.cnToActiveCID["alice@example.com"]
+	_, isPromoted := handler.promoted["1"]
+	handler.mu.Unlock()
+
+	if cn != "alice@example.com" {
+		t.Fatalf("expected cidToCN preserved for promoted CID, got %q", cn)
+	}
+	if activeCID != "1" {
+		t.Fatalf("expected cnToActiveCID preserved for promoted CID, got %q", activeCID)
+	}
+	if !isPromoted {
+		t.Fatal("expected promoted marker to survive reconnect bootstrap")
+	}
+
+	// Now ESTABLISHED arrives — should start expiry timer normally.
+	handler.HandleEvent(ctx, mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "1",
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.mu.Lock()
+	_, hasExpiry := handler.cidToExpiry["1"]
+	_, stillPromoted := handler.promoted["1"]
+	handler.mu.Unlock()
+
+	if !hasExpiry {
+		t.Fatal("expected expiry timer after ESTABLISHED post-reconnect")
+	}
+	if stillPromoted {
+		t.Fatal("expected promoted marker cleared after ESTABLISHED")
+	}
+}
+
+func TestRebuildSessionTrackingFromStatusRestoresTracking(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:           "test-secret-key!!",
+		HandWindow:           5 * time.Second,
+		AuthTimeout:          5 * time.Second,
+		CallbackPort:         8080,
+		MaxSessionDuration:   time.Hour,
+		SingleSessionPerUser: true,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	connectedAt := time.Now().Add(-10 * time.Minute)
+	handler.RebuildSessionTrackingFromStatus([]mgmt.EstablishedSession{{
+		CID:         "7",
+		CommonName:  "alice@example.com",
+		ConnectedAt: connectedAt,
+	}})
+
+	handler.mu.Lock()
+	exp := handler.cidToExpiry["7"]
+	cn := handler.cidToCN["7"]
+	activeCID := handler.cnToActiveCID["alice@example.com"]
+	handler.mu.Unlock()
+
+	if exp == nil {
+		t.Fatal("expected expiry tracking to be restored from management snapshot")
+	}
+	if !exp.connectedAt.Equal(connectedAt) {
+		t.Fatalf("connectedAt = %v, want %v", exp.connectedAt, connectedAt)
+	}
+	if cn != "alice@example.com" {
+		t.Fatalf("cidToCN = %q, want alice@example.com", cn)
+	}
+	if activeCID != "7" {
+		t.Fatalf("cnToActiveCID = %q, want 7", activeCID)
+	}
+}
+
+// TestDuplicateEstablishedAfterBootstrapDoesNotResetExpiry verifies that a
+// buffered CLIENT:ESTABLISHED arriving after RebuildSessionTrackingFromStatus
+// does not replace the snapshot-anchored expiry timer with time.Now().
+func TestDuplicateEstablishedAfterBootstrapDoesNotResetExpiry(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: time.Hour,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	// Simulate reconnect: CID "5" was established 30 minutes ago.
+	connectedAt := time.Now().Add(-30 * time.Minute)
+	handler.RebuildSessionTrackingFromStatus([]mgmt.EstablishedSession{{
+		CID:         "5",
+		CommonName:  "bob@example.com",
+		ConnectedAt: connectedAt,
+	}})
+
+	handler.mu.Lock()
+	expBefore := handler.cidToExpiry["5"]
+	handler.mu.Unlock()
+	if expBefore == nil {
+		t.Fatal("expected expiry tracking from snapshot")
+	}
+	if !expBefore.connectedAt.Equal(connectedAt) {
+		t.Fatalf("connectedAt = %v, want %v", expBefore.connectedAt, connectedAt)
+	}
+
+	// Duplicate ESTABLISHED arrives (buffered by BootstrapStatus).
+	handler.HandleEvent(context.Background(), mgmt.Event{
+		Type: mgmt.EventEstablished, CID: "5",
+	}, sink)
+	time.Sleep(5 * time.Millisecond)
+
+	handler.mu.Lock()
+	expAfter := handler.cidToExpiry["5"]
+	handler.mu.Unlock()
+
+	if expAfter == nil {
+		t.Fatal("expiry tracking must survive duplicate ESTABLISHED")
+	}
+	if !expAfter.connectedAt.Equal(connectedAt) {
+		t.Fatalf("duplicate ESTABLISHED reset connectedAt from %v to %v", connectedAt, expAfter.connectedAt)
+	}
+}
+
+func TestRebuildSessionTrackingFromStatusKillsAlreadyExpiredSession(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: 10 * time.Millisecond,
+	}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+
+	handler.RebuildSessionTrackingFromStatus([]mgmt.EstablishedSession{{
+		CID:         "9",
+		CommonName:  "expired@example.com",
+		ConnectedAt: time.Now().Add(-time.Hour),
+	}})
+	time.Sleep(10 * time.Millisecond)
+
+	var kills int
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionKill && d.CID == "9" {
+			kills++
+		}
+	}
+	if kills == 0 {
+		t.Fatalf("expected reconnect reconciliation to kill already expired session; decisions: %+v", sink.snapshot())
+	}
+}
+
 func TestHandleConnectAllowsNewSessionAfterDisconnect(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",

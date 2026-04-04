@@ -36,9 +36,10 @@ sequenceDiagram
 
     alt verification passed
         D->>V: client-auth (CID, KID)
+        D->>D: mark session authenticated, start expiry timer (if enabled)
         V->>C: tunnel up
         V->>D: >CLIENT:ESTABLISHED (CID)
-        D->>D: cancel timeout, cleanup session
+        D->>D: idempotent promotion / cleanup if ESTABLISHED arrives later
     else verification failed
         D->>V: client-deny (CID, KID, reason)
     end
@@ -286,10 +287,24 @@ graph LR
 
 - **SessionPending** — created on `>CLIENT:CONNECT`, waiting for browser callback
 - **SessionProcessing** — callback received, identity checks in progress (atomic transition prevents double-processing)
-- **SessionDone** — auth successful, `client-auth` sent; deleted when `>CLIENT:ESTABLISHED` is received
+- **SessionDone** — auth successful, `client-auth` sent; deleted as soon as auth success is promoted, so a missed `>CLIENT:ESTABLISHED` does not lose max-session tracking
 - **SessionFailed** — auth failed (timeout, JWT validation error, group check failed), `client-deny` sent
 
 Sessions that never reach `ESTABLISHED` have a TTL of `2 × hand-window` and are reaped automatically.
+
+### Management Socket Reconnect and Session Tracking
+
+On each management socket connect, the daemon sends `hold release` followed by `status 3`. OpenVPN responds with a snapshot of all currently established clients. The daemon uses this snapshot to rebuild its in-memory session tracking maps (`cidToCN`, `cnToActiveCID`, `cidToExpiry`) — a process handled by `RebuildSessionTrackingFromStatus`.
+
+This covers three scenarios:
+
+| Scenario | What happens |
+| --- | --- |
+| **Daemon restart** (OpenVPN still running) | Daemon starts with empty maps. `status 3` returns all active clients. Maps are populated from scratch — `single-session-per-user` and `max-session-duration` enforcement resume for existing sessions. |
+| **Management socket drops** (both still running) | Daemon reconnects to the socket. Maps may contain stale entries for clients that disconnected while the socket was down. `status 3` returns the current state — stale entries are pruned, surviving sessions are kept or have their expiry timers restarted. |
+| **OpenVPN restart** | All VPN tunnels are terminated. `status 3` returns an empty list. All map entries and expiry timers are cleaned up. Clients must reconnect (new `CLIENT:CONNECT`), so tracking starts fresh. |
+
+When `--max-session-duration` is disabled (`0`), `RebuildSessionTrackingFromStatus` still rebuilds `cidToCN` and `cnToActiveCID` so that `--single-session-per-user` eviction works correctly after a reconnect. Expiry timer logic is simply skipped.
 
 ## Auth Timeout vs Hand-Window
 

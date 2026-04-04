@@ -160,7 +160,7 @@ resource "aws_eip" "vpn" {
 # --- Launch Template ---
 
 data "aws_ssm_parameter" "ubuntu" {
-  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/${var.ec2_architecture}/hvm/ebs-gp3/ami-id"
 }
 
 resource "aws_launch_template" "openvpn" {

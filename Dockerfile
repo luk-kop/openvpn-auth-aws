@@ -23,6 +23,6 @@ COPY --from=builder /build/openvpn-auth-daemon .
 RUN adduser -S -D -H -u 10001 -G daemon appuser
 USER appuser
 
-EXPOSE 8081
+EXPOSE 8080
 
 CMD ["/app/openvpn-auth-daemon"]

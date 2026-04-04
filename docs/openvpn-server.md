@@ -98,6 +98,17 @@ The lab setup uses `reneg-sec 600` (10 minutes) for faster testing. For producti
 
 The daemon's `--reneg-interval` should match this value (used for reauth cache TTL calculation).
 
+### Interaction with `--max-session-duration`
+
+When `--max-session-duration` is set, the daemon enforces a hard time limit on established sessions via two mechanisms:
+
+1. **Hard timer** — after `client-auth` succeeds, the daemon starts a timer that sends `client-kill` after the configured duration, regardless of `reneg-sec`.
+2. **Reauth backstop** — on each `CLIENT:REAUTH`, the daemon checks whether the session has exceeded `max-session-duration` and sends `client-deny` with reason `"session expired"` if so.
+
+If `reneg-sec=0` (renegotiation disabled), no `CLIENT:REAUTH` events are sent, so the hard timer is the **only** enforcement mechanism. When `reneg-sec > 0`, both mechanisms are active — whichever fires first terminates the session.
+
+On management reconnect (daemon restart, socket drop, or OpenVPN restart), the daemon queries `status 3` and rebuilds expiry tracking from the live OpenVPN state. If a session has already exceeded its limit, it is killed immediately. If OpenVPN restarted (empty `status 3`), all timers are cleaned up and clients must reconnect. See [Architecture — Management Socket Reconnect](architecture.md#management-socket-reconnect-and-session-tracking) for the full scenario matrix.
+
 ## Client Config
 
 Minimal client config for WebAuth:

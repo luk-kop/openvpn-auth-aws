@@ -13,13 +13,15 @@ func ParseHeader(line string) (EventType, string, string, error) {
 	case strings.HasPrefix(line, ">CLIENT:REAUTH,"):
 		return parseCIDKID(EventReauth, strings.TrimPrefix(line, ">CLIENT:REAUTH,"))
 	case strings.HasPrefix(line, ">CLIENT:DISCONNECT,"):
-		cid := strings.TrimSpace(strings.TrimPrefix(line, ">CLIENT:DISCONNECT,"))
+		payload := strings.TrimPrefix(line, ">CLIENT:DISCONNECT,")
+		cid := strings.TrimSpace(strings.SplitN(payload, ",", 2)[0])
 		if cid == "" {
 			return "", "", "", fmt.Errorf("disconnect missing cid")
 		}
 		return EventDisconnect, cid, "", nil
 	case strings.HasPrefix(line, ">CLIENT:ESTABLISHED,"):
-		cid := strings.TrimSpace(strings.TrimPrefix(line, ">CLIENT:ESTABLISHED,"))
+		payload := strings.TrimPrefix(line, ">CLIENT:ESTABLISHED,")
+		cid := strings.TrimSpace(strings.SplitN(payload, ",", 2)[0])
 		if cid == "" {
 			return "", "", "", fmt.Errorf("established missing cid")
 		}
@@ -73,7 +75,7 @@ func ReadEvent(scanner *bufio.Scanner, headerLine string) (Event, error) {
 	if err := scanner.Err(); err != nil {
 		return Event{}, err
 	}
-	return Event{}, fmt.Errorf("unexpected EOF waiting for >CLIENT:END")
+	return Event{}, fmt.Errorf("unexpected EOF waiting for >CLIENT:ENV,END")
 }
 
 func parseCIDKID(typ EventType, payload string) (EventType, string, string, error) {

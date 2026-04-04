@@ -24,6 +24,13 @@ import (
 // If exceeded, the client silently drops the message and the browser never opens.
 const MaxWebAuthURLLen = 229
 
+// sessionExpiry tracks the start time and cancellation handle for an
+// established session's max-duration timer.
+type sessionExpiry struct {
+	connectedAt time.Time
+	cancel      context.CancelFunc
+}
+
 type Handler struct {
 	cfg      config.Config
 	sessions *SessionStore
@@ -36,7 +43,8 @@ type Handler struct {
 	// goroutines. Unlike the per-connection sink passed to HandleEvent,
 	// this sink survives management socket reconnections so that timeout
 	// denials can be delivered on the new connection.
-	timeoutSink DecisionSink
+	timeoutSink  DecisionSink
+	lifecycleCtx context.Context
 
 	mu            sync.Mutex
 	inFlight      map[string]context.CancelFunc // CID → cancel
@@ -44,6 +52,11 @@ type Handler struct {
 	cidToCN       map[string]string             // CID → common_name (for cleanup)
 	cidToKID      map[string]string             // CID → KID (for client-deny on eviction)
 	cnToActiveCID map[string]string             // common_name → CID (one active session per user)
+	cidToExpiry   map[string]*sessionExpiry     // CID → expiry state (established sessions with max-session-duration)
+	promoted      map[string]struct{}           // CIDs that passed callback auth but haven't received ESTABLISHED yet
+	liveSink      DecisionSink
+
+	cidToCognitoUsername map[string]string // CID → cognito:username (for federated reauth)
 
 	reauthWG sync.WaitGroup
 }
@@ -55,17 +68,20 @@ func NewHandler(cfg config.Config, sessions *SessionStore, identity IdentityChec
 	}
 
 	return &Handler{
-		cfg:           cfg,
-		sessions:      sessions,
-		identity:      identity,
-		signer:        signer,
-		metrics:       metrics,
-		cache:         cache,
-		inFlight:      make(map[string]context.CancelFunc),
-		cidToSID:      make(map[string]string),
-		cidToCN:       make(map[string]string),
-		cidToKID:      make(map[string]string),
-		cnToActiveCID: make(map[string]string),
+		cfg:                  cfg,
+		sessions:             sessions,
+		identity:             identity,
+		signer:               signer,
+		metrics:              metrics,
+		cache:                cache,
+		inFlight:             make(map[string]context.CancelFunc),
+		cidToSID:             make(map[string]string),
+		cidToCN:              make(map[string]string),
+		cidToKID:             make(map[string]string),
+		cnToActiveCID:        make(map[string]string),
+		cidToExpiry:          make(map[string]*sessionExpiry),
+		promoted:             make(map[string]struct{}),
+		cidToCognitoUsername: make(map[string]string),
 	}
 }
 
@@ -73,6 +89,26 @@ func NewHandler(cfg config.Config, sessions *SessionStore, identity IdentityChec
 // Must be called before any events are handled.
 func (h *Handler) SetTimeoutSink(sink DecisionSink) {
 	h.timeoutSink = sink
+}
+
+// SetLifecycleContext sets the long-lived daemon context used by session-expiry
+// timers. Must be called before any auth-success promotions happen.
+func (h *Handler) SetLifecycleContext(ctx context.Context) {
+	h.lifecycleCtx = ctx
+}
+
+// SetLiveSink sets the sink for connection-bound actions that must never be
+// replayed after a management reconnect (for example hard-expiry client-kill).
+func (h *Handler) SetLiveSink(sink DecisionSink) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.liveSink = sink
+}
+
+func (h *Handler) ClearLiveSink() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.liveSink = nil
 }
 
 func (h *Handler) InFlight() int {
@@ -99,7 +135,8 @@ func (h *Handler) HandleEvent(ctx context.Context, event mgmt.Event, sink Decisi
 		h.handleDisconnect(event)
 	case mgmt.EventEstablished:
 		slog.Info("established", "cid", event.CID)
-		h.cancelSession(event.CID)
+		h.promoteSession(event.CID)
+		h.onEstablished(event.CID)
 	}
 }
 
@@ -158,15 +195,17 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 		CreatedAt:     now,
 		ExpiresAt:     now.Add(2 * h.cfg.HandWindow),
 	}
-	h.sessions.Put(session)
-
 	stateBlob := EncodeState(StatePayload{
 		SID: sessionID,
 		IAT: now.Unix(),
 		EXP: now.Add(h.cfg.AuthTimeout).Unix(),
 	}, h.signer)
 
-	authURL := fmt.Sprintf("%s?state=%s", strings.TrimRight(h.cfg.CallbackURL, "/"), stateBlob)
+	sep := "?"
+	if strings.Contains(h.cfg.CallbackURL, "?") {
+		sep = "&"
+	}
+	authURL := fmt.Sprintf("%s%sstate=%s", strings.TrimRight(h.cfg.CallbackURL, "/"), sep, stateBlob)
 
 	// OpenVPN CE clients silently drop WEB_AUTH URLs exceeding the INFOMSG
 	// buffer limit — fail loudly here instead.
@@ -180,6 +219,8 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "auth URL too long"})
 		return
 	}
+
+	h.sessions.Put(session)
 
 	slog.Info("connect pending auth", "cid", event.CID, "cn", event.CommonName(), "timeout", h.cfg.AuthTimeout)
 	h.metrics.AuthAttempt("")
@@ -227,7 +268,12 @@ func (h *Handler) authTimeout(ctx context.Context, session *PendingSession, sink
 }
 
 func (h *Handler) handleReauth(ctx context.Context, event mgmt.Event, sink DecisionSink) {
-	lookup := event.CommonName()
+	h.mu.Lock()
+	lookup, ok := h.cidToCognitoUsername[event.CID]
+	h.mu.Unlock()
+	if !ok || lookup == "" {
+		lookup = event.CommonName()
+	}
 	if lookup == "" {
 		slog.Warn("reauth denied", "cid", event.CID, "reason", "missing common name")
 		h.metrics.ReauthDenied("missing_common_name")
@@ -236,6 +282,31 @@ func (h *Handler) handleReauth(ctx context.Context, event mgmt.Event, sink Decis
 	}
 
 	slog.Info("reauth", "cid", event.CID, "cn", lookup)
+
+	// Session duration backstop — deny if session exceeded max duration.
+	// Must be checked before skip-reauth, cache, and Cognito to prevent bypasses.
+	if h.cfg.MaxSessionDuration > 0 {
+		// exp is a snapshot pointer: replaceExpiryState always creates a new
+		// *sessionExpiry rather than mutating the existing one, so reading
+		// exp.connectedAt after releasing the lock is safe — the pointer is
+		// stable even if the map entry is replaced concurrently.
+		h.mu.Lock()
+		exp, tracked := h.cidToExpiry[event.CID]
+		h.mu.Unlock()
+		if !tracked {
+			slog.Warn("reauth denied: session tracking lost", "cid", event.CID, "cn", lookup)
+			h.metrics.ReauthDenied("session_untracked")
+			sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "session revalidation required; reconnect"})
+			return
+		}
+		if time.Since(exp.connectedAt) > h.cfg.MaxSessionDuration {
+			slog.Warn("reauth denied: session expired", "cid", event.CID, "cn", lookup,
+				"connected_at", exp.connectedAt, "max_duration", h.cfg.MaxSessionDuration)
+			h.metrics.SessionExpired("reauth_backstop")
+			sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "session expired"})
+			return
+		}
+	}
 
 	if h.cfg.CognitoSkipReauth {
 		slog.Info("reauth allowed (skip-reauth)", "cid", event.CID, "cn", lookup)
@@ -306,11 +377,15 @@ func (h *Handler) evictSession(cid string) (Decision, bool) {
 	sid := h.cidToSID[cid]
 	cn := h.cidToCN[cid]
 	kid := h.cidToKID[cid]
+	exp := h.cidToExpiry[cid]
 	// Clean up all tracking for this CID.
 	delete(h.inFlight, cid)
 	delete(h.cidToSID, cid)
 	delete(h.cidToCN, cid)
 	delete(h.cidToKID, cid)
+	delete(h.cidToExpiry, cid)
+	delete(h.promoted, cid)
+	delete(h.cidToCognitoUsername, cid)
 	if cn != "" && h.cnToActiveCID[cn] == cid {
 		delete(h.cnToActiveCID, cn)
 	}
@@ -318,6 +393,9 @@ func (h *Handler) evictSession(cid string) (Decision, bool) {
 
 	if inFlight {
 		cancel()
+	}
+	if exp != nil {
+		exp.cancel()
 	}
 	if sid != "" {
 		h.sessions.Delete(sid)
@@ -341,10 +419,14 @@ func (h *Handler) handleDisconnect(event mgmt.Event) {
 	cancel, ok := h.inFlight[event.CID]
 	sid := h.cidToSID[event.CID]
 	cn := h.cidToCN[event.CID]
+	exp := h.cidToExpiry[event.CID]
 	delete(h.inFlight, event.CID)
 	delete(h.cidToSID, event.CID)
 	delete(h.cidToCN, event.CID)
 	delete(h.cidToKID, event.CID)
+	delete(h.cidToExpiry, event.CID)
+	delete(h.promoted, event.CID)
+	delete(h.cidToCognitoUsername, event.CID)
 	if cn != "" && h.cnToActiveCID[cn] == event.CID {
 		delete(h.cnToActiveCID, cn)
 	}
@@ -352,32 +434,113 @@ func (h *Handler) handleDisconnect(event mgmt.Event) {
 	if ok {
 		cancel()
 	}
+	if exp != nil {
+		exp.cancel()
+	}
 	if sid != "" {
 		h.sessions.Delete(sid)
 	}
 }
 
-// cancelSession cancels the timeout goroutine for a CID and removes the
-// session record from the store. Used when CLIENT:ESTABLISHED confirms the
-// auth completed — the PKCE/nonce data is no longer needed.
+// promoteSession transitions a CID out of the pending-auth (inFlight) state.
+// It cancels the auth-timeout goroutine, removes the pending session from the
+// store, and marks the CID as promoted so that RebuildSessionTrackingFromStatus
+// preserves its tracking across management reconnects.
+//
+// It does NOT start the expiry timer — that is deferred to onEstablished, which
+// anchors the timer to OpenVPN's actual connected time rather than callback time.
+//
 // CN→CID tracking is kept so single-session-per-user eviction still works
 // until DISCONNECT cleans it up.
-func (h *Handler) cancelSession(cid string) {
+//
+// Called from both MarkAuthenticated (callback success) and EventEstablished.
+// The second call is idempotent: inFlight[cid] is already deleted so the
+// !ok early return fires.
+func (h *Handler) promoteSession(cid string) {
 	h.mu.Lock()
 	cancel, ok := h.inFlight[cid]
 	sid := h.cidToSID[cid]
 	if ok {
 		delete(h.inFlight, cid)
 		delete(h.cidToSID, cid)
+		h.promoted[cid] = struct{}{} // track until ESTABLISHED arrives
 		// Keep cidToCN and cnToActiveCID — session is established, not gone.
 	}
 	h.mu.Unlock()
-	if ok {
-		cancel()
+	if !ok {
+		return // stray/duplicate ESTABLISHED for unknown CID — nothing to promote
 	}
+	cancel()
 	if sid != "" {
 		h.sessions.Delete(sid)
 	}
+}
+
+// onEstablished is called when CLIENT:ESTABLISHED arrives. It clears the
+// promoted marker and starts the expiry timer anchored to time.Now() (the
+// actual establishment time, not the earlier callback time).
+//
+// Only CIDs that were callback-promoted (in the promoted set) get a new timer.
+// CIDs already restored from a status snapshot during reconnect bootstrap
+// already have a snapshot-anchored timer — a duplicate ESTABLISHED must not
+// reset it, as that would extend --max-session-duration.
+func (h *Handler) onEstablished(cid string) {
+	h.mu.Lock()
+	_, wasPromoted := h.promoted[cid]
+	delete(h.promoted, cid)
+	h.mu.Unlock()
+
+	if !wasPromoted {
+		return
+	}
+
+	if h.cfg.MaxSessionDuration > 0 {
+		h.startExpiryTimer(cid, time.Now())
+	}
+}
+
+// MarkAuthenticated is called after callback success sends client-auth. It
+// promotes the CID out of in-flight state so the auth-timeout goroutine stops.
+// The expiry timer is NOT started here — it waits for CLIENT:ESTABLISHED to
+// anchor to the actual connected time.
+//
+// # Race window (M19 / Requirements 2.8)
+//
+// The callback server calls sink.Send(DecisionAllow) before calling
+// MarkAuthenticated. sink.Send only enqueues the allow command to cmdCh — it
+// does NOT guarantee the command was written to the OpenVPN management socket.
+// If the socket drops between enqueue and write, the CID is added to the
+// promoted set here but OpenVPN never receives the client-auth command, so the
+// client is never established. The CID then remains in the promoted set
+// indefinitely with no timeout, creating a stale tracking entry.
+//
+// # Self-healing path
+//
+// When SingleSessionPerUser=true, the stale promoted entry is evicted
+// automatically on the next CLIENT:CONNECT for the same CN: handleConnect
+// calls evictSession, which removes the CID from promoted, cidToCN, cidToKID,
+// and cnToActiveCID. The leak is therefore bounded to at most one entry per CN
+// at any given time.
+//
+// # Acceptance criteria (option b from Requirements 2.8)
+//
+// This race window is accepted as-is for three reasons:
+//
+//	(a) Management socket drops during an active auth flow are rare in practice;
+//	    the socket is a local Unix domain socket on the same host.
+//	(b) The self-healing path above bounds the leak to one stale entry per CN,
+//	    so the impact on memory and session-enforcement correctness is minimal.
+//	(c) A proper fix — a write-acknowledgement channel between the callback
+//	    flow and the management command writer — would require significant
+//	    restructuring of the command pipeline and is not justified by the
+//	    low probability and bounded impact of the race.
+func (h *Handler) MarkAuthenticated(cid, cognitoUsername string) {
+	h.mu.Lock()
+	if cognitoUsername != "" {
+		h.cidToCognitoUsername[cid] = cognitoUsername
+	}
+	h.mu.Unlock()
+	h.promoteSession(cid)
 }
 
 func (h *Handler) setInFlight(cid, sid, cn, kid string, cancel context.CancelFunc) {
@@ -392,12 +555,164 @@ func (h *Handler) setInFlight(cid, sid, cn, kid string, cancel context.CancelFun
 	}
 }
 
+// isPromoted reports whether the CID has been promoted via MarkAuthenticated
+// but has not yet received CLIENT:ESTABLISHED. Caller must hold h.mu.
+func (h *Handler) isPromoted(cid string) bool {
+	_, ok := h.promoted[cid]
+	return ok
+}
+
 func (h *Handler) clearInFlight(cid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.inFlight, cid)
 	delete(h.cidToSID, cid)
 	// Leave cidToCN, cidToKID, cnToActiveCID — DISCONNECT will clean those up.
+}
+
+func (h *Handler) startExpiryTimer(cid string, connectedAt time.Time) {
+	expiryCtx := h.replaceExpiryState(cid, connectedAt)
+	remaining := time.Until(connectedAt.Add(h.cfg.MaxSessionDuration))
+	if remaining < 0 {
+		remaining = 0
+	}
+	go h.sessionExpiryTimer(expiryCtx, cid, remaining)
+}
+
+func (h *Handler) replaceExpiryState(cid string, connectedAt time.Time) context.Context {
+	// Safety net: SetLifecycleContext must be called before any promotions
+	// (enforced by daemon setup in app.go). This fallback prevents a nil-context
+	// panic but means expiry timers would not be cancelled on graceful shutdown.
+	baseCtx := h.lifecycleCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	expiryCtx, expiryCancel := context.WithCancel(baseCtx)
+
+	h.mu.Lock()
+	if existing := h.cidToExpiry[cid]; existing != nil {
+		existing.cancel()
+	}
+	h.cidToExpiry[cid] = &sessionExpiry{
+		connectedAt: connectedAt,
+		cancel:      expiryCancel,
+	}
+	h.mu.Unlock()
+	return expiryCtx
+}
+
+// RebuildSessionTrackingFromStatus rebuilds active-session tracking from a fresh
+// management status snapshot after reconnect or restart.
+// RebuildSessionTrackingFromStatus reconciles in-memory session tracking maps
+// against the current management socket status snapshot. It is called on every
+// management socket reconnect (reconnect-bootstrap sweep).
+//
+// L1 mitigation (accepted, option b): if a CLIENT:DISCONNECT event is lost
+// during a management socket reconnect, the corresponding entries in cidToCN,
+// cidToKID, and cnToActiveCID would otherwise persist indefinitely. This sweep
+// provides bounded cleanup: any CID that is not in the live status snapshot AND
+// is not currently in-flight (inFlight) AND has not been promoted (promoted) is
+// removed from all three maps. Because the daemon reconnects to the management
+// socket whenever the connection drops — the same event that can cause a
+// DISCONNECT to be lost — this sweep fires at exactly the right moment to
+// reclaim stale entries. No additional periodic reaper is required.
+func (h *Handler) RebuildSessionTrackingFromStatus(sessions []mgmt.EstablishedSession) {
+	snapshot := make(map[string]mgmt.EstablishedSession, len(sessions))
+	for _, sess := range sessions {
+		snapshot[sess.CID] = sess
+	}
+
+	h.mu.Lock()
+	// Deleting from a map during range is safe in Go (spec-guaranteed).
+	for cid, exp := range h.cidToExpiry {
+		if _, ok := snapshot[cid]; !ok {
+			exp.cancel()
+			delete(h.cidToExpiry, cid)
+		}
+	}
+	if h.cfg.SingleSessionPerUser {
+		for cn, cid := range h.cnToActiveCID {
+			if _, ok := snapshot[cid]; !ok && h.inFlight[cid] == nil && !h.isPromoted(cid) {
+				delete(h.cnToActiveCID, cn)
+			}
+		}
+	}
+	for cid, cn := range h.cidToCN {
+		if _, ok := snapshot[cid]; !ok && h.inFlight[cid] == nil && !h.isPromoted(cid) {
+			delete(h.cidToCN, cid)
+			delete(h.cidToKID, cid)
+			if h.cfg.SingleSessionPerUser && h.cnToActiveCID[cn] == cid {
+				delete(h.cnToActiveCID, cn)
+			}
+		}
+	}
+	// Clean promoted markers for CIDs that appear in the snapshot — they are
+	// fully established now and will get fresh expiry timers below.
+	for _, sess := range sessions {
+		delete(h.promoted, sess.CID)
+	}
+	h.mu.Unlock()
+
+	for _, sess := range sessions {
+		h.mu.Lock()
+		h.cidToCN[sess.CID] = sess.CommonName
+		if h.cfg.SingleSessionPerUser {
+			h.cnToActiveCID[sess.CommonName] = sess.CID
+		}
+		h.mu.Unlock()
+
+		if h.cfg.MaxSessionDuration > 0 {
+			if time.Since(sess.ConnectedAt) >= h.cfg.MaxSessionDuration {
+				h.replaceExpiryState(sess.CID, sess.ConnectedAt)
+				h.killExpiredSession(sess.CID, sess.CommonName, sess.ConnectedAt)
+				continue
+			}
+			h.startExpiryTimer(sess.CID, sess.ConnectedAt)
+		}
+	}
+}
+
+func (h *Handler) sessionExpiryTimer(ctx context.Context, cid string, remaining time.Duration) {
+	// No defer clearExpiry here: if client-kill fails (e.g. socket disconnected),
+	// the cidToExpiry entry must remain so the reauth backstop can still catch
+	// the expired session. Cleanup happens in handleDisconnect or evictSession.
+
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		h.mu.Lock()
+		exp, ok := h.cidToExpiry[cid]
+		cn := h.cidToCN[cid]
+		h.mu.Unlock()
+		if !ok {
+			return
+		}
+		h.killExpiredSession(cid, cn, exp.connectedAt)
+	}
+}
+
+func (h *Handler) killExpiredSession(cid, cn string, connectedAt time.Time) {
+	h.mu.Lock()
+	sink := h.liveSink
+	h.mu.Unlock()
+
+	slog.Warn("session expired", "cid", cid, "cn", cn,
+		"connected_at", connectedAt,
+		"duration", time.Since(connectedAt))
+	h.metrics.SessionExpired("hard_timer")
+	if sink == nil {
+		slog.Warn("session expired while management disconnected; waiting for reconnect or reauth", "cid", cid, "cn", cn)
+		return
+	}
+	// A concurrent DISCONNECT can win after the lock is released but before
+	// client-kill is written. That race is acceptable: avoiding I/O under the
+	// mutex is more important, and OpenVPN tolerates kill requests for a CID
+	// that has already gone away.
+	sendOrLog(sink, Decision{Type: DecisionKill, CID: cid})
 }
 
 // sendOrLog sends a decision and logs a warning if the send fails.

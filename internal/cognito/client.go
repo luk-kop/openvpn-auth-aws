@@ -43,20 +43,27 @@ func (c *Checker) CheckUser(ctx context.Context, username, requiredGroup string,
 	}
 
 	result.Exists = true
-	result.Enabled = resp.Enabled && resp.UserStatus == types.UserStatusTypeConfirmed
+	result.Enabled = resp.Enabled && (resp.UserStatus == types.UserStatusTypeConfirmed || resp.UserStatus == types.UserStatusTypeExternalProvider)
 
 	if checkGroups && requiredGroup != "" {
-		groups, err := c.client.AdminListGroupsForUser(ctx, &cognitoidentityprovider.AdminListGroupsForUserInput{
+		paginator := cognitoidentityprovider.NewAdminListGroupsForUserPaginator(c.client, &cognitoidentityprovider.AdminListGroupsForUserInput{
 			UserPoolId: aws.String(c.userPoolID),
 			Username:   aws.String(username),
 		})
-		if err != nil {
-			result.FailureCause = fmt.Sprintf("list groups error: %v", err)
-			return result, err
-		}
-		for _, g := range groups.Groups {
-			if g.GroupName != nil && *g.GroupName == requiredGroup {
-				result.InGroup = true
+
+		for paginator.HasMorePages() {
+			groups, err := paginator.NextPage(ctx)
+			if err != nil {
+				result.FailureCause = fmt.Sprintf("list groups error: %v", err)
+				return result, err
+			}
+			for _, g := range groups.Groups {
+				if g.GroupName != nil && *g.GroupName == requiredGroup {
+					result.InGroup = true
+					break
+				}
+			}
+			if result.InGroup {
 				break
 			}
 		}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // DefaultALBPublicKeyBaseURL returns the default ALB public key base URL for the given region.
@@ -29,7 +30,8 @@ func FetchALBPublicKey(ctx context.Context, baseURL, kid string) (*ecdsa.PublicK
 		return nil, fmt.Errorf("albkeys: build request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("albkeys: fetch public key for kid %q: %w", kid, err)
 	}

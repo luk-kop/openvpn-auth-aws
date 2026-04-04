@@ -24,6 +24,7 @@ go.work.sum
 /mgmt-mock
 /lambda-mock
 /alb-mock
+/lambda-router/lambda-router
 
 # PKI — generated offline, never committed
 pki/

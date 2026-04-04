@@ -47,6 +47,9 @@ type Config struct {
 	EMFInterval          time.Duration
 	LogFormat            string
 
+	// Session limits
+	MaxSessionDuration time.Duration
+
 	// HTML templates
 	TemplatesDir string
 	ServerName   string
@@ -60,12 +63,12 @@ func Parse() (Config, error) {
 	flag.StringVar(&cfg.ManagementPasswordFile, "management-password-file", getenv("VPN_AUTH_MANAGEMENT_PASSWORD_FILE", "/etc/openvpn/management-pw"), "file containing the management password")
 	flag.StringVar(&cfg.HMACSecret, "hmac-secret", getenv("VPN_AUTH_HMAC_SECRET", ""), "HMAC secret for signing state values")
 	flag.StringVar(&cfg.RequiredGroup, "required-group", getenv("VPN_AUTH_REQUIRED_GROUP", ""), "required Cognito group for VPN access")
-	flag.BoolVar(&cfg.CNCrossCheck, "cn-cross-check", getBool("VPN_AUTH_CN_CROSS_CHECK", true), "enable CN cross-check against ALB JWT email claim")
+	flag.BoolVar(&cfg.CNCrossCheck, "cn-cross-check", getBoolOrCollect("VPN_AUTH_CN_CROSS_CHECK", true, &envErrors), "enable CN cross-check against ALB JWT email claim")
 	flag.DurationVar(&cfg.HandWindow, "hand-window", getDurationOrCollect("VPN_AUTH_HAND_WINDOW", 300*time.Second, &envErrors), "pending auth timeout (must match OpenVPN server hand-window)")
 	flag.DurationVar(&cfg.ReconnectMaxInterval, "reconnect-max-interval", getDurationOrCollect("VPN_AUTH_RECONNECT_MAX_INTERVAL", 5*time.Second, &envErrors), "max backoff between management socket reconnect attempts")
 	flag.DurationVar(&cfg.ShutdownGracePeriod, "shutdown-grace-period", getDurationOrCollect("VPN_AUTH_SHUTDOWN_GRACE_PERIOD", 300*time.Second, &envErrors), "grace period for shutdown")
-	flag.BoolVar(&cfg.CheckGroupsOnReauth, "check-groups-on-reauth", getBool("VPN_AUTH_CHECK_GROUPS_ON_REAUTH", false), "check required group during CLIENT:REAUTH")
-	flag.BoolVar(&cfg.ReauthCache, "reauth-cache", getBool("VPN_AUTH_REAUTH_CACHE", false), "allow cached reauth decisions during identity provider outage")
+	flag.BoolVar(&cfg.CheckGroupsOnReauth, "check-groups-on-reauth", getBoolOrCollect("VPN_AUTH_CHECK_GROUPS_ON_REAUTH", false, &envErrors), "check required group during CLIENT:REAUTH")
+	flag.BoolVar(&cfg.ReauthCache, "reauth-cache", getBoolOrCollect("VPN_AUTH_REAUTH_CACHE", false, &envErrors), "allow cached reauth decisions during identity provider outage")
 	flag.DurationVar(&cfg.ReauthTimeout, "reauth-timeout", getDurationOrCollect("VPN_AUTH_REAUTH_TIMEOUT", 5*time.Second, &envErrors), "timeout for Cognito calls during CLIENT:REAUTH")
 	flag.DurationVar(&cfg.RenegInterval, "reneg-interval", getDurationOrCollect("VPN_AUTH_RENEG_INTERVAL", 3600*time.Second, &envErrors), "OpenVPN reneg-sec value (for reauth cache TTL calculation)")
 	flag.StringVar(&cfg.InstanceID, "instance-id", getenv("VPN_AUTH_INSTANCE_ID", "local-dev"), "instance identifier used in EMF metrics")
@@ -77,8 +80,8 @@ func Parse() (Config, error) {
 	// ALB flags
 	flag.StringVar(&cfg.CallbackURL, "callback-url", getenv("VPN_AUTH_CALLBACK_URL", ""), "full callback URL including path (e.g. https://vpn-auth.example.com/callback/01/udp); daemon appends ?state=...")
 	flag.StringVar(&cfg.ALBARN, "alb-arn", getenv("VPN_AUTH_ALB_ARN", ""), "ALB ARN for validating the signer field in ALB JWTs (omit to skip JWT signature validation in dev/test)")
-	flag.BoolVar(&cfg.CognitoSkipReauth, "cognito-skip-reauth", getBool("VPN_AUTH_COGNITO_SKIP_REAUTH", false), "skip Cognito AdminGetUser call on CLIENT:REAUTH (dev/test only)")
-	flag.BoolVar(&cfg.CognitoGroupsClaims, "cognito-groups-from-claims", getBool("VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS", false), "read group membership from ALB JWT claims instead of AdminListGroupsForUser")
+	flag.BoolVar(&cfg.CognitoSkipReauth, "cognito-skip-reauth", getBoolOrCollect("VPN_AUTH_COGNITO_SKIP_REAUTH", false, &envErrors), "skip Cognito AdminGetUser call on CLIENT:REAUTH (dev/test only)")
+	flag.BoolVar(&cfg.CognitoGroupsClaims, "cognito-groups-from-claims", getBoolOrCollect("VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS", false, &envErrors), "read group membership from ALB JWT claims instead of AdminListGroupsForUser")
 
 	// Cognito identity
 	flag.StringVar(&cfg.CognitoIssuerURL, "cognito-issuer-url", getenv("VPN_AUTH_COGNITO_ISSUER_URL", ""), "Cognito issuer URL for JWT validation")
@@ -87,10 +90,11 @@ func Parse() (Config, error) {
 	// AWS configuration
 	flag.StringVar(&cfg.ALBPublicKeyBaseURL, "alb-public-key-base-url", getenv("VPN_AUTH_ALB_PUBLIC_KEY_BASE_URL", ""), "base URL for ALB public key endpoint (default: https://public-keys.auth.elb.{region}.amazonaws.com)")
 	flag.StringVar(&cfg.AWSRegion, "aws-region", getenv("AWS_REGION", "eu-west-1"), "AWS region")
-	flag.BoolVar(&cfg.SingleSessionPerUser, "single-session-per-user", getBool("VPN_AUTH_SINGLE_SESSION_PER_USER", true), "enforce one active VPN session per certificate CN")
-	flag.BoolVar(&cfg.EMFMetrics, "emf-metrics", getBool("VPN_AUTH_EMF_METRICS", false), "emit CloudWatch EMF metrics to stdout")
+	flag.BoolVar(&cfg.SingleSessionPerUser, "single-session-per-user", getBoolOrCollect("VPN_AUTH_SINGLE_SESSION_PER_USER", true, &envErrors), "enforce one active VPN session per certificate CN")
+	flag.BoolVar(&cfg.EMFMetrics, "emf-metrics", getBoolOrCollect("VPN_AUTH_EMF_METRICS", false, &envErrors), "emit CloudWatch EMF metrics to stdout")
 	flag.DurationVar(&cfg.EMFInterval, "emf-interval", getDurationOrCollect("VPN_AUTH_EMF_INTERVAL", 10*time.Second, &envErrors), "interval for EMF heartbeat metrics (0 to disable heartbeat only)")
 	flag.StringVar(&cfg.LogFormat, "log-format", getenv("VPN_AUTH_LOG_FORMAT", "text"), "log output format: text or json")
+	flag.DurationVar(&cfg.MaxSessionDuration, "max-session-duration", getDurationOrCollect("VPN_AUTH_MAX_SESSION_DURATION", 0, &envErrors), "maximum VPN session duration; 0 to disable (e.g. 8h, 10h, 12h)")
 	flag.StringVar(&cfg.TemplatesDir, "templates-dir", getenv("VPN_AUTH_TEMPLATES_DIR", ""), "path to custom HTML templates (overrides built-in)")
 	flag.StringVar(&cfg.ServerName, "server-name", getenv("VPN_AUTH_SERVER_NAME", ""), "human-readable server name exposed to HTML templates")
 
@@ -148,8 +152,18 @@ func (c Config) Validate() error {
 	if c.AuthTimeout >= c.HandWindow {
 		slog.Warn("auth-timeout should be less than hand-window to ensure AUTH_FAILED reaches the client before it self-restarts", "auth_timeout", c.AuthTimeout, "hand_window", c.HandWindow)
 	}
+	if c.MaxSessionDuration != 0 && c.MaxSessionDuration < time.Minute {
+		problems = append(problems, "max-session-duration must be 0 (disabled) or >= 1m")
+	}
+	if c.MaxSessionDuration > 0 && c.MaxSessionDuration < c.RenegInterval {
+		slog.Warn("max-session-duration is shorter than reneg-interval — sessions will be killed before the first TLS reauth fires",
+			"max_session_duration", c.MaxSessionDuration, "reneg_interval", c.RenegInterval)
+	}
 	if c.HMACSecret != "" && len(c.HMACSecret) < 16 {
 		problems = append(problems, fmt.Sprintf("hmac-secret must be at least 16 bytes, got %d", len(c.HMACSecret)))
+	}
+	if c.CallbackPort < 1 || c.CallbackPort > 65535 {
+		problems = append(problems, fmt.Sprintf("callback-port must be in range 1-65535, got %d", c.CallbackPort))
 	}
 	// Estimate whether the WEB_AUTH URL will fit in the 229-byte OpenVPN CE
 	// INFOMSG buffer. The URL is: OPEN_URL:<callback-url>?state=<blob>
@@ -177,7 +191,7 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-func getBool(key string, fallback bool) bool {
+func getBoolOrCollect(key string, fallback bool, errs *[]string) bool {
 	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
 		return fallback
@@ -188,6 +202,7 @@ func getBool(key string, fallback bool) bool {
 	case "0", "false", "no", "off":
 		return false
 	default:
+		*errs = append(*errs, fmt.Sprintf("invalid bool in %s: %q", key, v))
 		return fallback
 	}
 }

@@ -29,10 +29,11 @@ type PendingSession struct {
 
 // ALBClaims holds the parsed claims from the ALB-signed x-amzn-oidc-data JWT.
 type ALBClaims struct {
-	Sub   string `json:"sub"`
-	Email string `json:"email"`
-	Exp   int64  `json:"exp"`
-	Iss   string `json:"iss"`
+	Sub             string `json:"sub"`
+	Email           string `json:"email"`
+	Exp             int64  `json:"exp"`
+	Iss             string `json:"iss"`
+	CognitoUsername string `json:"cognito:username"`
 }
 
 type IdentityResult struct {
@@ -63,6 +64,7 @@ type Metrics interface {
 	CallbackReceived()
 	CallbackRejected(reason string)
 	TokenExchangeError(reason string)
+	SessionExpired(reason string)
 }
 
 type DecisionType int
@@ -86,4 +88,10 @@ type Decision struct {
 
 type DecisionSink interface {
 	Send(Decision) error
+}
+
+// AuthSuccessTracker is notified when the callback flow successfully sends
+// client-auth for a CID. Implemented by *Handler.
+type AuthSuccessTracker interface {
+	MarkAuthenticated(cid, cognitoUsername string)
 }

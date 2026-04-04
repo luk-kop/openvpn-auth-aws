@@ -42,27 +42,29 @@ type fakeMetrics struct {
 	rejectedReasons []string
 }
 
-func (m *fakeMetrics) Heartbeat(bool, int)       {}
-func (m *fakeMetrics) AuthAttempt(string)        {}
-func (m *fakeMetrics) AuthSuccess()              {}
-func (m *fakeMetrics) AuthDenied(string)         {}
-func (m *fakeMetrics) ReauthSuccess()            {}
-func (m *fakeMetrics) ReauthDenied(string)       {}
-func (m *fakeMetrics) ReauthCacheHit()           {}
-func (m *fakeMetrics) CallbackReceived()         {}
+func (m *fakeMetrics) Heartbeat(bool, int) {}
+func (m *fakeMetrics) AuthAttempt(string)  {}
+func (m *fakeMetrics) AuthSuccess()        {}
+func (m *fakeMetrics) AuthDenied(string)   {}
+func (m *fakeMetrics) ReauthSuccess()      {}
+func (m *fakeMetrics) ReauthDenied(string) {}
+func (m *fakeMetrics) ReauthCacheHit()     {}
+func (m *fakeMetrics) CallbackReceived()   {}
 func (m *fakeMetrics) CallbackRejected(reason string) {
 	m.rejectedReasons = append(m.rejectedReasons, reason)
 }
 func (m *fakeMetrics) TokenExchangeError(string) {}
+func (m *fakeMetrics) SessionExpired(string)     {}
 
 // fakeGroupsChecker implements GroupsChecker for tests.
 type fakeGroupsChecker struct {
 	inGroup bool
+	enabled bool
 	err     error
 }
 
 func (f *fakeGroupsChecker) CheckUser(_ context.Context, _, _ string, _ bool) (auth.IdentityResult, error) {
-	return auth.IdentityResult{InGroup: f.inGroup}, f.err
+	return auth.IdentityResult{Enabled: f.enabled, InGroup: f.inGroup}, f.err
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +78,7 @@ func newTestServer(cfg config.Config, identity GroupsChecker) (*Server, *capture
 	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	sink := &captureSink{}
 	m := &fakeMetrics{}
-	srv, err := NewServer(sessions, signer, sink, cfg, m, identity, func() bool { return true })
+	srv, err := NewServer(sessions, signer, sink, nil, cfg, m, identity, func() bool { return true })
 	if err != nil {
 		panic("newTestServer: " + err.Error())
 	}
@@ -94,18 +96,19 @@ func newTestServerWithSessions(cfg config.Config, identity GroupsChecker) (*Serv
 		panic("newTestServerWithSessions: " + err.Error())
 	}
 	srv := &Server{
-		sessions:      sessions,
-		signer:        signer,
-		sink:          sink,
-		cfg:           cfg,
-		metrics:       m,
-		identity:      identity,
-		tmpl:          tmpl,
+		sessions:            sessions,
+		signer:              signer,
+		sink:                sink,
+		tracker:             nil,
+		cfg:                 cfg,
+		metrics:             m,
+		identity:            identity,
+		tmpl:                tmpl,
 		albARN:              cfg.ALBARN,
 		albPublicKeyBaseURL: cognito.DefaultALBPublicKeyBaseURL(cfg.AWSRegion),
 		keyCache:            make(map[string]*ecdsa.PublicKey),
-		mgmtConnected: func() bool { return true },
-		startTime:     time.Now(),
+		mgmtConnected:       func() bool { return true },
+		startTime:           time.Now(),
 	}
 	return srv, sessions, sink, m
 }
@@ -312,7 +315,7 @@ func TestHandleCallback_ALBJWTValidationFailure(t *testing.T) {
 
 func TestHandleCallback_GroupCheckFailure(t *testing.T) {
 	cfg := defaultCfg()
-	identity := &fakeGroupsChecker{inGroup: false}
+	identity := &fakeGroupsChecker{enabled: true, inGroup: false}
 	srv, sessions, sink, m := newTestServerWithSessions(cfg, identity)
 
 	sid := "group-fail-sid"
@@ -366,7 +369,7 @@ func TestHandleCallback_GroupCheckFromClaims_Failure(t *testing.T) {
 
 func TestHandleCallback_Success_DevMode(t *testing.T) {
 	cfg := defaultCfg()
-	identity := &fakeGroupsChecker{inGroup: true}
+	identity := &fakeGroupsChecker{enabled: true, inGroup: true}
 	srv, sessions, sink, m := newTestServerWithSessions(cfg, identity)
 
 	sid := "success-sid"
@@ -429,7 +432,7 @@ func TestHandleCallback_Success_WithALBJWT(t *testing.T) {
 		AWSRegion: "eu-west-1",
 		ALBARN:    albARN,
 	}
-	identity := &fakeGroupsChecker{inGroup: true}
+	identity := &fakeGroupsChecker{enabled: true, inGroup: true}
 	srv, sessions, sink, _ := newTestServerWithSessions(cfg, identity)
 	srv.keyCache["test-kid"] = &privKey.PublicKey
 
@@ -489,7 +492,7 @@ func TestHandleHealthz_Connected(t *testing.T) {
 	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	sink := &captureSink{}
 	cfg := defaultCfg()
-	srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return true })
+	srv, err := NewServer(sessions, signer, sink, nil, cfg, &fakeMetrics{}, nil, func() bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +521,7 @@ func TestHandleHealthz_Disconnected(t *testing.T) {
 	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
 	sink := &captureSink{}
 	cfg := defaultCfg()
-	srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return false })
+	srv, err := NewServer(sessions, signer, sink, nil, cfg, &fakeMetrics{}, nil, func() bool { return false })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +575,7 @@ func TestHealthzReflectsSocketState(t *testing.T) {
 				cfg := defaultCfg()
 
 				connected := tc.connected
-				srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return connected })
+				srv, err := NewServer(sessions, signer, sink, nil, cfg, &fakeMetrics{}, nil, func() bool { return connected })
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -614,7 +617,7 @@ func TestHealthzReflectsSocketState_DynamicSwitch(t *testing.T) {
 	cfg := defaultCfg()
 
 	connected := true
-	srv, err := NewServer(sessions, signer, sink, cfg, &fakeMetrics{}, nil, func() bool { return connected })
+	srv, err := NewServer(sessions, signer, sink, nil, cfg, &fakeMetrics{}, nil, func() bool { return connected })
 	if err != nil {
 		t.Fatal(err)
 	}

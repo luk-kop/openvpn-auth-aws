@@ -25,7 +25,7 @@ func ClientDeny(cid, kid, reason string) string {
 	if reason == "" {
 		reason = "denied"
 	}
-	reason = strings.NewReplacer(`"`, `'`, `\`, ``).Replace(reason)
+	reason = strings.NewReplacer(`\`, `\\`, `"`, `'`).Replace(reason)
 	return fmt.Sprintf(`client-deny %s %s "%s"`, cid, kid, reason)
 }
 

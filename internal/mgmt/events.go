@@ -1,5 +1,7 @@
 package mgmt
 
+import "time"
+
 type EventType string
 
 const (
@@ -16,6 +18,12 @@ type Event struct {
 	CID  string
 	KID  string
 	Env  map[string]string
+}
+
+type EstablishedSession struct {
+	CID         string
+	CommonName  string
+	ConnectedAt time.Time
 }
 
 func (e Event) CommonName() string {

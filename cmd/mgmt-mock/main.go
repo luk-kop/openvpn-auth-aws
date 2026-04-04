@@ -26,7 +26,7 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"time"
 )
 
 const (
@@ -36,9 +36,16 @@ const (
 
 // nextKID auto-increments per CID to simulate TLS renegotiation.
 var (
-	cidKID   = make(map[string]int)
-	cidKIDMu sync.Mutex
+	cidKID           = make(map[string]int)
+	cidKIDMu         sync.Mutex
+	activeSessions   = make(map[string]activeSession)
+	activeSessionsMu sync.Mutex
 )
+
+type activeSession struct {
+	username    string
+	connectedAt int64
+}
 
 func nextKID(cid string) string {
 	cidKIDMu.Lock()
@@ -94,7 +101,6 @@ func main() {
 	// connMu guards the active conn so the stdin loop can write to it safely.
 	var connMu sync.Mutex
 	var activeConn net.Conn
-	var disconnected atomic.Bool
 
 	// Accept loop: re-accepts after each daemon reconnect.
 	go func() {
@@ -106,7 +112,6 @@ func main() {
 				return
 			}
 			log.Println("Daemon connected")
-			disconnected.Store(false)
 
 			connMu.Lock()
 			activeConn = conn
@@ -154,6 +159,16 @@ func main() {
 					fields := strings.Fields(line)
 					if len(fields) >= 3 {
 						cid := fields[1]
+						username := ""
+						activeSessionsMu.Lock()
+						if sess, ok := activeSessions[cid]; ok {
+							username = sess.username
+						}
+						activeSessions[cid] = activeSession{
+							username:    username,
+							connectedAt: timeNowUnix(),
+						}
+						activeSessionsMu.Unlock()
 						if strings.HasPrefix(line, "client-auth ") {
 							for scanner.Scan() {
 								inner := scanner.Text()
@@ -169,14 +184,23 @@ func main() {
 						_, _ = fmt.Fprintf(conn, ">CLIENT:ADDRESS,%s,10.8.0.2,1\r\n", cid)
 						log.Printf(">> auto ESTABLISHED+ADDRESS cid=%s", cid)
 					}
+				} else if strings.HasPrefix(line, "client-kill ") {
+					fields := strings.Fields(line)
+					if len(fields) >= 2 {
+						cid := fields[1]
+						activeSessionsMu.Lock()
+						delete(activeSessions, cid)
+						activeSessionsMu.Unlock()
+					}
+				} else if strings.TrimSpace(line) == "status 3" {
+					writeStatus(conn)
 				}
 			}
 
-			disconnected.Store(true)
+			_ = conn.Close()
 			connMu.Lock()
 			activeConn = nil
 			connMu.Unlock()
-			_ = conn.Close()
 			log.Println("Daemon disconnected — waiting for reconnect...")
 		}
 	}()
@@ -291,6 +315,14 @@ func main() {
 }
 
 func sendConnect(conn net.Conn, cid, kid, username, sso, password string) {
+	activeSessionsMu.Lock()
+	if sess, ok := activeSessions[cid]; ok {
+		sess.username = username
+		activeSessions[cid] = sess
+	} else {
+		activeSessions[cid] = activeSession{username: username}
+	}
+	activeSessionsMu.Unlock()
 	_, _ = fmt.Fprintf(conn, ">CLIENT:CONNECT,%s,%s\r\n", cid, kid)
 	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,username=%s\r\n", username)
 	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,common_name=%s\r\n", username)
@@ -320,10 +352,33 @@ func sendReauth(conn net.Conn, cid, kid, username string) {
 }
 
 func sendDisconnect(conn net.Conn, cid string) {
+	activeSessionsMu.Lock()
+	delete(activeSessions, cid)
+	activeSessionsMu.Unlock()
 	_, _ = fmt.Fprintf(conn, ">CLIENT:DISCONNECT,%s\r\n", cid)
 	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,time_duration=120\r\n")
 	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,END\r\n")
 	log.Printf(">> DISCONNECT cid=%s", cid)
+}
+
+func writeStatus(conn net.Conn) {
+	_, _ = fmt.Fprintf(conn, "TITLE,OpenVPN 2.6 mock\r\n")
+	_, _ = fmt.Fprintf(conn, "HEADER,CLIENT_LIST,Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since (time_t),Username,Client ID,Peer ID\r\n")
+	_, _ = fmt.Fprintf(conn, "TIME,%d\r\n", time.Now().Unix())
+	activeSessionsMu.Lock()
+	defer activeSessionsMu.Unlock()
+	for cid, sess := range activeSessions {
+		if sess.connectedAt == 0 {
+			continue
+		}
+		_, _ = fmt.Fprintf(conn, "CLIENT_LIST,%s,10.0.0.2:51234,1,2,%d,%s,%s,0\r\n",
+			sess.username, sess.connectedAt, sess.username, cid)
+	}
+	_, _ = fmt.Fprintf(conn, "END\r\n")
+}
+
+func timeNowUnix() int64 {
+	return time.Now().Unix()
 }
 
 func printHelp() {

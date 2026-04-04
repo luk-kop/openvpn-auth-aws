@@ -17,6 +17,7 @@ func baseValidConfig() Config {
 		HandWindow:             300 * time.Second,
 		ReconnectMaxInterval:   5 * time.Second,
 		LogFormat:              "text",
+		CallbackPort:           8080,
 	}
 }
 
@@ -134,5 +135,40 @@ func TestValidate_InvalidLogFormat(t *testing.T) {
 	cfg.LogFormat = "yaml"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for invalid log-format, got nil")
+	}
+}
+
+func TestValidate_MaxSessionDuration_Zero_NoError(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.MaxSessionDuration = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error when MaxSessionDuration is 0 (disabled), got: %v", err)
+	}
+}
+
+func TestValidate_MaxSessionDuration_BelowMinimum_Error(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.MaxSessionDuration = 30 * time.Second
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when MaxSessionDuration < 1m, got nil")
+	}
+}
+
+func TestValidate_MaxSessionDuration_Valid(t *testing.T) {
+	for _, d := range []time.Duration{time.Minute, 8 * time.Hour, 12 * time.Hour} {
+		cfg := baseValidConfig()
+		cfg.MaxSessionDuration = d
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("expected no error for MaxSessionDuration=%v, got: %v", d, err)
+		}
+	}
+}
+
+func TestValidate_MaxSessionDurationShorterThanReneg_Warns(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.MaxSessionDuration = 5 * time.Minute
+	cfg.RenegInterval = time.Hour
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error (warning only), got: %v", err)
 	}
 }

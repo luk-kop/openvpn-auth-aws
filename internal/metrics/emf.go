@@ -3,6 +3,7 @@ package metrics
 import (
 	"encoding/json"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -30,23 +31,24 @@ func (e *Emitter) Heartbeat(socketConnected bool, storedSessions int) {
 				},
 			}},
 		},
-		"InstanceId":       e.instanceID,
-		"SocketConnected":  boolToInt(socketConnected),
-		"StoredSessions": storedSessions,
+		"InstanceId":      e.instanceID,
+		"SocketConnected": boolToInt(socketConnected),
+		"StoredSessions":  storedSessions,
 	})
 }
 
-func (e *Emitter) AuthAttempt(reason string)  { e.counter("AuthAttempt", reason) }
-func (e *Emitter) AuthSuccess()               { e.counter("AuthSuccess", "") }
-func (e *Emitter) AuthDenied(reason string)   { e.counter("AuthDenied", reason) }
-func (e *Emitter) ReauthSuccess()             { e.counter("ReauthSuccess", "") }
-func (e *Emitter) ReauthDenied(reason string) { e.counter("ReauthDenied", reason) }
-func (e *Emitter) ReauthCacheHit()            { e.counter("ReauthCacheHit", "") }
-func (e *Emitter) CallbackReceived()               { e.counter("CallbackReceived", "") }
-func (e *Emitter) CallbackRejected(reason string)  { e.counter("CallbackRejected", reason) }
+func (e *Emitter) AuthAttempt(reason string)      { e.counter("AuthAttempt", reason) }
+func (e *Emitter) AuthSuccess()                   { e.counter("AuthSuccess", "") }
+func (e *Emitter) AuthDenied(reason string)       { e.counter("AuthDenied", reason) }
+func (e *Emitter) ReauthSuccess()                 { e.counter("ReauthSuccess", "") }
+func (e *Emitter) ReauthDenied(reason string)     { e.counter("ReauthDenied", reason) }
+func (e *Emitter) ReauthCacheHit()                { e.counter("ReauthCacheHit", "") }
+func (e *Emitter) CallbackReceived()              { e.counter("CallbackReceived", "") }
+func (e *Emitter) CallbackRejected(reason string) { e.counter("CallbackRejected", reason) }
 func (e *Emitter) TokenExchangeError(reason string) {
 	e.counter("TokenExchangeError", reason)
 }
+func (e *Emitter) SessionExpired(reason string) { e.counter("SessionExpired", reason) }
 
 func (e *Emitter) counter(name, reason string) {
 	dims := [][]string{{"InstanceId"}}
@@ -81,7 +83,9 @@ func (e *Emitter) emit(payload map[string]any) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	enc := json.NewEncoder(e.w)
-	_ = enc.Encode(payload)
+	if err := enc.Encode(payload); err != nil {
+		slog.Warn("emf: encode failed", "error", err)
+	}
 }
 
 func boolToInt(v bool) int {

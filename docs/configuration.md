@@ -29,6 +29,7 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--reauth-cache` | `VPN_AUTH_REAUTH_CACHE` | `false` | Allow cached reauth decisions during IdP outage |
 | `--reauth-timeout` | `VPN_AUTH_REAUTH_TIMEOUT` | `5s` | Timeout for Cognito calls during `CLIENT:REAUTH` |
 | `--single-session-per-user` | `VPN_AUTH_SINGLE_SESSION_PER_USER` | `true` | Enforce one active VPN session per certificate CN |
+| `--max-session-duration` | `VPN_AUTH_MAX_SESSION_DURATION` | `0` | Maximum VPN session duration (`0` to disable). After this time, the client is forcibly disconnected. Typical values: `8h`, `10h`, `12h`. Must be `0` or `>= 1m`. When `reneg-sec=0`, this is the only enforcement mechanism for session limits. |
 | `--emf-metrics` | `VPN_AUTH_EMF_METRICS` | `false` | Emit CloudWatch EMF metrics to stdout |
 | `--emf-interval` | `VPN_AUTH_EMF_INTERVAL` | `10s` | Interval for EMF heartbeat metrics (`0` to disable heartbeat only) |
 | `--log-format` | `VPN_AUTH_LOG_FORMAT` | `text` | Log output format: `text` or `json` |
@@ -126,10 +127,11 @@ All metrics are emitted under the `VPNAuth` namespace with `InstanceId` as the p
 | `AuthDenied` | counter | `timeout`, `no_webauth`, `missing_common_name`, `url_too_long`, `internal_error` | Auth denied via `client-deny` (handler-level rejections) |
 | `CallbackRejected` | counter | see below | HTTP callback rejected (all error paths in `handleCallback`) |
 | `ReauthSuccess` | counter | — | `CLIENT:REAUTH` allowed |
-| `ReauthDenied` | counter | `missing_common_name`, `user_not_found`, `user_disabled`, `group_denied`, `cognito_error` | Reauth denied |
+| `ReauthDenied` | counter | `missing_common_name`, `user_not_found`, `user_disabled`, `group_denied`, `cognito_error`, `session_untracked` | Reauth denied |
 | `ReauthCacheHit` | counter | — | Reauth allowed from cache (Cognito unavailable) |
 | `CallbackReceived` | counter | — | Any callback request received (before validation) |
 | `TokenExchangeError` | counter | *(reason)* | Token exchange or identity provider error (defined but not yet emitted) |
+| `SessionExpired` | counter | `hard_timer`, `reauth_backstop` | Session forcibly terminated after exceeding `--max-session-duration`. `hard_timer` = expiry goroutine sent `client-kill`; `reauth_backstop` = expired session detected during `CLIENT:REAUTH` |
 
 ### CallbackRejected reasons
 

@@ -46,6 +46,14 @@ func TestClientDenyReasonSanitized(t *testing.T) {
 	}
 }
 
+func TestClientDenyBackslashEscaped(t *testing.T) {
+	got := ClientDeny("1", "2", `path\to\file`)
+	want := `client-deny 1 2 "path\\to\\file"`
+	if got != want {
+		t.Fatalf("ClientDeny() with backslashes = %q, want %q", got, want)
+	}
+}
+
 func TestClientKill(t *testing.T) {
 	if got := ClientKill("3"); got != "client-kill 3" {
 		t.Fatalf("ClientKill() = %q", got)

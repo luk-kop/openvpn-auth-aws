@@ -224,7 +224,9 @@ func handler(ctx context.Context, req events.ALBTargetGroupRequest) (events.ALBT
 		slog.Error("missing state parameter", "path", req.Path)
 		return errorPage(http.StatusBadRequest, "Bad Request", "Missing state parameter."), nil
 	}
-	upstreamURL := fmt.Sprintf("http://%s:%s/callback?state=%s", ip, port, url.QueryEscape(state))
+	// Trailing slash is required: the daemon registers GET /callback/{path...},
+	// and Go's ServeMux redirects /callback → /callback/ (307), adding a needless roundtrip.
+	upstreamURL := fmt.Sprintf("http://%s:%s/callback/?state=%s", ip, port, url.QueryEscape(state))
 
 	// Step 5: Collect OIDC headers to forward
 	// Build lowercase lookup map — ALB Lambda integration lowercases headers,

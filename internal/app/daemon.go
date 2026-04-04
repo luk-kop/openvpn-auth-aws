@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,6 +38,12 @@ type decisionSink struct {
 	done  <-chan struct{}
 }
 
+type directDecisionSink struct {
+	client *mgmt.Client
+	mu     *sync.Mutex
+	done   <-chan struct{}
+}
+
 func (s decisionSink) Send(d auth.Decision) error {
 	switch d.Type {
 	case auth.DecisionAllow:
@@ -60,6 +67,39 @@ func (s decisionSink) sendOne(cmd string) error {
 	case <-s.done:
 		return fmt.Errorf("command dropped: connection closed")
 	}
+}
+
+func (s directDecisionSink) Send(d auth.Decision) error {
+	var cmd string
+	switch d.Type {
+	case auth.DecisionAllow:
+		cmd = mgmt.ClientAuth(d.CID, d.KID)
+	case auth.DecisionAllowNT:
+		cmd = mgmt.ClientAuthNT(d.CID, d.KID)
+	case auth.DecisionDeny:
+		cmd = mgmt.ClientDeny(d.CID, d.KID, d.Reason)
+	case auth.DecisionPending:
+		cmd = mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout)
+	case auth.DecisionKill:
+		cmd = mgmt.ClientKill(d.CID)
+	default:
+		return nil
+	}
+
+	select {
+	case <-s.done:
+		return fmt.Errorf("command dropped: connection closed")
+	default:
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.done:
+		return fmt.Errorf("command dropped: connection closed")
+	default:
+	}
+	return s.client.WriteLine(cmd)
 }
 
 // DaemonSink is the DecisionSink backed by the daemon-level cmdCh.
@@ -98,6 +138,7 @@ func (s DaemonSink) trySend(cmd string) error {
 
 func New(cfg config.Config, handler *auth.Handler, sessions *auth.SessionStore, callbackServer *callback.Server, metrics auth.Metrics) *Daemon {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	handler.SetLifecycleContext(shutdownCtx)
 	return &Daemon{
 		cfg:            cfg,
 		handler:        handler,
@@ -122,6 +163,11 @@ func (d *Daemon) SetCallbackServer(srv *callback.Server) {
 
 func (d *Daemon) Run(ctx context.Context) error {
 	defer d.shutdownCancel()
+
+	if d.cfg.CNCrossCheck {
+		slog.Warn("cn-cross-check is enabled: federation requires the external IdP to map its email attribute to the same value as the OpenVPN certificate CN; misconfiguration will deny all federated users with Certificate Mismatch")
+	}
+
 	go d.heartbeatLoop(ctx)
 
 	// Start callback server — bind the port synchronously so we fail fast
@@ -131,9 +177,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("callback server listen %s: %w", callbackAddr, err)
 	}
+	cbErrCh := make(chan error, 1)
 	go func() {
 		if err := d.callbackServer.Serve(ln); err != nil {
-			slog.Error("callback server error", "error", err)
+			cbErrCh <- err
 		}
 	}()
 
@@ -141,17 +188,38 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+
+		// Check for callback server failure before attempting to dial.
+		select {
+		case err := <-cbErrCh:
+			return fmt.Errorf("callback server: %w", err)
+		default:
+		}
+
 		client, err := mgmt.Dial(ctx, d.cfg.ManagementSocket, d.cfg.ManagementPasswordFile, d.cfg.ReconnectMaxInterval)
 		if err != nil {
 			return err
 		}
 
 		d.socketConnected.Store(true)
-		err = d.handleConnection(ctx, client)
+		connCancel, err := d.handleConnection(ctx, client)
+
+		// Check for callback server failure that arrived while connected.
+		select {
+		case cbErr := <-cbErrCh:
+			connCancel()
+			d.socketConnected.Store(false)
+			_ = client.Close()
+			return fmt.Errorf("callback server: %w", cbErr)
+		default:
+		}
 
 		if ctx.Err() != nil {
-			// Signal received — keep socket open for in-flight sessions.
+			// Signal received — drain in-flight sessions before cancelling
+			// the connection context. commandWriter must stay alive until
+			// gracefulShutdown completes so queued deny commands are written.
 			d.gracefulShutdown()
+			connCancel() // safe: drain is complete
 			d.socketConnected.Store(false)
 			_ = client.Close()
 			// Shutdown callback server
@@ -171,12 +239,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
-func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) error {
+// handleConnection manages a single management socket connection. It returns
+// connCancel so the caller can control when connCtx is cancelled. The caller
+// is responsible for calling connCancel after any post-connection work
+// (e.g. gracefulShutdown) is complete.
+func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) (context.CancelFunc, error) {
 	// connCtx is cancelled when this connection ends (normal disconnect or
 	// process shutdown). The goroutine below uses it instead of the
 	// process-level ctx so it does not leak across reconnections.
+	// NOTE: connCancel is NOT deferred here — the caller owns its lifetime
+	// so that commandWriter stays alive until gracefulShutdown completes.
 	connCtx, connCancel := context.WithCancel(ctx)
-	defer connCancel()
 
 	// Unblock scanner.Scan() when the connection context is cancelled
 	// (either process shutdown or connection lost). The read deadline
@@ -186,49 +259,65 @@ func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) erro
 		_ = client.SetReadDeadline(time.Now())
 	}()
 
+	connMu := &sync.Mutex{}
 	cmdDone := make(chan struct{})
-	go func() {
-		defer close(cmdDone)
-		d.commandWriter(connCtx, client)
-	}()
-
-	// Send hold release immediately
-	select {
-	case d.cmdCh <- "hold release":
-	case <-cmdDone:
-		return nil
-	}
-
 	scanner := client.Scanner()
 	sink := decisionSink{cmdCh: d.cmdCh, done: cmdDone}
+	liveSink := directDecisionSink{client: client, mu: connMu, done: cmdDone}
+
+	snapshot, bufferedEvents, err := mgmt.BootstrapStatus(client)
+	if err != nil {
+		connCancel()
+		return connCancel, err
+	}
+
+	d.handler.SetLiveSink(liveSink)
+	defer d.handler.ClearLiveSink()
+	d.handler.RebuildSessionTrackingFromStatus(snapshot)
+
+	go func() {
+		defer close(cmdDone)
+		d.commandWriter(connCtx, client, connMu)
+	}()
+
+	for _, event := range bufferedEvents {
+		d.handler.HandleEvent(d.shutdownCtx, event, sink)
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		switch {
 		case strings.HasPrefix(line, ">CLIENT:"):
 			event, err := mgmt.ReadEvent(scanner, line)
 			if err != nil {
-				return err
+				connCancel()
+				return connCancel, err
 			}
 			d.handler.HandleEvent(d.shutdownCtx, event, sink)
 		case strings.HasPrefix(line, ">HOLD:"):
 			select {
 			case d.cmdCh <- "hold release":
 			case <-cmdDone:
-				return nil
+				connCancel()
+				return connCancel, nil
 			}
 		}
 	}
-	return scanner.Err()
+	connCancel()
+	return connCancel, scanner.Err()
 }
 
-func (d *Daemon) commandWriter(ctx context.Context, client *mgmt.Client) {
+func (d *Daemon) commandWriter(ctx context.Context, client *mgmt.Client, mu *sync.Mutex) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case cmd := <-d.cmdCh:
-			if err := client.WriteLine(cmd); err != nil {
-				slog.Error("management write failed", "error", err)
+			mu.Lock()
+			err := client.WriteLine(cmd)
+			mu.Unlock()
+			if err != nil {
+				slog.Error("management write failed", "cmd", cmd, "error", err)
 				return
 			}
 		}
