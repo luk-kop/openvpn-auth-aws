@@ -124,6 +124,8 @@ persist-key
 persist-tun
 remote-cert-tls server
 verb 3
+push-peer-info
+setenv IV_SSO webauth
 
 <ca>
 ... CA certificate ...
@@ -141,6 +143,7 @@ verb 3
 Notes:
 - **No `auth-user-pass`** — authentication happens via browser (OIDC), not username/password
 - **Certificate CN** should match the user's email in Cognito (used for CN cross-check when `--cn-cross-check=true`)
+- **OpenVPN 2.x CLI** is recommended to include `push-peer-info` and `setenv IV_SSO webauth` so the client sends WebAuth support metadata to the server consistently in the tested CLI flow
 - Client must support WebAuth (OpenVPN 2.6+ with `IV_SSO` or `IV_PROTO` flags)
 
 ## Management Interface Protocol

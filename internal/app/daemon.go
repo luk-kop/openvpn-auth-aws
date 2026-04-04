@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -32,6 +33,8 @@ type Daemon struct {
 
 	socketConnected atomic.Bool
 }
+
+const bootstrapReadTimeout = 5 * time.Second
 
 type decisionSink struct {
 	cmdCh chan<- string
@@ -265,11 +268,29 @@ func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) (con
 	sink := decisionSink{cmdCh: d.cmdCh, done: cmdDone}
 	liveSink := directDecisionSink{client: client, mu: connMu, done: cmdDone}
 
+	slog.Info("management bootstrap start")
+	if err := client.SetReadDeadline(time.Now().Add(bootstrapReadTimeout)); err != nil {
+		connCancel()
+		return connCancel, fmt.Errorf("set bootstrap read deadline: %w", err)
+	}
 	snapshot, bufferedEvents, err := mgmt.BootstrapStatus(client)
+	if clearErr := client.SetReadDeadline(time.Time{}); clearErr != nil && err == nil {
+		connCancel()
+		return connCancel, fmt.Errorf("clear bootstrap read deadline: %w", clearErr)
+	}
 	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			err = fmt.Errorf("bootstrap status 3 timeout after %s: %w", bootstrapReadTimeout, err)
+		}
+		slog.Warn("management bootstrap failed", "error", err)
 		connCancel()
 		return connCancel, err
 	}
+	slog.Info("management bootstrap complete",
+		"established_sessions", len(snapshot),
+		"buffered_events", len(bufferedEvents),
+	)
 
 	d.handler.SetLiveSink(liveSink)
 	defer d.handler.ClearLiveSink()

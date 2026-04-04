@@ -66,6 +66,43 @@ Before starting the OIDC flow, the daemon validates the `CLIENT:CONNECT` event:
 
 Each EC2 instance runs two independent daemon processes — one for UDP, one for TCP. They have separate management sockets, callback ports, and session stores with no shared state.
 
+## Management Socket Bootstrap
+
+On every management socket connection, the daemon performs a short bootstrap phase before it starts handling live `>CLIENT:*` events.
+
+Sequence:
+
+1. Connect to the OpenVPN management Unix socket
+2. Authenticate with the management password
+3. Send `hold release`
+4. Send `status 3`
+5. Parse the current OpenVPN snapshot (`HEADER`, `CLIENT_LIST`, `ROUTING_TABLE`, `GLOBAL_STATS`, `END`)
+6. Rebuild in-memory session tracking from the live OpenVPN state
+7. Enter the normal event loop and process new `>CLIENT:CONNECT`, `>CLIENT:REAUTH`, `>CLIENT:DISCONNECT`, `>CLIENT:ESTABLISHED` events
+
+This happens not only at daemon startup, but also after any management reconnect, for example:
+
+- daemon restart
+- OpenVPN restart
+- temporary management socket disconnect
+- parser or socket read error that forces a reconnect
+
+The purpose of bootstrap is to resynchronize daemon memory with the actual OpenVPN state. The daemon keeps some session-tracking data in memory, so after reconnect it must rebuild that state from `status 3` before it can safely process new client events.
+
+Bootstrap uses a short read timeout for the `status 3` snapshot. This prevents the daemon from hanging for minutes if OpenVPN is in the middle of a restart and the management socket accepts a connection but does not finish the snapshot.
+
+If bootstrap fails or times out, the daemon reconnects and retries. In that state OpenVPN may still be running, but the daemon is not yet ready to process live `CLIENT:CONNECT` events because it has not completed the initial state sync.
+
+Observed behavior during OpenVPN restart:
+
+- the first bootstrap attempt may time out while the new OpenVPN process is still coming up
+- the next reconnect attempt usually succeeds immediately
+- once bootstrap completes, the daemon resumes normal client handling
+
+From the VPN client's point of view, a UDP-based OpenVPN server restart may not appear as an explicit "session terminated" event. Instead, the client often observes missing replies, repeated `PUSH_REQUEST` retries, and then a soft restart/reconnect once its own timeout logic fires.
+
+Similarly, when a UDP client process exits locally, the server may observe repeated `ECONNREFUSED` reads before it finally declares the peer dead via `--ping-restart`. In that case the daemon may receive `>CLIENT:DISCONNECT` only when OpenVPN reaches the inactivity timeout, not immediately when the client exits.
+
 ### Single-instance mode (default)
 
 Static ALB listener rules route callbacks by server name:
@@ -185,7 +222,7 @@ flowchart TD
 | 5 | **ALB public key fetch** — fetches ECDSA public key from `https://public-keys.auth.elb.{region}.amazonaws.com/{kid}`, cached in memory | N/A (infrastructure step) | 503 (retryable) | `public_key_fetch_failed` |
 | 6 | **JWT signature + claims** — verifies ES256 signature with the ALB public key, checks `signer` matches `--alb-arn`, requires valid `exp` | Token forgery, ALB spoofing, expired tokens | 403 + deny | `jwt_validation_failed` / `invalid_jwt_claims` |
 | 7 | **CN cross-check** — compares JWT `email` claim with the client certificate's Common Name (case-insensitive) | User A authenticating with User B's browser session | 403 + deny | `cn_mismatch` |
-| 8 | **Group membership** — checks if the user belongs to the required Cognito group (via JWT `cognito:groups` claim or Cognito Admin API) | Unauthorized access by authenticated but unprivileged users | 403 + deny | `group_check_error` / `group_denied` |
+| 8 | **Group membership** — checks if the user belongs to the required Cognito group (via JWT claim such as `custom:groups` when explicitly mapped, or via Cognito Admin API) | Unauthorized access by authenticated but unprivileged users | 403 + deny | `group_check_error` / `group_denied` |
 
 All rejection reasons are emitted as `CallbackRejected` EMF metric with a `Reason` dimension. See [EMF Metrics](configuration.md#emf-metrics) for the full list.
 
@@ -203,7 +240,26 @@ The callback port is only reachable from the ALB security group (no public ingre
 
 See [AWS docs: Authenticate users using an Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-authenticate-users.html) for the full ALB authenticate action reference.
 
-Before the daemon sees a normal callback request, the ALB's `authenticate-cognito` action performs the browser login flow with Cognito and stores its own session in `AWSELBAuthSessionCookie-*` cookies. In Terraform this repo configures:
+Before the daemon sees a normal callback request, the ALB's `authenticate-cognito` action performs the browser login flow with Cognito and stores its own session in `AWSELBAuthSessionCookie-*` cookies. In the currently tested setup with native Cognito users (`supported_identity_providers = ["COGNITO"]`), the forwarded request contained these headers:
+
+- `x-amzn-oidc-data` — ES256-signed JWT from ALB. In the tested Cognito flow its payload contained `email`, `sub`, `username`, `exp`, `iss`.
+- `x-amzn-oidc-identity` — plain-text copy of the user `sub`.
+- `x-amzn-oidc-accesstoken` — raw Cognito access token. In the tested flow its payload contained `sub`, `username`, `scope`, `client_id`, `token_use`, `auth_time`, `exp`, `iat`, `iss`, `jti`, `origin_jti`, `version`.
+
+Important details from production logs for the native-Cognito flow:
+
+- `x-amzn-oidc-data` contained `username`, not `cognito:username`
+- for native Cognito users in this deployment, `username` was a UUID-like internal Cognito username, while `email` remained a separate attribute
+- `x-amzn-oidc-data` did not contain `cognito:groups`
+- `x-amzn-oidc-accesstoken` also did not contain `cognito:groups`
+- adding a user to a Cognito User Pool group did not make that group appear automatically in `x-amzn-oidc-data` for this ALB `authenticate-cognito` flow
+- adding a user to a Cognito User Pool group also did not make that group appear automatically in `x-amzn-oidc-accesstoken`
+- because of that, the daemon must treat `username` as the fallback lookup key for `AdminGetUser`
+- group checks from JWT claims only work when claims are explicitly made available in the ALB-forwarded token; in this native-Cognito deployment they were absent from both forwarded JWTs
+
+These observations are empirical for the current native-Cognito deployment. External IdP federation through Cognito may produce different forwarded claims and should be verified separately.
+
+In Terraform this repo configures:
 
 - `scope = "openid email"` so Cognito returns the user's `email` claim and ALB can include it in `x-amzn-oidc-data`
 - `session_timeout` via `alb_auth_session_timeout_hours` (default `1h`) so the ALB browser session does not outlive the short-lived daemon `state` by too much
@@ -338,7 +394,7 @@ OpenVPN triggers `>CLIENT:REAUTH` on TLS renegotiation (controlled by `reneg-sec
 
 Reauth results can be cached (`--reauth-cache=true`) to survive brief Cognito outages. The reauth flow does not depend on ALB headers or the callback server.
 
-**Federated users:** For federated Cognito users the certificate CN does not match the Cognito username (which has the form `providerName_externalId`). At authentication time the daemon stores the `cognito:username` claim from the ALB JWT alongside the session, then uses that stored value — rather than the CN — when calling `AdminGetUser` on reauth. See [Cognito Federation](cognito-federation.md) for known limitations with federated identities.
+**Federated users:** For federated Cognito users the certificate CN does not match the Cognito username (which has the form `providerName_externalId`). At authentication time the daemon stores the Cognito lookup username from the ALB callback claims alongside the session, preferring `cognito:username` when present and falling back to `username`. It then uses that stored value — rather than the CN — when calling `AdminGetUser` on reauth. See [Cognito Federation](cognito-federation.md) for known limitations with federated identities.
 
 ## Docker Compose Stack
 

@@ -104,6 +104,7 @@ Secrets Manager secrets are always created by Terraform, including when `cost_sa
 ### `make pki-client-config CN=<email> REMOTE=<host|ip>[:port]`
 
 Generates a ready-to-use `.ovpn` file with inline certificates.
+The generated config includes `push-peer-info` and `setenv IV_SSO webauth`, which are recommended for OpenVPN 2.x CLI clients so WebAuth support metadata is sent to the server consistently in the tested flow.
 
 ```bash
 make pki-client-config CN=alice@example.com REMOTE=vpn.example.com:1194

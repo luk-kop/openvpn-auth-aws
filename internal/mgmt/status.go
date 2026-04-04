@@ -60,13 +60,21 @@ func BootstrapStatus(client *Client) ([]EstablishedSession, []Event, error) {
 }
 
 func isStatusLine(line string) bool {
-	return line == "END" ||
-		strings.HasPrefix(line, "TITLE,") ||
-		strings.HasPrefix(line, "TIME,") ||
-		strings.HasPrefix(line, "HEADER,") ||
-		strings.HasPrefix(line, "CLIENT_LIST,") ||
-		strings.HasPrefix(line, "GLOBAL_STATS,") ||
-		strings.HasPrefix(line, "ROUTING_TABLE,")
+	if line == "END" {
+		return true
+	}
+	record, _, _ := strings.Cut(line, ",")
+	record = strings.TrimSpace(record)
+	if strings.Contains(record, "\t") {
+		record, _, _ = strings.Cut(line, "\t")
+		record = strings.TrimSpace(record)
+	}
+	switch record {
+	case "TITLE", "TIME", "HEADER", "CLIENT_LIST", "GLOBAL_STATS", "ROUTING_TABLE":
+		return true
+	default:
+		return false
+	}
 }
 
 type statusParser struct {
@@ -79,7 +87,7 @@ func (p *statusParser) consume(line string) (bool, error) {
 		return true, nil
 	}
 
-	fields := splitCSVLine(line)
+	fields := splitStatusLine(line)
 	if len(fields) == 0 {
 		return false, nil
 	}
@@ -137,8 +145,16 @@ func normalizeHeader(s string) string {
 	return s
 }
 
-func splitCSVLine(line string) []string {
-	// OpenVPN status 3 output is simple comma-separated text without quoted commas
-	// in the fields we consume here.
+func splitStatusLine(line string) []string {
+	// OpenVPN management `status 3` output may be comma- or tab-separated
+	// depending on the OpenVPN build/version.
+	//
+	// For tab-separated output we must preserve empty columns, because
+	// CLIENT_LIST may omit virtual addresses and other fields, producing
+	// consecutive tabs. Collapsing them shifts "Connected Since (time_t)" onto
+	// the wrong field (for example "UNDEF").
+	if strings.Contains(line, "\t") {
+		return strings.Split(line, "\t")
+	}
 	return strings.Split(line, ",")
 }

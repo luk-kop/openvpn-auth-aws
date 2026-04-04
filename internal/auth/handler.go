@@ -143,6 +143,7 @@ func (h *Handler) HandleEvent(ctx context.Context, event mgmt.Event, sink Decisi
 func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink DecisionSink) {
 	sso := strings.ToLower(event.Env["IV_SSO"])
 	if !strings.Contains(sso, "webauth") && !strings.Contains(sso, "openurl") {
+		slog.Warn("connect denied", "cid", event.CID, "kid", event.KID, "cn", event.CommonName(), "reason", "client does not support WebAuth", "iv_sso", event.Env["IV_SSO"])
 		h.metrics.AuthDenied("no_webauth")
 		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "client does not support WebAuth"})
 		return

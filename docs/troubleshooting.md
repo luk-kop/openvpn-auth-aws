@@ -36,6 +36,67 @@ cat /etc/openvpn/server/tcp.conf
 ls -la /etc/openvpn/server/
 ```
 
+### OpenVPN Management Interface
+
+The OpenVPN management socket is often the fastest way to see what OpenVPN itself thinks is happening, independently of the auth daemon logs.
+
+```bash
+# Read the management password
+cat /etc/openvpn/management-pw
+
+# Connect to the UDP management socket
+socat - UNIX-CONNECT:/run/openvpn/management-udp.sock
+
+# Connect to the TCP management socket
+socat - UNIX-CONNECT:/run/openvpn/management-tcp.sock
+```
+
+After connecting:
+
+1. Paste the management password
+2. Wait for:
+   `SUCCESS: password is correct`
+3. Run management commands interactively
+
+Useful commands:
+
+```text
+status 3
+state
+help
+version
+```
+
+Examples:
+
+```text
+# Show current clients, routing table, and global stats
+status 3
+
+# Show high-level daemon state
+state
+
+# List supported management commands
+help
+```
+
+What to look for in `status 3`:
+
+- `CLIENT_LIST` rows: active client sessions
+- `Client ID`: the CID used by the auth daemon
+- `Common Name`: certificate CN seen by OpenVPN
+- `Connected Since (time_t)`: Unix timestamp used by daemon bootstrap/session rebuild
+- `END`: if missing, the daemon bootstrap will not complete
+
+This is especially useful for:
+
+- verifying whether OpenVPN still has stale client entries after reconnects
+- checking the exact `status 3` format returned by your OpenVPN build
+- confirming whether a disconnect has already been recognized by OpenVPN
+- understanding what the daemon sees during management bootstrap
+
+Be careful: the management interface is not read-only. Some commands can disconnect clients or alter server behavior. Use diagnostic commands only unless you intentionally want to modify live state.
+
 ### Auth Daemon
 
 ```bash

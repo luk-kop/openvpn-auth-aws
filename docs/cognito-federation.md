@@ -8,10 +8,12 @@ This document explains the difference between native and federated Cognito users
 
 Native users are created directly in the Cognito User Pool — either via the AWS Console, CLI, or self-service sign-up. In this project the user pool is configured with `username_attributes = ["email"]`, which means:
 
-- The user's Cognito username **is** their email address (e.g. `user@example.com`)
-- `AdminGetUser(Username="user@example.com")` resolves the account correctly
+- Users can sign in with their email address
+- The Cognito `email` attribute is present and verified
+- The internal Cognito `Username` is **not guaranteed** to be the email address
+- In observed production users, Cognito stored a UUID-like internal `Username` and exposed the same value as `sub`
 - `UserStatus` is `CONFIRMED` for active accounts
-- The certificate CN (email) matches the Cognito username directly
+- The certificate CN (email) should match the `email` attribute, not the internal Cognito `Username`
 
 This is the default and fully supported configuration.
 
@@ -21,11 +23,11 @@ Federated users authenticate through an external identity provider (SAML, OIDC, 
 
 | Property | Native user | Federated user |
 |---|---|---|
-| Cognito username | `user@example.com` (email) | `{ProviderName}_{identifier}` (e.g. `Google_1234567890`, `MySAML_user@corp.com`) |
+| Cognito username | implementation-specific; in observed production users this was a UUID-like internal identifier | `{ProviderName}_{identifier}` (e.g. `Google_1234567890`, `MySAML_user@corp.com`) |
 | `UserStatus` | `CONFIRMED` | `EXTERNAL_PROVIDER` |
-| `sub` in JWT | Cognito UUID | Cognito UUID (same) |
+| `sub` in JWT | Cognito UUID; in observed native users it matched `Username` | Cognito UUID |
 | `email` in JWT | from Cognito attribute | from IdP attribute mapping (see below) |
-| `cognito:username` in JWT | `user@example.com` | `{ProviderName}_{identifier}` — always present, no extra config needed |
+| `username` in ALB-forwarded JWT | internal Cognito `Username`; in observed production users this was a UUID-like identifier | `{ProviderName}_{identifier}` or Cognito UUID-style username |
 
 The Cognito username for federated users always follows the format `{ProviderName}_{identifier}` — this cannot be changed. The `{identifier}` part depends on the provider type:
 
@@ -119,11 +121,11 @@ Two separate JWT claims serve two separate purposes — and they have different 
 | Claim | Value (SAML example) | Used for | Requires extra config? |
 |---|---|---|---|
 | `claims.Email` | `user@corp.com` | CN cross-check | **Yes** — requires `email` attribute mapping in Terraform |
-| `cognito:username` | `MySAML_user@corp.com` | `AdminGetUser` lookup | **No** — always present in the JWT, set by Cognito automatically |
+| `username` | `MySAML_user@corp.com` | `AdminGetUser` lookup through ALB callback | No extra daemon config, but this is what ALB actually forwarded in production logs |
 
 **CN cross-check** (`--cn-cross-check`) compares `claims.Email` against the certificate CN. `claims.Email` is only populated if the Cognito `attribute_mapping` maps the IdP's email attribute (e.g. the ADFS URN above) to the Cognito `email` attribute. Without this mapping the callback fails before reaching the cross-check.
 
-**`AdminGetUser`** requires the full `{ProviderName}_{NameID}` Cognito username. The `cognito:username` JWT claim always contains exactly this value — Cognito populates it automatically regardless of NameID format. No additional attribute mapping is needed. This is the correct lookup key for the daemon to use (see `CODE_REVIEW_EXTERNAL.md` for the code fix).
+**`AdminGetUser`** requires the full Cognito username. In this project's ALB callback flow, the observed `x-amzn-oidc-data` payload contained `username` and did **not** contain `cognito:username`. The daemon therefore uses `cognito:username` when present and falls back to `username`. No separate attribute mapping is needed for this lookup key.
 
 ## Attribute Mapping Requirement
 
@@ -164,7 +166,8 @@ Without the `email` attribute mapping, `claims.Email` in the ALB JWT is empty an
 
 > **Summary of what requires configuration vs what is automatic:**
 > - `email` attribute mapping → **required** for CN cross-check (`claims.Email`). Must be configured explicitly for each IdP in Terraform.
-> - `cognito:username` → **automatic**. Cognito always includes it in the JWT regardless of IdP type or NameID format. No attribute mapping needed. This is the correct lookup key for `AdminGetUser` and works identically for SAML, OIDC, and social providers.
+> - ALB-forwarded lookup key for `AdminGetUser` → in observed production traffic for the native-Cognito flow this was `username`, not `cognito:username`. The daemon now supports both, preferring `cognito:username` and falling back to `username`.
+> - Cognito User Pool group membership → in observed production traffic for the native-Cognito flow, it did **not** automatically appear in either `x-amzn-oidc-data` or `x-amzn-oidc-accesstoken`. Group membership was therefore verified through the Cognito Admin API. External IdP federation may differ and must be verified empirically.
 
 ## CN Cross-Check and Federated Users
 
@@ -184,7 +187,7 @@ For this to work with federated users, three conditions must all be true:
 
 If conditions 1 or 2 are not met, the callback fails with `"jwt validation failed"` (empty email claim). If condition 3 is not met — for example, the IdP provides `user@idp-domain.com` but the certificate CN is `user@corp.com` — the callback fails with `"Certificate Mismatch"`.
 
-`cognito:username` (`Google_1234567890`) is **not** used for the CN cross-check and cannot be: it would never match an email address in the certificate.
+`username` / `cognito:username` is **not** used for the CN cross-check and cannot be: it would never match an email address in the certificate.
 
 ## Daemon Configuration for External IdP
 
@@ -198,6 +201,36 @@ resource "aws_cognito_user_pool_client" "this" {
   supported_identity_providers = ["COGNITO", "Google"]  # add IdP name here
 }
 ```
+
+### What Must Be Verified For External IdP
+
+For external IdP federation, the exact ALB-forwarded claims must be verified empirically in a real callback flow. Do not assume they will match the native-Cognito flow.
+
+At minimum, verify:
+
+1. Which identifier claims appear in `x-amzn-oidc-data`
+   Examples to check: `username`, `cognito:username`, `sub`, `email`
+2. Which identifier claim works as the `AdminGetUser` / `AdminListGroupsForUser` lookup key
+3. Whether any group claims appear in either:
+   - `x-amzn-oidc-data`
+   - `x-amzn-oidc-accesstoken`
+4. Whether those group claims are native Cognito groups, custom mapped claims, or absent entirely
+
+Recommended validation procedure:
+
+1. Create a federated test user and add it to the required Cognito group
+2. Run one successful browser callback through the ALB
+3. Log and inspect:
+   - forwarded request headers
+   - raw `x-amzn-oidc-data` claims
+   - raw `x-amzn-oidc-accesstoken` claims
+4. Test `AdminGetUser` manually with each candidate identifier until the correct lookup key is confirmed
+5. Only then decide whether group checks should use:
+   - Cognito Admin API
+   - forwarded JWT claims
+   - custom mapped claims such as `custom:groups`
+
+Until that verification is done, the safe default for external IdP deployments is to assume that group membership may need to be resolved through the Cognito Admin API rather than through ALB-forwarded claims.
 
 ### Daemon flags for federated deployments
 
@@ -215,7 +248,7 @@ Until the fixes described in `CODE_REVIEW_EXTERNAL.md` are implemented, the only
 --cognito-skip-reauth=true
 ```
 
-This bypasses both broken paths at the cost of not verifying user account status on TLS renegotiation. Group membership is read from the `cognito:groups` JWT claim instead of the Cognito API, which requires Cognito to be configured to include `cognito:groups` in the token (this is the default when users belong to User Pool groups).
+This bypasses both broken paths at the cost of not verifying user account status on TLS renegotiation. Group membership is read from JWT claims instead of the Cognito API, which requires those claims to be present in the ALB-forwarded token. In observed ALB traffic, `cognito:groups` was not present by default, so claim-based group checks require explicit claim mapping such as `custom:groups`.
 
 ## AWS Documentation References
 

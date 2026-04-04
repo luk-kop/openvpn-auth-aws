@@ -463,6 +463,9 @@ func extractALBClaims(mc *jwt.MapClaims) (auth.ALBClaims, error) {
 	sub, _ := raw["sub"].(string)
 	iss, _ := raw["iss"].(string)
 	cognitoUsername, _ := raw["cognito:username"].(string)
+	if cognitoUsername == "" {
+		cognitoUsername, _ = raw["username"].(string)
+	}
 
 	if email == "" {
 		return auth.ALBClaims{}, fmt.Errorf("missing or empty email claim")

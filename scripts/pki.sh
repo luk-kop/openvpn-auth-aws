@@ -208,6 +208,8 @@ persist-key
 persist-tun
 remote-cert-tls server
 verb 3
+push-peer-info
+setenv IV_SSO webauth
 
 cipher AES-256-GCM
 data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
