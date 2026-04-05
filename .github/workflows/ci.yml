@@ -2,8 +2,8 @@ name: CI
 
 on:
   push:
-    branches:
-      - '**'
+    branches-ignore:
+      - main
     paths-ignore:
       - '**.md'
   pull_request:
@@ -25,11 +25,19 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Lint
+      - name: Lint daemon
         uses: golangci/golangci-lint-action@v9
 
-      - name: Vet
+      - name: Vet daemon
         run: go vet ./...
+
+      - name: Lint Lambda Router
+        uses: golangci/golangci-lint-action@v9
+        with:
+          working-directory: lambda-router
+
+      - name: Vet Lambda Router
+        run: cd lambda-router && go vet ./...
 
   test:
     runs-on: ubuntu-latest

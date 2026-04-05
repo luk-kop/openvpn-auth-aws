@@ -77,7 +77,7 @@ Expected result: the daemon emits a `WEB_AUTH` URL, the browser callback is proc
 
 ```bash
 make build          # build all binaries (daemon, mgmt-mock, alb-mock)
-make build-lambda   # build Lambda Router package (outputs lambda-router/lambda.zip)
+make build-lambda   # build Lambda Router package (outputs lambda-router/lambda-arm64.zip + lambda-amd64.zip)
 make test           # unit tests (go test -v -short ./...)
 ```
 

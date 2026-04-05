@@ -29,18 +29,12 @@ jobs:
       - name: Build daemon (linux/amd64)
         env:
           GOARCH: amd64
-        run: |
-          go build -ldflags="-s -w" -o openvpn-auth-daemon-linux-amd64 ./cmd/openvpn-auth-daemon
-          go build -ldflags="-s -w" -o mgmt-mock-linux-amd64 ./cmd/mgmt-mock
-          go build -ldflags="-s -w" -o alb-mock-linux-amd64 ./cmd/alb-mock
+        run: go build -ldflags="-s -w" -o openvpn-auth-daemon-linux-amd64 ./cmd/openvpn-auth-daemon
 
       - name: Build daemon (linux/arm64)
         env:
           GOARCH: arm64
-        run: |
-          go build -ldflags="-s -w" -o openvpn-auth-daemon-linux-arm64 ./cmd/openvpn-auth-daemon
-          go build -ldflags="-s -w" -o mgmt-mock-linux-arm64 ./cmd/mgmt-mock
-          go build -ldflags="-s -w" -o alb-mock-linux-arm64 ./cmd/alb-mock
+        run: go build -ldflags="-s -w" -o openvpn-auth-daemon-linux-arm64 ./cmd/openvpn-auth-daemon
 
       - name: Build Lambda Router
         run: make build-lambda

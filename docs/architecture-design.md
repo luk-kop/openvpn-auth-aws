@@ -519,7 +519,7 @@ The daemon infers local dev behavior from its configuration — no hidden mode s
 | Config state | Behavior |
 |---|---|
 | `--alb-arn` omitted | Skip ALB JWT signature and `signer` validation (accepts unsigned JWTs from alb-mock) |
-| `--hmac-secret` set (no `--hmac-secret-arn`) | Use local HMAC secret, skip Secrets Manager |
+| `--hmac-secret` set | Use local HMAC secret directly (no Secrets Manager integration — the daemon only supports a static `--hmac-secret` value) |
 | `--cognito-user-pool-id` omitted | Use static identity checker automatically — no AWS credentials needed |
 | `--cognito-groups-from-claims` | Read groups from `x-amzn-oidc-data` JWT claims instead of calling `AdminListGroupsForUser`. Use with SAML `custom:groups` mapping or in local dev. |
 | `--cognito-skip-reauth` | Skip `AdminGetUser` call on reauth — auto-approve renegotiation without verifying user status in Cognito. |

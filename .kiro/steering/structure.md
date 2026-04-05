@@ -16,7 +16,7 @@ openvpn-auth-aws/
 │   ├── metrics/    # CloudWatch EMF metrics
 │   ├── mgmt/       # OpenVPN management socket protocol (parser + command writer)
 │   └── secrets/    # HMAC signing via static secret
-├── lambda-router/ # Go Lambda proxy for multi-instance EC2 callback routing
+├── lambda-router/ # Go Lambda proxy for multi-instance EC2 callback routing (includes templates/error.html)
 ├── terraform/     # AWS infrastructure (modules: alb, cognito, lambda-router, nlb, vpn-server)
 ├── scripts/       # PKI management script (pki.sh)
 ├── pki/           # Generated PKI artifacts (CA, server/client certs, TLS auth key)
@@ -27,7 +27,7 @@ openvpn-auth-aws/
 
 ## Key Files
 
-- `internal/auth/types.go` — all shared interfaces (`IdentityChecker`, `StateSigner`, `Metrics`, `DecisionSink`) and domain types (`PendingSession`, `Decision`, `DecisionType`, `SessionStatus`, `ALBClaims`, `IdentityResult`)
+- `internal/auth/types.go` — all shared interfaces (`IdentityChecker`, `StateSigner`, `Metrics`, `DecisionSink`, `AuthSuccessTracker`) and domain types (`PendingSession`, `Decision`, `DecisionType`, `SessionStatus`, `ALBClaims`, `IdentityResult`)
 - `internal/auth/handler.go` — central auth orchestration; handles `CLIENT:CONNECT`, `CLIENT:REAUTH`, `CLIENT:DISCONNECT`, `CLIENT:ESTABLISHED`
 - `internal/auth/sessions.go` — in-memory session store with TTL reaper
 - `internal/auth/state.go` — HMAC-signed state blob encode/decode (`StatePayload`: `SID`, `IAT`, `EXP`)
@@ -36,8 +36,7 @@ openvpn-auth-aws/
 - `internal/callback/render.go` — HTML template loading (`//go:embed`), rendering with buffer-first pattern, plain text fallback
 - `internal/callback/templates/` — embedded HTML templates (`success.html`, `error.html`) with inline CSS and dark mode
 - `internal/cognito/albkeys.go` — fetches ALB EC public keys from `public-keys.auth.elb.{region}.amazonaws.com`
-- `internal/cognito/client.go` — `Checker` (Cognito `AdminListGroupsForUser` / `AdminGetUser`) and `StaticChecker` (local dev mode)
-- `internal/cognito/jwks.go` — `JWKSCache` for Cognito JWKS key fetching and `ValidateIDToken` (RSA)
+- `internal/cognito/client.go` — `Checker` (Cognito `AdminGetUser` + `AdminListGroupsForUser`) and `StaticChecker` (local dev mode)
 - `internal/mgmt/parser.go` — OpenVPN management protocol line parser
 - `internal/mgmt/events.go` — management event types
 - `internal/mgmt/commands.go` — management command writer (client-auth, client-deny, etc.)
