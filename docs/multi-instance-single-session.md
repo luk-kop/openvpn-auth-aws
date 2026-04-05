@@ -6,11 +6,39 @@
 
 In multi-instance (ASG) mode this means enforcement is **per-instance only**. If a user connects to instance A and then connects again to instance B, instance B has no knowledge of the existing session on instance A and cannot evict it. The user ends up with concurrent sessions on two different instances.
 
-## Proposed Fix: DynamoDB Shared Session Store
+---
 
-Replace the in-memory `cnToActiveCID` map with a DynamoDB table shared across all instances. Eviction is **event-driven** — triggered synchronously on `CLIENT:CONNECT`, the same as today, with an extra network hop to the owning instance.
+## Options
 
-The same table can serve several additional purposes with minimal overhead (see [Additional Uses](#additional-uses)).
+### Option 1: Accept the Limitation (recommended for most deployments)
+
+The scenario where the same user simultaneously hits two different instances is uncommon. Under NLB load balancing, reconnects from the same source IP typically land on the same instance due to source-IP hashing. When it does happen, the user ends up with two concurrent sessions — which most deployments can tolerate.
+
+**Effort:** none — the limitation is already documented.
+
+**Trade-off:** strictness of single-session enforcement is degraded in multi-instance mode, but the practical impact is low.
+
+### Option 2: NLB Sticky Sessions
+
+Configure the NLB with source-IP stickiness so reconnects from the same client always route to the same instance. This covers the most common case (same user, same device reconnecting) without any daemon code changes.
+
+**Effort:** Terraform-only change to the NLB target group.
+
+**Trade-off:** does not help if the same user connects from two different IPs or devices simultaneously. Not a strict fix, but a cheap mitigation.
+
+### Option 3: DynamoDB Shared Session Store
+
+Replace the in-memory `cnToActiveCID` map with a DynamoDB table shared across all instances. Eviction is **event-driven** — triggered synchronously on `CLIENT:CONNECT`, same as today, with an extra network hop to the owning instance.
+
+**Effort:** significant — new daemon package, internal HTTP endpoint, heartbeat goroutine, Terraform resources, new config flags, additional failure modes to handle.
+
+**Trade-off:** the only true fix for strict cross-instance enforcement. The implementation complexity is justified if you also want the [additional benefits](#additional-uses) (fleet-wide session visibility, instance heartbeat, reauth cache) — the infrastructure cost is then shared across multiple features. If single-session enforcement is the sole goal, this is likely overengineering for most deployments.
+
+> **DynamoDB overhead:** connect/disconnect events are infrequent — the added latency is ~1-5ms per `CLIENT:CONNECT`. At VPN traffic volumes, DynamoDB on-demand billing costs cents per month.
+
+---
+
+## Option 3 Design: DynamoDB Shared Session Store
 
 ### Connect Flow
 
@@ -30,11 +58,11 @@ New CLIENT:CONNECT for alice@example.com on instance B
   └─ Proceed with normal auth flow (client-pending-auth → callback → client-auth)
 ```
 
-No polling is needed — eviction happens at connect time, consistent with the existing single-instance behaviour.
+No polling needed — eviction happens at connect time, consistent with existing single-instance behaviour.
 
 ### DynamoDB Table Design
 
-Two record types in a single table, distinguished by a `record_type` attribute:
+Two record types in a single table, distinguished by a `pk` prefix:
 
 **Session record** (one per active CN):
 
@@ -72,47 +100,35 @@ POST /internal/evict/{cid}
 
 | Scenario | Behaviour |
 |----------|-----------|
-| Instance A heartbeat expired / missing | Skip HTTP eviction call — instance is gone. The old OpenVPN session times out via `ping-restart`. |
+| Instance A heartbeat expired / missing | Skip HTTP eviction call — instance is gone. Old session times out via `ping-restart`. |
 | Instance A alive but HTTP eviction fails | Log and continue. Old session times out via `ping-restart`. |
-| DynamoDB write failure on new connect | Soft error — log, continue with auth. Single-session enforcement degrades gracefully rather than blocking the connect. |
-| Daemon crash without cleanup | Stale session and heartbeat records are removed automatically by TTL. |
-| Simultaneous connects for the same CN | DynamoDB conditional writes (`ConditionExpression`) serialise the eviction and prevent races. |
+| DynamoDB write failure on new connect | Soft error — log, continue with auth. Enforcement degrades gracefully rather than blocking the connect. |
+| Daemon crash without cleanup | Stale records removed automatically by TTL. |
+| Simultaneous connects for the same CN | DynamoDB conditional writes (`ConditionExpression`) serialise eviction and prevent races. |
 
 ---
 
 ## Additional Uses
 
-The same DynamoDB table can serve additional purposes at low extra cost.
+The same DynamoDB table can serve additional purposes at low extra cost — which is the main reason to choose Option 3 over simply accepting the limitation.
 
 ### Fleet-wide Session Visibility
 
-Session records already contain `cn`, `instance_ip`, `cid`, and `connected_at`. Operators can query the table to get a fleet-wide view of who is connected and on which instance — without SSM-ing into each instance and running `status 3`. This is currently not possible at all in multi-instance mode.
-
-A GSI on `instance_ip` allows per-instance queries (e.g. "which sessions are on this instance?"), useful when draining an instance before scale-in.
+Session records contain `cn`, `instance_ip`, `cid`, and `connected_at`. Operators can query the table for a fleet-wide view of who is connected and on which instance — without SSM-ing into each instance and running `status 3`. A GSI on `instance_ip` allows per-instance queries, useful when draining an instance before scale-in.
 
 ### Instance Heartbeat
 
-Each daemon writes a `heartbeat#<instance_ip>` record every `heartbeat_interval` (e.g. 30s) with a TTL of `2 × heartbeat_interval`. Before making an HTTP eviction call, the connecting instance reads the heartbeat record:
-
-- **Heartbeat present and recent** — instance is alive, proceed with the HTTP call
-- **Heartbeat missing or TTL expired** — instance is gone, skip the HTTP call, clean up the stale session record
-
-This avoids unnecessary connection timeouts during eviction and makes the edge case handling deterministic.
+Each daemon writes a `heartbeat#<instance_ip>` record every `heartbeat_interval` (e.g. 30s). Before making an HTTP eviction call, the connecting instance reads the heartbeat to determine whether the owning instance is still alive — avoiding unnecessary connection timeouts and making edge case handling deterministic.
 
 ### Reauth Cache
 
-The existing `--reauth-cache` stores successful reauth results in memory, keyed by username. Moving this to DynamoDB means:
+The existing `--reauth-cache` stores successful reauth results in memory. Moving this to DynamoDB means a restarted daemon retains cached results for active sessions, surviving brief Cognito outages across restarts.
 
-- A restarted daemon still has cached results for active sessions (survives brief Cognito outages across restarts)
-- A new instance that picks up a reconnecting user already has the cache entry
-
-Reauth cache records can share the same table with a `pk` of `reauth#<username>` and a short TTL (`reneg-interval + 10m`, same as the current in-memory TTL).
-
-> **Note:** The benefit here is marginal — reauth is always handled by the instance that owns the connection, so the cache is usually warm in single-instance mode. The main gain is resilience across daemon restarts.
+> **Note:** The benefit is marginal — reauth is always handled by the instance that owns the connection, so the cache is usually already warm. The main gain is resilience across daemon restarts.
 
 ---
 
-## Required Changes
+## Required Changes (Option 3)
 
 **Daemon (`internal/`)**
 
