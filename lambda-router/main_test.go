@@ -17,10 +17,10 @@ import (
 func TestMain(m *testing.M) {
 	// Set required env vars before init() runs — but init() already ran
 	// when this package was loaded. We re-initialize globals for tests.
-	os.Setenv("VPC_CIDR", "10.0.0.0/16")
-	os.Setenv("DAEMON_PORT_UDP", "8080")
-	os.Setenv("DAEMON_PORT_TCP", "8081")
-	os.Setenv("UPSTREAM_TIMEOUT", "2s")
+	os.Setenv("VPC_CIDR", "10.0.0.0/16")       //nolint:errcheck // test setup
+	os.Setenv("DAEMON_PORT_UDP", "8080")        //nolint:errcheck // test setup
+	os.Setenv("DAEMON_PORT_TCP", "8081")        //nolint:errcheck // test setup
+	os.Setenv("UPSTREAM_TIMEOUT", "2s")         //nolint:errcheck // test setup
 
 	_, parsed, _ := net.ParseCIDR("10.0.0.0/16")
 	vpcCIDR = parsed
@@ -192,7 +192,7 @@ func TestHandlerValidCallbackUDP(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(200)
-		fmt.Fprint(w, "<html>success</html>")
+		fmt.Fprint(w, "<html>success</html>") //nolint:errcheck // test handler
 	}))
 	defer upstream.Close()
 
@@ -233,7 +233,7 @@ func TestHandlerValidCallbackUDP(t *testing.T) {
 func TestHandlerValidCallbackTCP(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
-		fmt.Fprint(w, "ok-tcp")
+		fmt.Fprint(w, "ok-tcp") //nolint:errcheck // test handler
 	}))
 	defer upstream.Close()
 
@@ -454,10 +454,10 @@ func TestOIDCHeadersEnvOverride(t *testing.T) {
 
 	// Override to forward only x-amzn-oidc-data
 	oldHeaders := oidcHeaders
-	os.Setenv("OIDC_HEADERS", `["x-amzn-oidc-data"]`)
+	os.Setenv("OIDC_HEADERS", `["x-amzn-oidc-data"]`) //nolint:errcheck // test setup
 	configure()
 	defer func() {
-		os.Unsetenv("OIDC_HEADERS")
+		os.Unsetenv("OIDC_HEADERS") //nolint:errcheck // test cleanup
 		oidcHeaders = oldHeaders
 	}()
 
@@ -588,7 +588,7 @@ func TestHandlerStateSpecialCharsEncoded(t *testing.T) {
 
 func TestGetenv(t *testing.T) {
 	const key = "TEST_GETENV_KEY"
-	t.Cleanup(func() { os.Unsetenv(key) })
+	t.Cleanup(func() { _ = os.Unsetenv(key) })
 
 	tests := []struct {
 		name     string
@@ -603,9 +603,9 @@ func TestGetenv(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			os.Unsetenv(key)
+			os.Unsetenv(key) //nolint:errcheck // test setup
 			if tc.envValue != "" {
-				os.Setenv(key, tc.envValue)
+				os.Setenv(key, tc.envValue) //nolint:errcheck // test setup
 			}
 			if got := getenv(key, tc.def); got != tc.want {
 				t.Errorf("getenv(%q, %q) = %q, want %q", key, tc.def, got, tc.want)

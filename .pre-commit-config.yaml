@@ -37,9 +37,21 @@ repos:
         language: system
         pass_filenames: false
         types: [go]
+      - id: golangci-lint-lambda
+        name: golangci-lint (lambda-router)
+        entry: bash -c 'cd lambda-router && golangci-lint run'
+        language: system
+        pass_filenames: false
+        types: [go]
       - id: go-vet
         name: go vet
         entry: go vet ./...
+        language: system
+        pass_filenames: false
+        types: [go]
+      - id: go-vet-lambda
+        name: go vet (lambda-router)
+        entry: bash -c 'cd lambda-router && go vet ./...'
         language: system
         pass_filenames: false
         types: [go]
@@ -49,15 +61,33 @@ repos:
         language: system
         pass_filenames: false
         types: [go]
+      - id: go-test-lambda
+        name: go test (lambda-router)
+        entry: bash -c 'cd lambda-router && go test ./...'
+        language: system
+        pass_filenames: false
+        types: [go]
       - id: go-mod-tidy
         name: go mod tidy
         entry: bash -c 'go mod tidy && git diff --exit-code go.mod go.sum'
         language: system
         pass_filenames: false
         types: [go]
+      - id: go-mod-tidy-lambda
+        name: go mod tidy (lambda-router)
+        entry: bash -c 'cd lambda-router && go mod tidy && git diff --exit-code -- go.mod go.sum'
+        language: system
+        pass_filenames: false
+        types: [go]
       - id: govulncheck
         name: govulncheck
         entry: govulncheck ./...
+        language: system
+        pass_filenames: false
+        types: [go]
+      - id: govulncheck-lambda
+        name: govulncheck (lambda-router)
+        entry: bash -c 'cd lambda-router && govulncheck ./...'
         language: system
         pass_filenames: false
         types: [go]
