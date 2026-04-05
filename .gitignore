@@ -38,6 +38,7 @@ lab/aws.env
 .idea/
 .vscode/
 .kiro/specs/
+.kiro/settings/
 .codex
 
 # Python

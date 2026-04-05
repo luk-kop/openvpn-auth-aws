@@ -55,7 +55,13 @@ func TestClientDenyBackslashEscaped(t *testing.T) {
 }
 
 func TestClientKill(t *testing.T) {
-	if got := ClientKill("3"); got != "client-kill 3" {
+	if got := ClientKill("3", ""); got != "client-kill 3" {
 		t.Fatalf("ClientKill() = %q", got)
+	}
+}
+
+func TestClientKillWithMode(t *testing.T) {
+	if got := ClientKill("3", "HALT"); got != "client-kill 3 HALT" {
+		t.Fatalf("ClientKill() with mode = %q", got)
 	}
 }

@@ -261,6 +261,44 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 	}
 }
 
+func TestDecisionSinkForwardsKillMode(t *testing.T) {
+	cmdCh := make(chan string, 1)
+	sink := decisionSink{cmdCh: cmdCh, done: make(chan struct{})}
+
+	err := sink.Send(auth.Decision{Type: auth.DecisionKill, CID: "3", KillMode: "HALT"})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	select {
+	case cmd := <-cmdCh:
+		if cmd != "client-kill 3 HALT" {
+			t.Fatalf("forwarded command = %q", cmd)
+		}
+	default:
+		t.Fatal("expected forwarded command")
+	}
+}
+
+func TestDaemonSinkForwardsDefaultKill(t *testing.T) {
+	cmdCh := make(chan string, 1)
+	sink := DaemonSink{CmdCh: cmdCh}
+
+	err := sink.Send(auth.Decision{Type: auth.DecisionKill, CID: "3"})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	select {
+	case cmd := <-cmdCh:
+		if cmd != "client-kill 3" {
+			t.Fatalf("forwarded command = %q", cmd)
+		}
+	default:
+		t.Fatal("expected forwarded command")
+	}
+}
+
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0600)
 }

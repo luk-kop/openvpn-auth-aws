@@ -121,7 +121,7 @@ By default, the group check only runs at initial authentication. When this flag 
 Enforces one active VPN session per certificate CN. When a new connect arrives for a CN that already has an active session, the old session is evicted:
 
 - Pending session → `client-deny` for the old CID
-- Established session → `client-kill` for the old CID
+- Established session → `client-kill ... HALT` for the old CID, so the replaced device does not auto-reconnect into an eviction loop
 
 > **Multi-instance limitation:** enforcement is per-instance only. See [Single-Session-Per-User in Multi-Instance Mode](multi-instance-single-session.md) for details and a proposed fix.
 

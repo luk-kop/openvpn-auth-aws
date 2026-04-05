@@ -58,7 +58,7 @@ func (s decisionSink) Send(d auth.Decision) error {
 	case auth.DecisionPending:
 		return s.sendOne(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
 	case auth.DecisionKill:
-		return s.sendOne(mgmt.ClientKill(d.CID))
+		return s.sendOne(mgmt.ClientKill(d.CID, d.KillMode))
 	}
 	return nil
 }
@@ -84,7 +84,7 @@ func (s directDecisionSink) Send(d auth.Decision) error {
 	case auth.DecisionPending:
 		cmd = mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout)
 	case auth.DecisionKill:
-		cmd = mgmt.ClientKill(d.CID)
+		cmd = mgmt.ClientKill(d.CID, d.KillMode)
 	default:
 		return nil
 	}
@@ -122,7 +122,7 @@ func (s DaemonSink) Send(d auth.Decision) error {
 	case auth.DecisionPending:
 		return s.trySend(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
 	case auth.DecisionKill:
-		return s.trySend(mgmt.ClientKill(d.CID))
+		return s.trySend(mgmt.ClientKill(d.CID, d.KillMode))
 	}
 	return nil
 }

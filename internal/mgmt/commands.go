@@ -29,6 +29,9 @@ func ClientDeny(cid, kid, reason string) string {
 	return fmt.Sprintf(`client-deny %s %s "%s"`, cid, kid, reason)
 }
 
-func ClientKill(cid string) string {
-	return fmt.Sprintf("client-kill %s", cid)
+func ClientKill(cid, mode string) string {
+	if mode == "" {
+		return fmt.Sprintf("client-kill %s", cid)
+	}
+	return fmt.Sprintf("client-kill %s %s", cid, mode)
 }

@@ -78,12 +78,13 @@ const (
 )
 
 type Decision struct {
-	Type    DecisionType
-	CID     string
-	KID     string
-	Reason  string // DecisionDeny
-	URL     string // DecisionPending
-	Timeout int    // DecisionPending, seconds
+	Type     DecisionType
+	CID      string
+	KID      string
+	Reason   string // DecisionDeny
+	KillMode string // DecisionKill
+	URL      string // DecisionPending
+	Timeout  int    // DecisionPending, seconds
 }
 
 type DecisionSink interface {

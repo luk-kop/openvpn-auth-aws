@@ -606,6 +606,9 @@ func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 	var kill int
 	for _, d := range sink.snapshot() {
 		if d.Type == DecisionKill && d.CID == "1" {
+			if d.KillMode != "HALT" {
+				t.Fatalf("expected eviction kill mode HALT, got %q; decision: %+v", d.KillMode, d)
+			}
 			kill++
 		}
 	}
@@ -718,6 +721,9 @@ func TestExpiryTimerFiresDecisionKill(t *testing.T) {
 	var kill int
 	for _, d := range sink.snapshot() {
 		if d.Type == DecisionKill && d.CID == "1" {
+			if d.KillMode != "" {
+				t.Fatalf("expected expiry kill mode to be empty, got %q; decision: %+v", d.KillMode, d)
+			}
 			kill++
 		}
 	}
@@ -809,6 +815,9 @@ func TestEvictionCancelsExpiryTimer(t *testing.T) {
 	var kills int
 	for _, d := range sink.snapshot() {
 		if d.Type == DecisionKill && d.CID == "1" {
+			if d.KillMode != "HALT" {
+				t.Fatalf("expected eviction kill mode HALT, got %q; decision: %+v", d.KillMode, d)
+			}
 			kills++
 		}
 	}

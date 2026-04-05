@@ -51,7 +51,7 @@ Before starting the OIDC flow, the daemon validates the `CLIENT:CONNECT` event:
 
 - **IV_SSO check** — client must advertise `webauth` or `openurl` in the `IV_SSO` env variable; otherwise `client-deny` with reason `"client does not support WebAuth"`
 - **Common Name** — certificate CN must be non-empty; otherwise `client-deny` with reason `"missing common name"`
-- **Single-session eviction** — when `--single-session-per-user=true` (default), if a session for the same CN already exists, the old session is evicted (`client-deny` for pending, `client-kill` for established) before creating a new one
+- **Single-session eviction** — when `--single-session-per-user=true` (default), if a session for the same CN already exists, the old session is evicted (`client-deny` for pending, `client-kill ... HALT` for established) before creating a new one
 
 ### Steps
 
@@ -381,7 +381,7 @@ hand-window 300        # OpenVPN server config
 When `--single-session-per-user=true` (default), only one active session per certificate CN is allowed:
 
 - **New connect with same CN while pending** — old session cancelled, `client-deny` sent for old CID
-- **New connect with same CN while established** — old session killed, `client-kill` sent for old CID
+- **New connect with same CN while established** — old session killed, `client-kill ... HALT` sent for old CID so the replaced client stops instead of auto-reconnecting
 - **Disconnect** — session tracking cleaned up, CN slot freed
 
 > **Multi-instance limitation:** Session tracking is in-memory and local to each daemon instance. In multi-instance (ASG) mode, `--single-session-per-user` only enforces the limit within a single instance — a user can hold concurrent sessions on different instances. See [Single-Session-Per-User in Multi-Instance Mode](multi-instance-single-session.md) for a proposed fix using a DynamoDB shared session store.

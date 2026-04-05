@@ -155,7 +155,20 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 		return
 	}
 
-	slog.Info("connect", "cid", event.CID, "kid", event.KID, "cn", event.CommonName())
+	guiVer := event.Env["IV_GUI_VER"]
+	if guiVer == "" {
+		guiVer = event.Env["IV_UI_VER"]
+	}
+	slog.Info("connect", "cid", event.CID, "kid", event.KID, "cn", event.CommonName(),
+		"ip", event.Env["untrusted_ip"],
+		"port", event.Env["untrusted_port"],
+		"hwaddr", event.Env["IV_HWADDR"],
+		"plat", event.Env["IV_PLAT"],
+		"plat_ver", event.Env["IV_PLAT_VER"],
+		"ver", event.Env["IV_VER"],
+		"gui_ver", guiVer,
+		"ssl", event.Env["IV_SSL"],
+	)
 
 	// Enforce one active session per user: if a session already exists for this
 	// common name (e.g. DISCONNECT was lost), evict it and deny/kill it on the
@@ -412,7 +425,7 @@ func (h *Handler) evictSession(cid string) (Decision, bool) {
 		return Decision{Type: DecisionDeny, CID: cid, KID: kid, Reason: "replaced by new connection"}, true
 	}
 	// Already established — use client-kill (no KID needed).
-	return Decision{Type: DecisionKill, CID: cid}, true
+	return Decision{Type: DecisionKill, CID: cid, KillMode: "HALT"}, true
 }
 
 func (h *Handler) handleDisconnect(event mgmt.Event) {

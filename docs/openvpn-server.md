@@ -249,6 +249,55 @@ Notes:
 - **Certificate CN** should match the user's email in Cognito (used for CN cross-check when `--cn-cross-check=true`)
 - **OpenVPN 2.x CLI** is recommended to include `push-peer-info` and `setenv IV_SSO webauth` so the client sends WebAuth support metadata to the server consistently in the tested CLI flow
 - Client must support WebAuth (OpenVPN 2.6+ with `IV_SSO` or `IV_PROTO` flags)
+- **`push-peer-info`** causes the client to send additional environment variables to the server on connect. The daemon logs the following fields on every `connect` event:
+
+  | Log field | Source variable | Always sent | Requires `push-peer-info` |
+  |-----------|----------------|:-----------:|:-------------------------:|
+  | `ip` | `untrusted_ip` | ✅ | — |
+  | `port` | `untrusted_port` | ✅ | — |
+  | `plat` | `IV_PLAT` | ✅ | — |
+  | `ver` | `IV_VER` | ✅ | — |
+  | `gui_ver` | `IV_GUI_VER` / `IV_UI_VER` | ✅¹ | — |
+  | `hwaddr` | `IV_HWADDR` | — | ✅ |
+  | `plat_ver` | `IV_PLAT_VER` | — | ✅ |
+  | `ssl` | `IV_SSL` | — | ✅ |
+
+  ¹ `IV_GUI_VER` is set by the client UI via `--setenv`; always present in OpenVPN GUI and OpenVPN3/Linux.
+
+  **OpenVPN3/Linux limitations:** OpenVPN3 core library (used by `openvpn3-linux` and OpenVPN Connect) does **not** send `IV_HWADDR`, `IV_PLAT_VER`, or `IV_SSL` — even with `push-peer-info` enabled. These fields will always be empty for OpenVPN3 clients. This is a known limitation of the OpenVPN3 core library, not a configuration issue. Full peer info is only available from OpenVPN 2.x clients (e.g. OpenVPN GUI on Windows, Tunnelblick on macOS).
+
+  Example log — **OpenVPN 2.7.1 / Windows GUI** (full peer info):
+  ```
+  msg=connect cid=0 kid=1 cn=user@example.com ip=203.0.113.42 port=57050 hwaddr=ac:74:b1:49:9b:75 plat=win plat_ver=10.0.26200,amd64 ver=2.7.1 gui_ver=OpenVPN_GUI_11.62.0.0 ssl=OpenSSL_3.6.1_27_Jan_2026
+  ```
+
+  Example log — **OpenVPN3 3.11.6 / Linux** (limited peer info):
+  ```
+  msg=connect cid=2 kid=1 cn=user@example.com ip=203.0.113.42 port=55288 hwaddr="" plat=linux plat_ver="" ver=3.11.6 gui_ver=OpenVPN3/Linux/v27 ssl=""
+  ```
+
+## OpenVPN3 Linux CLI
+
+OpenVPN3 Linux (`openvpn3-linux`) works with this project out of the box. Run without `sudo` — OpenVPN3 uses D-Bus and separates privileges internally.
+
+```bash
+# Connect
+openvpn3 session-start --config client.ovpn
+
+# List active sessions
+openvpn3 sessions-list
+
+# View logs (attach to running session)
+openvpn3 log --config client.ovpn
+
+# View logs with debug verbosity
+openvpn3 log --config client.ovpn --log-level 6
+
+# Disconnect
+openvpn3 session-manage --config client.ovpn --disconnect
+```
+
+> **Note:** After `session-start`, the browser opens for OIDC authentication and may print a message (e.g. `Opening in existing browser session.`) to the terminal. The shell prompt is already available — press Enter if it appears stuck.
 
 ## Management Interface Protocol
 
@@ -261,4 +310,4 @@ The daemon communicates with OpenVPN via the management interface using these co
 | `client-auth CID KID` + `END` | Callback success | Allow client connection |
 | `client-auth-nt CID KID` | `>CLIENT:REAUTH` success | Allow renegotiation (no tunnel changes) |
 | `client-deny CID KID "reason"` | Auth failure | Deny client with reason |
-| `client-kill CID` | Session eviction | Kill established connection |
+| `client-kill CID [HALT]` | Session eviction | Kill established connection; `HALT` stops the client without auto-reconnect |
