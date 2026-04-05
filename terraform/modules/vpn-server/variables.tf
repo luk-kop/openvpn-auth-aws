@@ -157,6 +157,41 @@ variable "required_group" {
   default     = ""
 }
 
+variable "pushed_routes" {
+  description = "CIDR blocks pushed to VPN clients as routes via OpenVPN 'push route' directive."
+  type        = list(string)
+  default     = []
+}
+
+variable "ec2_sg_rules" {
+  description = "Additional EC2 SG ingress/egress rules for VPN client traffic. Configured separately from pushed_routes to allow fine-grained protocol and port control."
+  type = object({
+    ingress = optional(list(object({
+      description = string
+      cidr_ipv4   = string
+      ip_protocol = string
+      from_port   = optional(number)
+      to_port     = optional(number)
+    })), [])
+    egress = optional(list(object({
+      description = string
+      cidr_ipv4   = string
+      ip_protocol = string
+      from_port   = optional(number)
+      to_port     = optional(number)
+    })), [])
+  })
+  default = {
+    egress = [
+      {
+        description = "All outbound"
+        cidr_ipv4   = "0.0.0.0/0"
+        ip_protocol = "-1"
+      }
+    ]
+  }
+}
+
 # --- OpenVPN ---
 
 variable "openvpn_version" {

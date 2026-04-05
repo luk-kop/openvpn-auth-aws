@@ -45,6 +45,9 @@ write_files:
       keepalive 10 120
       cipher AES-256-GCM
       data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+%{ for cidr in pushed_routes ~}
+      push "route ${cidrhost(cidr, 0)} ${cidrnetmask(cidr)}"
+%{ endfor ~}
 
       persist-key
       persist-tun
@@ -85,6 +88,9 @@ write_files:
       keepalive 10 120
       cipher AES-256-GCM
       data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+%{ for cidr in pushed_routes ~}
+      push "route ${cidrhost(cidr, 0)} ${cidrnetmask(cidr)}"
+%{ endfor ~}
 
       persist-key
       persist-tun
@@ -326,6 +332,16 @@ runcmd:
 
   # --- Apply sysctl ---
   - sysctl --system
+
+  # --- NAT masquerade for VPN clients ---
+  - |
+    PRIMARY_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
+    nft add table ip nat
+    nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; }
+    nft add rule ip nat postrouting ip saddr ${openvpn_udp_cidr} oifname "$PRIMARY_IFACE" masquerade
+    nft add rule ip nat postrouting ip saddr ${openvpn_tcp_cidr} oifname "$PRIMARY_IFACE" masquerade
+    nft list ruleset > /etc/nftables.conf
+  - systemctl enable nftables
 
   # --- Fetch PKI from Secrets Manager ---
   - /usr/local/bin/fetch-pki.sh

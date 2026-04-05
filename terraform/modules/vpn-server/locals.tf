@@ -28,6 +28,8 @@ locals {
     openvpn_version       = var.openvpn_version
     pki_secret_prefix     = "${var.project_name}/pki"
 
+    pushed_routes = var.pushed_routes
+
     # Scaling mode
     callback_mode          = var.callback_mode
     enable_eip_association = var.enable_eip_association

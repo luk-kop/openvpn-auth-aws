@@ -90,8 +90,47 @@ variable "nlb_domain_name" {
 
 # --- Security ---
 
+variable "pushed_routes" {
+  description = "CIDR blocks pushed as routes to VPN clients via OpenVPN 'push route' directive (e.g. [\"10.0.0.0/16\"] to give clients access to the VPC)."
+  type        = list(string)
+  default     = []
+}
+
+variable "ec2_sg_rules" {
+  description = "Additional EC2 SG ingress/egress rules for VPN client traffic. Configured separately from pushed_routes for fine-grained protocol and port control."
+  type = object({
+    ingress = optional(list(object({
+      description = string
+      cidr_ipv4   = string
+      ip_protocol = string
+      from_port   = optional(number)
+      to_port     = optional(number)
+    })), [])
+    egress = optional(list(object({
+      description = string
+      cidr_ipv4   = string
+      ip_protocol = string
+      from_port   = optional(number)
+      to_port     = optional(number)
+    })), [])
+  })
+  # The default catch-all egress rule is required for the EC2 instance itself —
+  # AWS API calls, apt package installs, and other system traffic during cloud-init
+  # and normal operation. Override this list if you need stricter outbound control,
+  # but ensure the instance can still reach AWS endpoints and the internet.
+  default = {
+    egress = [
+      {
+        description = "All outbound"
+        cidr_ipv4   = "0.0.0.0/0"
+        ip_protocol = "-1"
+      }
+    ]
+  }
+}
+
 variable "openvpn_allowed_cidrs" {
-  description = "CIDR blocks allowed to connect to OpenVPN"
+  description = "CIDR blocks allowed to initiate OpenVPN connections (EC2 security group in single-instance mode, NLB security group in multi-instance mode)"
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }

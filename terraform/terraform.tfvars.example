@@ -45,3 +45,13 @@ route53_hosted_zone_id = "ZXXXXXXXXXXXXXXXXXXXXX"
 #   udp = { openvpn_port = 1194, ip_protocol = "udp", client_cidr = "10.8.0.0/24", daemon_port = 8080 }
 #   tcp = { openvpn_port = 1195, ip_protocol = "tcp", client_cidr = "10.8.1.0/24", daemon_port = 8081 }
 # }
+# pushed_routes = ["10.0.0.0/16"]
+# ec2_sg_rules = {
+#   ingress = [
+#     # { description = "ICMP from VPC", cidr_ipv4 = "10.0.0.0/16", ip_protocol = "icmp", from_port = -1, to_port = -1 },
+#   ]
+#   egress = [
+#     { description = "All outbound", cidr_ipv4 = "0.0.0.0/0", ip_protocol = "-1" },   # default — required for AWS API / apt
+#     # { description = "HTTPS to VPC", cidr_ipv4 = "10.0.0.0/16", ip_protocol = "tcp", from_port = 443, to_port = 443 },
+#   ]
+# }

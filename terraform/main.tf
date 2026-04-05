@@ -56,6 +56,8 @@ module "vpn_server" {
   cognito_user_pool_domain    = module.cognito.domain_fqdn
   cognito_issuer_url          = module.cognito.issuer_url
 
+  pushed_routes        = var.pushed_routes
+  ec2_sg_rules         = var.ec2_sg_rules
   required_group       = var.required_group
   daemon_binary_s3_uri = var.daemon_binary_s3_uri
   hand_window          = var.hand_window

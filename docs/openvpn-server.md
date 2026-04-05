@@ -109,6 +109,110 @@ If `reneg-sec=0` (renegotiation disabled), no `CLIENT:REAUTH` events are sent, s
 
 On management reconnect (daemon restart, socket drop, or OpenVPN restart), the daemon queries `status 3` and rebuilds expiry tracking from the live OpenVPN state. If a session has already exceeded its limit, it is killed immediately. If OpenVPN restarted (empty `status 3`), all timers are cleaned up and clients must reconnect. See [Architecture — Management Socket Reconnect](architecture.md#management-socket-reconnect-and-session-tracking) for the full scenario matrix.
 
+## NAT Masquerade (nftables)
+
+The EC2 instance is configured at boot (via cloud-init) to NAT VPN client traffic using nftables. This allows VPN clients to reach resources in the VPC or the internet through the server's primary network interface.
+
+**What cloud-init does:**
+
+1. Enables IP forwarding via sysctl (`net.ipv4.ip_forward = 1`).
+2. Creates an nftables NAT table with a `postrouting` masquerade rule for both the UDP and TCP VPN client CIDRs:
+   ```
+   table ip nat {
+     chain postrouting {
+       type nat hook postrouting priority 100;
+       ip saddr <udp_client_cidr> oifname <primary_iface> masquerade
+       ip saddr <tcp_client_cidr> oifname <primary_iface> masquerade
+     }
+   }
+   ```
+3. Saves the ruleset to `/etc/nftables.conf` and enables the `nftables` systemd service so rules are restored on reboot.
+
+The primary interface is detected dynamically at boot from the default route (`ip route show default`), so the config works regardless of whether the NIC is named `eth0`, `ens5`, etc.
+
+> **Note:** nftables is used in preference to iptables. Ubuntu 24.04 (Noble) ships with nftables as the native firewall framework; iptables on that platform is a compatibility shim over the nftables backend anyway.
+
+## Pushed Routes
+
+> **Note:** Only split-tunnel mode is supported by the current Terraform code. Full-tunnel (`push "redirect-gateway def1"`) is not wired up — to redirect all client traffic through the VPN you would need to extend the cloud-config template manually.
+
+VPN clients receive no routes by default (split-tunnel). To push routes, set the `pushed_routes` Terraform variable — a list of CIDRs that are injected as `push "route ..."` directives into both the UDP and TCP OpenVPN server configs at plan time.
+
+```hcl
+pushed_routes = ["10.0.0.0/16", "10.1.0.0/24"]
+```
+
+This generates, for each listener:
+
+```text
+push "route 10.0.0.0 255.255.0.0"
+push "route 10.1.0.0 255.255.255.0"
+```
+
+> **Note:** Pushing routes does not automatically open EC2 security group rules for that traffic — the two are configured independently (see below).
+
+## EC2 Security Group Rules for Forwarded Traffic
+
+The EC2 instance has a catch-all egress rule (`0.0.0.0/0`) for internet-bound traffic (AWS API calls, apt, etc.). For forwarded VPN client traffic, use the `ec2_sg_rules` variable to add **explicit, protocol-scoped** ingress and/or egress rules. This is intentionally separate from `pushed_routes` — you can push a broad route to clients while restricting what the EC2 instance is actually permitted to forward.
+
+```hcl
+ec2_sg_rules = {
+  ingress = [
+    {
+      description = "ICMP from VPC"
+      cidr_ipv4   = "10.0.0.0/16"
+      ip_protocol = "icmp"
+      from_port   = -1
+      to_port     = -1
+    },
+  ]
+  egress = [
+    {
+      description = "HTTPS to VPC"
+      cidr_ipv4   = "10.0.0.0/16"
+      ip_protocol = "tcp"
+      from_port   = 443
+      to_port     = 443
+    },
+    {
+      description = "SSH to VPC"
+      cidr_ipv4   = "10.0.0.0/16"
+      ip_protocol = "tcp"
+      from_port   = 22
+      to_port     = 22
+    },
+    {
+      description = "ICMP to VPC"
+      cidr_ipv4   = "10.0.0.0/16"
+      ip_protocol = "icmp"
+      from_port   = -1
+      to_port     = -1
+    },
+  ]
+}
+```
+
+`ingress` is optional and defaults to `[]`. `egress` defaults to a single catch-all rule (`0.0.0.0/0`, all protocols) required for internet-bound traffic (AWS API calls, apt, etc.) — override it if you want stricter outbound control.
+
+To allow all protocols to a CIDR (e.g. a fully-trusted private network), set `ip_protocol = "-1"` and omit `from_port`/`to_port`:
+
+```hcl
+ec2_sg_rules = {
+  egress = [
+    {
+      description = "All outbound"
+      cidr_ipv4   = "0.0.0.0/0"
+      ip_protocol = "-1"
+    },
+    {
+      description = "All traffic to trusted private subnet"
+      cidr_ipv4   = "10.0.0.0/16"
+      ip_protocol = "-1"
+    },
+  ]
+}
+```
+
 ## Client Config
 
 Minimal client config for WebAuth:

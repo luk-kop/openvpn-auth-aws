@@ -137,12 +137,27 @@ resource "aws_vpc_security_group_ingress_rule" "ec2_health_check_from_nlb" {
   referenced_security_group_id = var.nlb_security_group_id
 }
 
-#trivy:ignore:AVD-AWS-0104
-resource "aws_vpc_security_group_egress_rule" "ec2_all" {
+resource "aws_vpc_security_group_ingress_rule" "ec2_forwarded" {
+  for_each = { for rule in var.ec2_sg_rules.ingress : rule.description => rule }
+
   security_group_id = var.ec2_security_group_id
-  description       = "All outbound"
-  ip_protocol       = "-1"
-  cidr_ipv4         = "0.0.0.0/0"
+  description       = each.value.description
+  cidr_ipv4         = each.value.cidr_ipv4
+  ip_protocol       = each.value.ip_protocol
+  from_port         = each.value.ip_protocol == "-1" ? null : each.value.from_port
+  to_port           = each.value.ip_protocol == "-1" ? null : each.value.to_port
+}
+
+#trivy:ignore:AVD-AWS-0104
+resource "aws_vpc_security_group_egress_rule" "ec2_forwarded" {
+  for_each = { for rule in var.ec2_sg_rules.egress : rule.description => rule }
+
+  security_group_id = var.ec2_security_group_id
+  description       = each.value.description
+  cidr_ipv4         = each.value.cidr_ipv4
+  ip_protocol       = each.value.ip_protocol
+  from_port         = each.value.ip_protocol == "-1" ? null : each.value.from_port
+  to_port           = each.value.ip_protocol == "-1" ? null : each.value.to_port
 }
 
 # --- Elastic IP for VPN server ---
