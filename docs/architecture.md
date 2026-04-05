@@ -384,6 +384,8 @@ When `--single-session-per-user=true` (default), only one active session per cer
 - **New connect with same CN while established** — old session killed, `client-kill` sent for old CID
 - **Disconnect** — session tracking cleaned up, CN slot freed
 
+> **Multi-instance limitation:** Session tracking is in-memory and local to each daemon instance. In multi-instance (ASG) mode, `--single-session-per-user` only enforces the limit within a single instance — a user can hold concurrent sessions on different instances. See [Single-Session-Per-User in Multi-Instance Mode](multi-instance-single-session.md) for a proposed fix using a DynamoDB shared session store.
+
 ## Reauth Flow
 
 OpenVPN triggers `>CLIENT:REAUTH` on TLS renegotiation (controlled by `reneg-sec`). The daemon:
