@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Test
+        run: |
+          go test -v -short ./...
+          cd lambda-router && go test -v -short ./...
+
+      - name: Build daemon (linux/amd64)
+        env:
+          GOARCH: amd64
+        run: go build -ldflags="-s -w" -o openvpn-auth-daemon-linux-amd64 ./cmd/openvpn-auth-daemon
+
+      - name: Build daemon (linux/arm64)
+        env:
+          GOARCH: arm64
+        run: go build -ldflags="-s -w" -o openvpn-auth-daemon-linux-arm64 ./cmd/openvpn-auth-daemon
+
+      - name: Build Lambda Router
+        run: make build-lambda
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create ${{ github.ref_name }}
+          openvpn-auth-daemon-linux-amd64
+          openvpn-auth-daemon-linux-arm64
+          lambda-router/lambda-arm64.zip
+          lambda-router/lambda-amd64.zip
+          --generate-notes

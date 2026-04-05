@@ -1,0 +1,56 @@
+# Project Structure
+
+```
+openvpn-auth-aws/
+├── .github/       # CI/CD workflows, Dependabot, PR labeler
+├── cmd/
+│   ├── openvpn-auth-daemon/  # Main binary entry point
+│   ├── mgmt-mock/            # OpenVPN management socket simulator (dev/test)
+│   └── alb-mock/             # ALB + Cognito authenticate action simulator (dev/test)
+├── internal/
+│   ├── app/        # Daemon lifecycle, event loop, management socket reconnection
+│   ├── auth/       # Core auth orchestration, session store, state blob signing
+│   ├── callback/   # HTTP server for GET /callback and GET /healthz, HTML templates
+│   ├── cognito/    # ALB public key fetching, JWKS validation, user group checks
+│   ├── config/     # CLI flags + VPN_AUTH_* env vars, validation
+│   ├── metrics/    # CloudWatch EMF metrics
+│   ├── mgmt/       # OpenVPN management socket protocol (parser + command writer)
+│   └── secrets/    # HMAC signing via static secret
+├── lambda-router/ # Go Lambda proxy for multi-instance EC2 callback routing (includes templates/error.html)
+├── terraform/     # AWS infrastructure (modules: alb, cognito, lambda-router, nlb, vpn-server)
+├── scripts/       # PKI management script (pki.sh)
+├── pki/           # Generated PKI artifacts (CA, server/client certs, TLS auth key)
+├── docs/          # Architecture, configuration, security, testing docs
+├── notes/         # Design notes and architecture explorations
+└── lab/           # Docker Compose stack, PKI setup scripts, test configs
+```
+
+## Key Files
+
+- `internal/auth/types.go` — all shared interfaces (`IdentityChecker`, `StateSigner`, `Metrics`, `DecisionSink`, `AuthSuccessTracker`) and domain types (`PendingSession`, `Decision`, `DecisionType`, `SessionStatus`, `ALBClaims`, `IdentityResult`)
+- `internal/auth/handler.go` — central auth orchestration; handles `CLIENT:CONNECT`, `CLIENT:REAUTH`, `CLIENT:DISCONNECT`, `CLIENT:ESTABLISHED`
+- `internal/auth/sessions.go` — in-memory session store with TTL reaper
+- `internal/auth/state.go` — HMAC-signed state blob encode/decode (`StatePayload`: `SID`, `IAT`, `EXP`)
+- `internal/auth/cache.go` — `ReauthCache` with TTL for caching `IdentityResult` during IdP outages
+- `internal/callback/server.go` — `GET /callback` (ALB JWT validation, group check, session resolution) and `GET /healthz`
+- `internal/callback/render.go` — HTML template loading (`//go:embed`), rendering with buffer-first pattern, plain text fallback
+- `internal/callback/templates/` — embedded HTML templates (`success.html`, `error.html`) with inline CSS and dark mode
+- `internal/cognito/albkeys.go` — fetches ALB EC public keys from `public-keys.auth.elb.{region}.amazonaws.com`
+- `internal/cognito/client.go` — `Checker` (Cognito `AdminGetUser` + `AdminListGroupsForUser`) and `StaticChecker` (local dev mode)
+- `internal/mgmt/parser.go` — OpenVPN management protocol line parser
+- `internal/mgmt/events.go` — management event types
+- `internal/mgmt/commands.go` — management command writer (client-auth, client-deny, etc.)
+- `internal/mgmt/client.go` — management socket connection, read loop, reconnection
+- `internal/app/daemon.go` — top-level daemon wiring, reconnect loop, graceful shutdown
+- `internal/config/config.go` — single `Config` struct, all flags and env vars
+- `lambda-router/main.go` — Lambda proxy for multi-instance EC2 callback routing
+
+## Conventions
+
+- All interfaces live in `internal/auth/types.go`; implementations are in their respective packages
+- Dependency injection via constructor functions (`NewHandler`, `New`, etc.) — no globals
+- Concurrency: `sync.Mutex` guards shared maps in `Handler`; goroutines communicate via channels
+- Error handling: wrap errors with `fmt.Errorf("context: %w", err)`; log at the call site, return up the stack
+- No third-party frameworks — stdlib `net/http`, `flag`, `log/slog`, `sync`, `context` throughout
+- Tests are table-driven; use interfaces from `types.go` to inject fakes/stubs without mocking libraries
+- If `--cognito-user-pool-id` is not set, the daemon uses a static identity checker automatically (local dev mode — no AWS credentials needed)

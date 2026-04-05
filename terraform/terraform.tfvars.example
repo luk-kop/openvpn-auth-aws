@@ -1,0 +1,57 @@
+# Copy to terraform.tfvars and fill in required values.
+
+# --- Required ---
+cognito_domain_prefix  = "ovpn-mycompany"        # must be globally unique
+vpc_id                 = "vpc-xxxxxxxxxxxxxxxxx"
+alb_subnet_ids         = ["subnet-aaa", "subnet-bbb", "subnet-ccc"]
+ec2_subnet_ids      = ["subnet-aaa", "subnet-bbb", "subnet-ccc"]
+alb_domain_name        = "vpn.example.com"
+route53_hosted_zone_id = "ZXXXXXXXXXXXXXXXXXXXXX"
+
+# --- Cost saving mode (default: false) ---
+# cost_saving_mode = false   # set to true to skip ALB, EIP, and scale ASG to 0
+
+# --- Scaling mode (default: single-instance) ---
+# multi_instance_mode = false   # set to true for ASG desired > 1
+
+# --- Single-instance options (ignored when multi_instance_mode = true) ---
+# server_name = "01"
+
+# --- Multi-instance options (ignored when multi_instance_mode = false) ---
+# asg_desired_capacity = 3
+# asg_min_size         = 1
+# asg_max_size         = 6
+# nlb_domain_name      = "vpn-nlb.example.com"   # NLB Route53 alias for OpenVPN traffic
+# vpc_cidr             = "10.0.0.0/16"
+# lambda_subnet_ids    = ["subnet-priv-aaa", "subnet-priv-bbb"]
+# lambda_router_zip_path = "lambda-router/lambda-arm64.zip"
+
+# --- Optional overrides ---
+# aws_region             = "eu-west-1"
+# project_name           = "openvpn-auth-aws"
+# cognito_user_pool_name = "openvpn-auth-pool"
+# cognito_vpn_group_name = "vpn-users"
+# cognito_additional_callback_urls = ["http://localhost:8080/callback"]
+# required_group         = "vpn-users"
+# hand_window            = 300
+# alb_auth_session_timeout = 3600
+# daemon_binary_s3_uri   = "s3://my-bucket/openvpn-auth-daemon"
+# openvpn_allowed_cidrs  = ["0.0.0.0/0"]
+# ec2_instance_type      = "t3.small"
+# ec2_ami_id             = ""              # empty = latest Ubuntu 24.04 LTS
+# ec2_root_volume_size   = 20
+# ec2_associate_public_ip = true
+# openvpn_listeners = {
+#   udp = { openvpn_port = 1194, ip_protocol = "udp", client_cidr = "10.8.0.0/24", daemon_port = 8080 }
+#   tcp = { openvpn_port = 1195, ip_protocol = "tcp", client_cidr = "10.8.1.0/24", daemon_port = 8081 }
+# }
+# pushed_routes = ["10.0.0.0/16"]
+# ec2_sg_rules = {
+#   ingress = [
+#     # { description = "ICMP from VPC", cidr_ipv4 = "10.0.0.0/16", ip_protocol = "icmp", from_port = -1, to_port = -1 },
+#   ]
+#   egress = [
+#     { description = "All outbound", cidr_ipv4 = "0.0.0.0/0", ip_protocol = "-1" },   # default — required for AWS API / apt
+#     # { description = "HTTPS to VPC", cidr_ipv4 = "10.0.0.0/16", ip_protocol = "tcp", from_port = 443, to_port = 443 },
+#   ]
+# }

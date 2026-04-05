@@ -1,0 +1,390 @@
+#cloud-config
+# vim: syntax=yaml
+
+hostname: ${hostname}
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - curl
+  - gnupg
+  - openssl
+  - unzip
+
+write_files:
+  # --- Sysctl: IP forwarding ---
+  - path: /etc/sysctl.d/99-openvpn.conf
+    content: |
+      net.ipv4.ip_forward = 1
+
+  # --- OpenVPN systemd override (management-hold requires longer startup) ---
+  - path: /etc/systemd/system/openvpn-server@.service.d/override.conf
+    content: |
+      [Service]
+      TimeoutStartSec=300
+
+  # --- OpenVPN management password (generated at boot in runcmd) ---
+
+  # --- OpenVPN UDP server config ---
+  - path: /etc/openvpn/server/udp.conf
+    content: |
+      port ${openvpn_udp_port}
+      proto udp
+      dev tun0
+
+      ca      /etc/openvpn/server/ca.crt
+      cert    /etc/openvpn/server/server.crt
+      key     /etc/openvpn/server/server.key
+      dh      /etc/openvpn/server/dh.pem
+      tls-auth /etc/openvpn/server/ta.key 0
+
+      server ${cidrhost(openvpn_udp_cidr, 0)} ${cidrnetmask(openvpn_udp_cidr)}
+
+      topology subnet
+      keepalive 10 120
+      cipher AES-256-GCM
+      data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+%{ for cidr in pushed_routes ~}
+      push "route ${cidrhost(cidr, 0)} ${cidrnetmask(cidr)}"
+%{ endfor ~}
+
+      persist-key
+      persist-tun
+
+      user nobody
+      group nogroup
+
+      status      /var/log/openvpn/status-udp.log
+      syslog      openvpn-udp
+      verb 3
+
+      management ${management_socket_udp} unix /etc/openvpn/management-pw
+      management-client-auth
+      management-hold
+
+      auth-user-pass-optional
+
+      setenv IV_SSO webauth
+
+      hand-window ${hand_window}
+
+  # --- OpenVPN TCP server config ---
+  - path: /etc/openvpn/server/tcp.conf
+    content: |
+      port ${openvpn_tcp_port}
+      proto tcp-server
+      dev tun1
+
+      ca      /etc/openvpn/server/ca.crt
+      cert    /etc/openvpn/server/server.crt
+      key     /etc/openvpn/server/server.key
+      dh      /etc/openvpn/server/dh.pem
+      tls-auth /etc/openvpn/server/ta.key 0
+
+      server ${cidrhost(openvpn_tcp_cidr, 0)} ${cidrnetmask(openvpn_tcp_cidr)}
+
+      topology subnet
+      keepalive 10 120
+      cipher AES-256-GCM
+      data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+%{ for cidr in pushed_routes ~}
+      push "route ${cidrhost(cidr, 0)} ${cidrnetmask(cidr)}"
+%{ endfor ~}
+
+      persist-key
+      persist-tun
+
+      user nobody
+      group nogroup
+
+      status      /var/log/openvpn/status-tcp.log
+      syslog      openvpn-tcp
+      verb 3
+
+      management ${management_socket_tcp} unix /etc/openvpn/management-pw
+      management-client-auth
+      management-hold
+
+      auth-user-pass-optional
+
+      setenv IV_SSO webauth
+
+      hand-window ${hand_window}
+
+  # --- Daemon environment ---
+  - path: /etc/openvpn-auth/env
+    permissions: "0600"
+    content: ""
+
+  # --- PKI fetch script ---
+  - path: /usr/local/bin/fetch-pki.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      REGION="${aws_region}"
+      PREFIX="${pki_secret_prefix}"
+
+      fetch_secret() {
+        aws secretsmanager get-secret-value \
+          --region "$REGION" \
+          --secret-id "$1" \
+          --query SecretString \
+          --output text > "$2"
+        echo "Fetched $1 -> $2"
+      }
+
+      mkdir -p /etc/openvpn/server
+
+      fetch_secret "$PREFIX/ca-cert"     /etc/openvpn/server/ca.crt
+      fetch_secret "$PREFIX/server-cert" /etc/openvpn/server/server.crt
+      fetch_secret "$PREFIX/server-key"  /etc/openvpn/server/server.key
+      fetch_secret "$PREFIX/ta-key"      /etc/openvpn/server/ta.key
+
+      chmod 600 /etc/openvpn/server/server.key
+      chmod 600 /etc/openvpn/server/ta.key
+
+      # Generate DH params locally (not a secret, just large primes)
+      openssl dhparam -out /etc/openvpn/server/dh.pem 2048
+
+      echo "PKI setup complete."
+
+  # --- UDP daemon systemd service ---
+  - path: /etc/systemd/system/openvpn-auth-udp.service
+    content: |
+      [Unit]
+      Description=OpenVPN Auth Daemon (UDP)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      EnvironmentFile=/etc/openvpn-auth/env
+      ExecStart=/usr/local/bin/openvpn-auth-daemon \
+          --management-socket=${management_socket_udp} \
+          --management-password-file=/etc/openvpn/management-pw \
+          --callback-url=$${VPN_AUTH_CALLBACK_URL_UDP} \
+          --alb-arn=${alb_arn} \
+          --callback-port=${daemon_port_udp} \
+          --cognito-user-pool-id=${cognito_user_pool_id} \
+          --cognito-issuer-url=${cognito_issuer_url} \
+          --aws-region=${aws_region} \
+          --required-group=${required_group} \
+          --hand-window=${hand_window}s
+      Restart=always
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=openvpn-auth-udp
+
+      NoNewPrivileges=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/run/openvpn
+      PrivateTmp=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # --- TCP daemon systemd service ---
+  - path: /etc/systemd/system/openvpn-auth-tcp.service
+    content: |
+      [Unit]
+      Description=OpenVPN Auth Daemon (TCP)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      EnvironmentFile=/etc/openvpn-auth/env
+      ExecStart=/usr/local/bin/openvpn-auth-daemon \
+          --management-socket=${management_socket_tcp} \
+          --management-password-file=/etc/openvpn/management-pw \
+          --callback-url=$${VPN_AUTH_CALLBACK_URL_TCP} \
+          --alb-arn=${alb_arn} \
+          --callback-port=${daemon_port_tcp} \
+          --cognito-user-pool-id=${cognito_user_pool_id} \
+          --cognito-issuer-url=${cognito_issuer_url} \
+          --aws-region=${aws_region} \
+          --required-group=${required_group} \
+          --hand-window=${hand_window}s
+      Restart=always
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=openvpn-auth-tcp
+
+      NoNewPrivileges=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/run/openvpn
+      PrivateTmp=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+%{ if enable_eip_association ~}
+  # --- EIP association script ---
+  - path: /usr/local/bin/eip-associate.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      REGION="${aws_region}"
+      EIP_ALLOC_ID="${eip_allocation_id}"
+
+      TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+      INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
+        http://169.254.169.254/latest/meta-data/instance-id)
+
+      TIMEOUT=300
+      INTERVAL=10
+      ELAPSED=0
+
+      echo "Waiting for instance $INSTANCE_ID to become healthy..."
+
+      while true; do
+%{ if create_target_groups ~}
+        UDP_STATE=$(aws elbv2 describe-target-health \
+          --region "$REGION" \
+          --target-group-arn "${tg_udp_arn}" \
+          --targets Id="$INSTANCE_ID",Port=${daemon_port_udp} \
+          --query 'TargetHealthDescriptions[0].TargetHealth.State' \
+          --output text 2>/dev/null || echo "unknown")
+
+        TCP_STATE=$(aws elbv2 describe-target-health \
+          --region "$REGION" \
+          --target-group-arn "${tg_tcp_arn}" \
+          --targets Id="$INSTANCE_ID",Port=${daemon_port_tcp} \
+          --query 'TargetHealthDescriptions[0].TargetHealth.State' \
+          --output text 2>/dev/null || echo "unknown")
+%{ else ~}
+        UDP_STATE=$(curl -sf http://localhost:${daemon_port_udp}/healthz && echo "healthy" || echo "unhealthy")
+        TCP_STATE=$(curl -sf http://localhost:${daemon_port_tcp}/healthz && echo "healthy" || echo "unhealthy")
+%{ endif ~}
+
+        echo "UDP: $UDP_STATE | TCP: $TCP_STATE (elapsed: $${ELAPSED}s)"
+
+        if [ "$UDP_STATE" = "healthy" ] && [ "$TCP_STATE" = "healthy" ]; then
+          echo "Both healthy. Associating EIP $EIP_ALLOC_ID..."
+          aws ec2 associate-address \
+            --region "$REGION" \
+            --allocation-id "$EIP_ALLOC_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --allow-reassociation
+          echo "EIP associated successfully."
+          exit 0
+        fi
+
+        if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+          echo "ERROR: Timed out after $${TIMEOUT}s waiting for healthy state." >&2
+          exit 1
+        fi
+
+        sleep "$INTERVAL"
+        ELAPSED=$(($ELAPSED + $INTERVAL))
+      done
+
+  # --- EIP association systemd service ---
+  - path: /etc/systemd/system/eip-associate.service
+    content: |
+      [Unit]
+      Description=Associate Elastic IP after health checks pass
+      After=openvpn-auth-udp.service openvpn-auth-tcp.service
+      Requires=openvpn-auth-udp.service openvpn-auth-tcp.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/eip-associate.sh
+      RemainAfterExit=yes
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=eip-associate
+
+      [Install]
+      WantedBy=multi-user.target
+%{ endif ~}
+
+runcmd:
+  # --- Install AWS CLI v2 ---
+  - |
+    ARCH=$(uname -m)
+    case "$ARCH" in x86_64) CLI_ARCH="x86_64" ;; aarch64) CLI_ARCH="aarch64" ;; *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;; esac
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$${CLI_ARCH}.zip" -o /tmp/awscliv2.zip
+    unzip -q /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install
+    rm -rf /tmp/awscliv2.zip /tmp/aws
+
+  # --- Install OpenVPN from official repo ---
+  - |
+    export DEBIAN_FRONTEND=noninteractive
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://swupdate.openvpn.net/repos/repo-public.gpg \
+      | gpg --dearmor > /etc/apt/keyrings/openvpn-repo-public.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/openvpn-repo-public.gpg] https://build.openvpn.net/debian/openvpn/release/2.6 noble main" \
+      > /etc/apt/sources.list.d/openvpn-aptrepo.list
+    apt-get update -y
+    apt-get install -y openvpn=${openvpn_version}-noble0
+
+  # --- Apply sysctl ---
+  - sysctl --system
+
+  # --- NAT masquerade for VPN clients ---
+  - |
+    PRIMARY_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
+    nft add table ip nat
+    nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; }
+    nft add rule ip nat postrouting ip saddr ${openvpn_udp_cidr} oifname "$PRIMARY_IFACE" masquerade
+    nft add rule ip nat postrouting ip saddr ${openvpn_tcp_cidr} oifname "$PRIMARY_IFACE" masquerade
+    nft list ruleset > /etc/nftables.conf
+  - systemctl enable nftables
+
+  # --- Fetch PKI from Secrets Manager ---
+  - /usr/local/bin/fetch-pki.sh
+
+  # --- Create required directories ---
+  - mkdir -p /var/log/openvpn
+  - mkdir -p /run/openvpn
+
+  # --- Generate management password ---
+  - |
+    openssl rand -base64 32 > /etc/openvpn/management-pw
+    chmod 600 /etc/openvpn/management-pw
+
+  # --- Download daemon binary ---
+%{ if daemon_binary_s3_uri != "" ~}
+  - aws s3 cp '${daemon_binary_s3_uri}' /usr/local/bin/openvpn-auth-daemon --region '${aws_region}'
+  - chmod +x /usr/local/bin/openvpn-auth-daemon
+%{ endif ~}
+
+  # --- Write callback URLs to environment file ---
+%{ if callback_mode == "dynamic" ~}
+  - |
+    PRIVATE_IP=$(cloud-init query ds.meta_data.local_ipv4)
+    cat > /etc/openvpn-auth/env <<ENVEOF
+    VPN_AUTH_CALLBACK_URL_UDP=https://${alb_domain_name}/callback/$${PRIVATE_IP}/udp
+    VPN_AUTH_CALLBACK_URL_TCP=https://${alb_domain_name}/callback/$${PRIVATE_IP}/tcp
+    ENVEOF
+%{ else ~}
+  - |
+    cat > /etc/openvpn-auth/env <<ENVEOF
+    VPN_AUTH_CALLBACK_URL_UDP=${callback_url_udp}
+    VPN_AUTH_CALLBACK_URL_TCP=${callback_url_tcp}
+    ENVEOF
+%{ endif ~}
+
+  # --- Enable and start all services ---
+  # OpenVPN blocks on management-hold until auth daemon connects,
+  # so start with --no-block to avoid blocking cloud-init.
+  - systemctl daemon-reload
+%{ if enable_eip_association ~}
+  - systemctl enable openvpn-server@udp openvpn-server@tcp openvpn-auth-udp openvpn-auth-tcp eip-associate
+  - systemctl start --no-block openvpn-server@udp openvpn-server@tcp openvpn-auth-udp openvpn-auth-tcp eip-associate
+%{ else ~}
+  - systemctl enable openvpn-server@udp openvpn-server@tcp openvpn-auth-udp openvpn-auth-tcp
+  - systemctl start --no-block openvpn-server@udp openvpn-server@tcp openvpn-auth-udp openvpn-auth-tcp
+%{ endif ~}

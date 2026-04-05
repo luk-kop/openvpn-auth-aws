@@ -1,0 +1,32 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+LICENSE
+
+# IDE / tooling
+.idea/
+.vscode/
+.kiro/
+.pre-commit-config.yaml
+
+# Logs
+*.log
+
+# Build artifacts (local)
+openvpn-auth-daemon
+mgmt-mock
+alb-mock
+lambda-mock
+
+# Lab environment (certs, configs, Docker files — not needed in image)
+lab/
+
+# Notes
+notes/
+
+# Makefile
+Makefile
