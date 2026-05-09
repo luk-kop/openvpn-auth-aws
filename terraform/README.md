@@ -25,6 +25,8 @@ The instance launches without a public IP by default — the EIP is assigned onl
 
 > **Note:** Even with all VPC Endpoints, cloud-init still needs internet access to download AWS CLI v2 (`awscli.amazonaws.com`) and install packages from external apt repos (Ubuntu archive, OpenVPN repo). This can be solved by configuring a forward proxy (for curl and apt via `Acquire::http::Proxy`), using a custom AMI with all dependencies pre-installed, or simply setting `ec2_associate_public_ip = true`.
 
+The daemon itself can also use a forward proxy for runtime egress to AWS APIs and ALB public key endpoints via `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`. See [Configuration: Forward Proxy For Daemon Egress](../docs/configuration.md#forward-proxy-for-daemon-egress).
+
 ## VPN Tunnel Mode
 
 Only **split-tunnel** mode is supported by the current Terraform code. Routes are pushed to clients via the `pushed_routes` variable. Full-tunnel (`push "redirect-gateway def1"`) is not wired up — to redirect all client traffic through the VPN you would need to extend the cloud-config template manually.

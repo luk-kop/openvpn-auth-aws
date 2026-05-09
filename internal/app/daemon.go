@@ -26,7 +26,7 @@ type Daemon struct {
 
 	// cmdCh lives at daemon level so the callback server can write decisions
 	// to the management socket even across reconnections.
-	cmdCh chan string
+	cmdCh chan queuedCommand
 
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -37,7 +37,7 @@ type Daemon struct {
 const bootstrapReadTimeout = 5 * time.Second
 
 type decisionSink struct {
-	cmdCh chan<- string
+	cmdCh chan<- queuedCommand
 	done  <-chan struct{}
 }
 
@@ -47,25 +47,40 @@ type directDecisionSink struct {
 	done   <-chan struct{}
 }
 
-func (s decisionSink) Send(d auth.Decision) error {
+type queuedCommand struct {
+	cmd string
+	ack chan error
+}
+
+// decisionToCommand converts an auth decision to the corresponding OpenVPN
+// management socket command string. Returns an empty string for unknown types.
+func decisionToCommand(d auth.Decision) string {
 	switch d.Type {
 	case auth.DecisionAllow:
-		return s.sendOne(mgmt.ClientAuth(d.CID, d.KID))
+		return mgmt.ClientAuth(d.CID, d.KID)
 	case auth.DecisionAllowNT:
-		return s.sendOne(mgmt.ClientAuthNT(d.CID, d.KID))
+		return mgmt.ClientAuthNT(d.CID, d.KID)
 	case auth.DecisionDeny:
-		return s.sendOne(mgmt.ClientDeny(d.CID, d.KID, d.Reason))
+		return mgmt.ClientDeny(d.CID, d.KID, d.Reason)
 	case auth.DecisionPending:
-		return s.sendOne(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
+		return mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout)
 	case auth.DecisionKill:
-		return s.sendOne(mgmt.ClientKill(d.CID, d.KillMode))
+		return mgmt.ClientKill(d.CID, d.KillMode)
 	}
-	return nil
+	return ""
+}
+
+func (s decisionSink) Send(d auth.Decision) error {
+	cmd := decisionToCommand(d)
+	if cmd == "" {
+		return nil
+	}
+	return s.sendOne(cmd)
 }
 
 func (s decisionSink) sendOne(cmd string) error {
 	select {
-	case s.cmdCh <- cmd:
+	case s.cmdCh <- queuedCommand{cmd: cmd}:
 		return nil
 	case <-s.done:
 		return fmt.Errorf("command dropped: connection closed")
@@ -73,19 +88,8 @@ func (s decisionSink) sendOne(cmd string) error {
 }
 
 func (s directDecisionSink) Send(d auth.Decision) error {
-	var cmd string
-	switch d.Type {
-	case auth.DecisionAllow:
-		cmd = mgmt.ClientAuth(d.CID, d.KID)
-	case auth.DecisionAllowNT:
-		cmd = mgmt.ClientAuthNT(d.CID, d.KID)
-	case auth.DecisionDeny:
-		cmd = mgmt.ClientDeny(d.CID, d.KID, d.Reason)
-	case auth.DecisionPending:
-		cmd = mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout)
-	case auth.DecisionKill:
-		cmd = mgmt.ClientKill(d.CID, d.KillMode)
-	default:
+	cmd := decisionToCommand(d)
+	if cmd == "" {
 		return nil
 	}
 
@@ -108,34 +112,55 @@ func (s directDecisionSink) Send(d auth.Decision) error {
 // DaemonSink is the DecisionSink backed by the daemon-level cmdCh.
 // It never blocks on a "done" channel — the daemon manages its own lifecycle.
 type DaemonSink struct {
-	CmdCh chan<- string
+	cmdCh chan<- queuedCommand
 }
 
 func (s DaemonSink) Send(d auth.Decision) error {
-	switch d.Type {
-	case auth.DecisionAllow:
-		return s.trySend(mgmt.ClientAuth(d.CID, d.KID))
-	case auth.DecisionAllowNT:
-		return s.trySend(mgmt.ClientAuthNT(d.CID, d.KID))
-	case auth.DecisionDeny:
-		return s.trySend(mgmt.ClientDeny(d.CID, d.KID, d.Reason))
-	case auth.DecisionPending:
-		return s.trySend(mgmt.ClientPendingAuth(d.CID, d.KID, d.URL, d.Timeout))
-	case auth.DecisionKill:
-		return s.trySend(mgmt.ClientKill(d.CID, d.KillMode))
+	cmd := decisionToCommand(d)
+	if cmd == "" {
+		return nil
 	}
-	return nil
+	return s.trySend(cmd)
+}
+
+func (s DaemonSink) SendAck(d auth.Decision) error {
+	cmd := decisionToCommand(d)
+	if cmd == "" {
+		return nil
+	}
+	return s.sendAck(cmd)
 }
 
 func (s DaemonSink) trySend(cmd string) error {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
-	case s.CmdCh <- cmd:
+	case s.cmdCh <- queuedCommand{cmd: cmd}:
 		return nil
 	case <-timer.C:
 		slog.Warn("daemon cmdCh full, dropping command", "cmd", cmd)
 		return fmt.Errorf("command dropped: channel full after 5s")
+	}
+}
+
+func (s DaemonSink) sendAck(cmd string) error {
+	ack := make(chan error, 1)
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case s.cmdCh <- queuedCommand{cmd: cmd, ack: ack}:
+	case <-timer.C:
+		slog.Warn("daemon cmdCh full, dropping command", "cmd", cmd)
+		return fmt.Errorf("command dropped: channel full after 5s")
+	}
+
+	timer.Reset(5 * time.Second)
+	select {
+	case err := <-ack:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("command write ack timed out after 5s")
 	}
 }
 
@@ -148,15 +173,15 @@ func New(cfg config.Config, handler *auth.Handler, sessions *auth.SessionStore, 
 		sessions:       sessions,
 		metrics:        metrics,
 		callbackServer: callbackServer,
-		cmdCh:          make(chan string, 256),
+		cmdCh:          make(chan queuedCommand, 256),
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
 	}
 }
 
-// CmdCh returns the daemon-level command channel for constructing sinks.
-func (d *Daemon) CmdCh() chan string {
-	return d.cmdCh
+// Sink returns the daemon-level decision sink for callback and timeout flows.
+func (d *Daemon) Sink() DaemonSink {
+	return DaemonSink{cmdCh: d.cmdCh}
 }
 
 // SetCallbackServer sets the callback server after daemon construction.
@@ -317,7 +342,7 @@ func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) (con
 			d.handler.HandleEvent(d.shutdownCtx, event, sink)
 		case strings.HasPrefix(line, ">HOLD:"):
 			select {
-			case d.cmdCh <- "hold release":
+			case d.cmdCh <- queuedCommand{cmd: "hold release"}:
 			case <-cmdDone:
 				connCancel()
 				return connCancel, nil
@@ -333,12 +358,15 @@ func (d *Daemon) commandWriter(ctx context.Context, client *mgmt.Client, mu *syn
 		select {
 		case <-ctx.Done():
 			return
-		case cmd := <-d.cmdCh:
+		case queued := <-d.cmdCh:
 			mu.Lock()
-			err := client.WriteLine(cmd)
+			err := client.WriteLine(queued.cmd)
 			mu.Unlock()
+			if queued.ack != nil {
+				queued.ack <- err
+			}
 			if err != nil {
-				slog.Error("management write failed", "cmd", cmd, "error", err)
+				slog.Error("management write failed", "cmd", queued.cmd, "error", err)
 				return
 			}
 		}

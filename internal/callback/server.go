@@ -258,8 +258,10 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 9: All checks passed — send allow decision first, only then mark done.
-	if err := s.sink.Send(auth.Decision{
+	// Step 9: All checks passed — write allow decision first, only then mark done.
+	// Production daemon sinks acknowledge the management socket write so the
+	// session is not promoted if the socket drops before client-auth is sent.
+	if err := sendAllowDecision(s.sink, auth.Decision{
 		Type: auth.DecisionAllow,
 		CID:  sess.CID,
 		KID:  sess.KID,
@@ -277,6 +279,13 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	s.metrics.AuthSuccess()
 	slog.Info("callback: auth success", "sid", sess.SessionID, "email", claims.Email)
 	s.renderSuccess(w, claims.Email, sess.SessionID)
+}
+
+func sendAllowDecision(sink auth.DecisionSink, d auth.Decision) error {
+	if ackSink, ok := sink.(auth.AckDecisionSink); ok {
+		return ackSink.SendAck(d)
+	}
+	return sink.Send(d)
 }
 
 // handleHealthz returns the daemon health status for ALB target group health checks.

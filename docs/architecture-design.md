@@ -206,16 +206,16 @@ Each EC2 runs two OpenVPN servers (UDP + TCP), each with its own management sock
 graph TD
     subgraph EC2["EC2 Instance"]
         subgraph UDP_Stack["UDP Stack"]
-            OVPN_UDP("openvpn-udp.service\nproto udp, port 1194\nmgmt: /run/openvpn/udp-mgmt.sock")
-            AUTH_UDP("openvpn-auth-udp.service\ncallback-port 8080\ncallback-url .../callback/01/udp")
+            OVPN_UDP("openvpn-udp.service<br>proto udp, port 1194<br>mgmt: /run/openvpn/udp-mgmt.sock")
+            AUTH_UDP("openvpn-auth-udp.service<br>callback-port 8080<br>callback-url .../callback/01/udp")
         end
 
         subgraph TCP_Stack["TCP Stack"]
-            OVPN_TCP("openvpn-tcp.service\nproto tcp, port 1195\nmgmt: /run/openvpn/tcp-mgmt.sock")
-            AUTH_TCP("openvpn-auth-tcp.service\ncallback-port 8081\ncallback-url .../callback/01/tcp")
+            OVPN_TCP("openvpn-tcp.service<br>proto tcp, port 1195<br>mgmt: /run/openvpn/tcp-mgmt.sock")
+            AUTH_TCP("openvpn-auth-tcp.service<br>callback-port 8081<br>callback-url .../callback/01/tcp")
         end
 
-        EIP("eip-associate.service (oneshot)\nAfter=openvpn-auth-udp, openvpn-auth-tcp\naws ec2 associate-address ...")
+        EIP("eip-associate.service (oneshot)<br>After=openvpn-auth-udp, openvpn-auth-tcp<br>aws ec2 associate-address ...")
     end
 
     OVPN_UDP <-->|"Unix socket"| AUTH_UDP
@@ -287,19 +287,19 @@ ASG `desired=1, max=2` means during replacement both old and new instances may b
 
 ```mermaid
 graph TD
-    S1("1. ASG launches new EC2\n(old still running, still has EIP)")
-    S2("2. New EC2 boots\nstarts OpenVPN + daemons")
+    S1("1. ASG launches new EC2<br>(old still running, still has EIP)")
+    S2("2. New EC2 boots<br>starts OpenVPN + daemons")
     S3("3. ASG registers new EC2 in target groups")
-    S4("4. Targets status: initial\nALB does not route traffic to new EC2")
-    S5("5. ALB health checks begin\nGET /healthz every 30s")
-    S6("6. After 3 x 30s = ~90s\ntargets become healthy")
-    S7("7. EIP associate script runs\nassociate-address → EIP moves")
+    S4("4. Targets status: initial<br>ALB does not route traffic to new EC2")
+    S5("5. ALB health checks begin<br>GET /healthz every 30s")
+    S6("6. After 3 x 30s = ~90s<br>targets become healthy")
+    S7("7. EIP associate script runs<br>associate-address → EIP moves")
     S8("8. Old instance terminated by ASG")
 
     S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
 
-    S7 -->|"EIP moves"| E1("Old instance loses public IP\nall VPN tunnels drop")
-    E1 --> E2("VPN clients reconnect\nvia EIP to new instance")
+    S7 -->|"EIP moves"| E1("Old instance loses public IP<br>all VPN tunnels drop")
+    E1 --> E2("VPN clients reconnect<br>via EIP to new instance")
 
     style S1 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
     style S2 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
@@ -325,10 +325,10 @@ The `/healthz` endpoint acts as a readiness probe for the entire stack. EIP asso
 
 ```mermaid
 graph LR
-    A("OpenVPN starts\nopens mgmt socket") --> B("Daemon starts\nconnects to mgmt socket")
-    B --> C("/healthz returns 200\nmgmt_connected: true")
-    C --> D("ALB health check passes\ntarget becomes healthy")
-    D --> E("EIP script detects healthy\nassociate-address")
+    A("OpenVPN starts<br>opens mgmt socket") --> B("Daemon starts<br>connects to mgmt socket")
+    B --> C("/healthz returns 200<br>mgmt_connected: true")
+    C --> D("ALB health check passes<br>target becomes healthy")
+    D --> E("EIP script detects healthy<br>associate-address")
 
     style A fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
     style B fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
@@ -519,7 +519,8 @@ The daemon infers local dev behavior from its configuration — no hidden mode s
 | Config state | Behavior |
 |---|---|
 | `--alb-arn` omitted | Skip ALB JWT signature and `signer` validation (accepts unsigned JWTs from alb-mock) |
-| `--hmac-secret` set | Use local HMAC secret directly (no Secrets Manager integration — the daemon only supports a static `--hmac-secret` value) |
+| `--hmac-secret` set | Use local HMAC secret directly |
+| `--hmac-secret-secret-id` set | Fetch the HMAC secret once from AWS Secrets Manager at daemon startup |
 | `--cognito-user-pool-id` omitted | Use static identity checker automatically — no AWS credentials needed |
 | `--cognito-groups-from-claims` | Read groups from `x-amzn-oidc-data` JWT claims instead of calling `AdminListGroupsForUser`. Use with SAML `custom:groups` mapping or in local dev. |
 | `--cognito-skip-reauth` | Skip `AdminGetUser` call on reauth — auto-approve renegotiation without verifying user status in Cognito. |
@@ -605,13 +606,13 @@ See [testing.md](testing.md) for a detailed comparison of what each mode covers.
 ```mermaid
 graph TD
     subgraph TF["terraform/"]
-        Root("main.tf — wires modules together\nsecrets.tf — PKI secrets in Secrets Manager")
+        Root("main.tf — wires modules together<br>secrets.tf — PKI secrets in Secrets Manager")
         subgraph Modules["modules/"]
-            Cognito("cognito/\nUser pool, app client, domain")
-            ALBMod("alb/\nALB, HTTPS listener, Cognito auth action\nACM cert, security groups")
-            NLBMod("nlb/\nNLB for OpenVPN UDP/TCP traffic\nmulti-instance mode only")
-            VPN("vpn-server/\nASG, launch template, EIP, target groups")
-            LR("lambda-router/\nLambda proxy for callback routing\nmulti-instance mode only")
+            Cognito("cognito/<br>User pool, app client, domain")
+            ALBMod("alb/<br>ALB, HTTPS listener, Cognito auth action<br>ACM cert, security groups")
+            NLBMod("nlb/<br>NLB for OpenVPN UDP/TCP traffic<br>multi-instance mode only")
+            VPN("vpn-server/<br>ASG, launch template, EIP, target groups")
+            LR("lambda-router/<br>Lambda proxy for callback routing<br>multi-instance mode only")
         end
     end
 
@@ -629,6 +630,7 @@ graph TD
 Key toggles:
 - `cost_saving_mode = true` — skips ALB, NLB, EIP, and ASG; preserves Cognito and PKI secrets
 - `multi_instance_mode = true` — enables NLB and Lambda Router, disables EIP and static ALB listener rules
+
 ## Historical Alternative: Per-Server ASGs
 
 An earlier design option used multiple independent VPN server stacks, where each logical server had its own ASG, its own EIP, and static ALB callback rules such as `/callback/01/udp`, `/callback/02/tcp`.

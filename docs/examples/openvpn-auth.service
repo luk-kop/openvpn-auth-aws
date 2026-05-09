@@ -1,0 +1,68 @@
+[Unit]
+Description=OpenVPN Auth Daemon
+Documentation=https://github.com/lukaszo/openvpn-auth-aws
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=10
+
+# Do not add Requires=openvpn-server@udp.service here. The daemon has built-in
+# management socket reconnect logic, so it can start before OpenVPN is ready.
+# This avoids systemd startup deadlocks when OpenVPN uses management-hold.
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/openvpn-auth/env
+
+ExecStart=/usr/local/bin/openvpn-auth-daemon \
+    --management-socket=/run/openvpn/udp-mgmt.sock \
+    --management-password-file=/etc/openvpn/management-pw \
+    --callback-url=${VPN_AUTH_CALLBACK_URL} \
+    --callback-port=8080 \
+    --alb-arn=${VPN_AUTH_ALB_ARN} \
+    --cognito-user-pool-id=${VPN_AUTH_COGNITO_USER_POOL_ID} \
+    --cognito-issuer-url=${VPN_AUTH_COGNITO_ISSUER_URL} \
+    --aws-region=${AWS_REGION} \
+    --required-group=${VPN_AUTH_REQUIRED_GROUP} \
+    --hand-window=300s \
+    --log-format=json
+
+Restart=always
+RestartSec=5s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openvpn-auth
+
+# Resource guardrails. Tune for your instance size and expected reconnect burst.
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=64
+# CPUQuota=50%
+
+# Hardening. Keep this list aligned with what the daemon actually needs:
+# network access, read access to config/secrets, and read/write access to the
+# OpenVPN management Unix socket under /run/openvpn.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+ReadWritePaths=/run/openvpn
+ReadOnlyPaths=/etc/openvpn /etc/openvpn-auth
+
+# Run as a dedicated unprivileged user in production if file permissions allow it.
+# The user must be able to read /etc/openvpn/management-pw and access the
+# management socket path.
+# User=openvpn-auth
+# Group=openvpn-auth
+
+[Install]
+WantedBy=multi-user.target

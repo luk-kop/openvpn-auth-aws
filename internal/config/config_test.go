@@ -61,6 +61,32 @@ func TestValidate_HMACSecretOptional(t *testing.T) {
 	}
 }
 
+func TestValidate_HMACSecretSecretIDAllowed(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.HMACSecret = ""
+	cfg.HMACSecretSecretID = "vpn-auth/hmac"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error when HMAC secret is sourced from Secrets Manager, got: %v", err)
+	}
+}
+
+func TestValidate_HMACSecretSourcesMutuallyExclusive(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.HMACSecretSecretID = "vpn-auth/hmac"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when both HMAC secret sources are set")
+	}
+}
+
+func TestValidate_HMACSecretSecretIDWhitespace(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.HMACSecret = ""
+	cfg.HMACSecretSecretID = " vpn-auth/hmac "
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when HMAC secret secret ID has leading or trailing whitespace")
+	}
+}
+
 func TestValidate_EmptyCognitoUserPoolID_NoALB_NoError(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.CognitoUserPoolID = ""

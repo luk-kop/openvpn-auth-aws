@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	ErrSessionNotFound  = errors.New("session not found")
+	ErrSessionNotFound   = errors.New("session not found")
 	ErrSessionNotPending = errors.New("session not pending")
 )
 

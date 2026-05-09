@@ -17,10 +17,10 @@ import (
 func TestMain(m *testing.M) {
 	// Set required env vars before init() runs — but init() already ran
 	// when this package was loaded. We re-initialize globals for tests.
-	os.Setenv("VPC_CIDR", "10.0.0.0/16")       //nolint:errcheck // test setup
-	os.Setenv("DAEMON_PORT_UDP", "8080")        //nolint:errcheck // test setup
-	os.Setenv("DAEMON_PORT_TCP", "8081")        //nolint:errcheck // test setup
-	os.Setenv("UPSTREAM_TIMEOUT", "2s")         //nolint:errcheck // test setup
+	os.Setenv("VPC_CIDR", "10.0.0.0/16") //nolint:errcheck // test setup
+	os.Setenv("DAEMON_PORT_UDP", "8080") //nolint:errcheck // test setup
+	os.Setenv("DAEMON_PORT_TCP", "8081") //nolint:errcheck // test setup
+	os.Setenv("UPSTREAM_TIMEOUT", "2s")  //nolint:errcheck // test setup
 
 	_, parsed, _ := net.ParseCIDR("10.0.0.0/16")
 	vpcCIDR = parsed

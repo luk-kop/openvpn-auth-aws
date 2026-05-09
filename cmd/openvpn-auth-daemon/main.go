@@ -9,7 +9,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 
 	"openvpn-auth-aws/internal/app"
 	"openvpn-auth-aws/internal/auth"
@@ -43,6 +45,22 @@ func main() {
 
 	var identity auth.IdentityChecker
 	var signer auth.StateSigner
+	var awsCfg aws.Config
+	var awsCfgLoaded bool
+
+	loadAWSConfig := func() (aws.Config, error) {
+		if awsCfgLoaded {
+			return awsCfg, nil
+		}
+		slog.Info("initializing AWS clients")
+		loaded, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.AWSRegion))
+		if err != nil {
+			return aws.Config{}, err
+		}
+		awsCfg = loaded
+		awsCfgLoaded = true
+		return awsCfg, nil
+	}
 
 	if cfg.HMACSecret != "" {
 		var err error
@@ -51,6 +69,23 @@ func main() {
 			slog.Error("invalid hmac-secret", "error", err)
 			os.Exit(1)
 		}
+	} else if cfg.HMACSecretSecretID != "" {
+		loaded, err := loadAWSConfig()
+		if err != nil {
+			slog.Error("aws config failed", "error", err)
+			os.Exit(1)
+		}
+		secret, err := secrets.FetchHMACSecret(ctx, secretsmanager.NewFromConfig(loaded), cfg.HMACSecretSecretID)
+		if err != nil {
+			slog.Error("failed to fetch hmac secret", "secret_id", cfg.HMACSecretSecretID, "error", err)
+			os.Exit(1)
+		}
+		signer, err = secrets.NewStaticSigner(secret)
+		if err != nil {
+			slog.Error("invalid hmac secret from Secrets Manager", "secret_id", cfg.HMACSecretSecretID, "error", err)
+			os.Exit(1)
+		}
+		slog.Info("loaded hmac secret from Secrets Manager", "secret_id", cfg.HMACSecretSecretID)
 	} else {
 		slog.Info("no hmac-secret provided, generating random key")
 		signer = secrets.NewRandomSigner()
@@ -59,14 +94,13 @@ func main() {
 	if cfg.CognitoUserPoolID == "" {
 		identity = cognito.NewStaticChecker(cfg.CheckGroupsOnReauth)
 	} else {
-		slog.Info("initializing AWS clients")
-		awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.AWSRegion))
+		loaded, err := loadAWSConfig()
 		if err != nil {
 			slog.Error("aws config failed", "error", err)
 			os.Exit(1)
 		}
 
-		identity = cognito.NewChecker(awsCfg, cfg.CognitoUserPoolID)
+		identity = cognito.NewChecker(loaded, cfg.CognitoUserPoolID)
 	}
 
 	handler := auth.NewHandler(cfg, sessions, identity, signer, m)
@@ -75,7 +109,7 @@ func main() {
 	// The mgmtConnected closure reads the daemon's socketConnected atomic so /healthz reflects
 	// live socket state without coupling the callback package to the app package.
 	daemon := app.New(cfg, handler, sessions, nil, m)
-	daemonSink := app.DaemonSink{CmdCh: daemon.CmdCh()}
+	daemonSink := daemon.Sink()
 
 	// Give the handler a daemon-level sink for authTimeout goroutines so that
 	// timeout denials survive management socket reconnections.

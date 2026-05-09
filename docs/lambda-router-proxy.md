@@ -1,5 +1,7 @@
 # Lambda Router Proxy
 
+> **Usage:** Lambda Router is used only in multi-instance mode (`multi_instance_mode = true`). In single-instance mode (`multi_instance_mode = false`), Terraform creates static ALB callback rules per listener and Lambda Router is not deployed.
+
 Lambda Router replaces the earlier callback-routing approach based on EventBridge, Python Lambda, and dynamic ALB rules with a simple native Go Lambda proxy. A single static ALB rule for `/callback/*` sends traffic to Lambda, which extracts the private IP from the URL path and proxies the HTTP request directly to the daemon on the correct EC2 instance.
 
 ## Architecture

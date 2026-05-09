@@ -80,7 +80,10 @@ setenv IV_SSO webauth
 # side will time out and kill the session before auth completes.
 hand-window 300
 
-# Use ECDH instead of DH (faster)
+# Do not add duplicate-cn. OpenVPN rejects duplicate certificate CNs by default;
+# this project relies on that behavior for single-process duplicate protection.
+
+# Disable finite-field DH; use ECDH/TLS named groups.
 dh none
 
 <ca>
