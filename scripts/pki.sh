@@ -5,7 +5,7 @@
 # Uploads PKI artifacts to AWS Secrets Manager for EC2 boot-time retrieval.
 #
 # Usage:
-#   ./scripts/pki.sh init                                     Initialize CA + server cert + DH + ta.key
+#   ./scripts/pki.sh init                                     Initialize CA + server cert + ta.key
 #   ./scripts/pki.sh client <common-name>                     Generate a client certificate
 #   ./scripts/pki.sh upload --region <r> --prefix <p>         Upload PKI to Secrets Manager
 #   ./scripts/pki.sh client-config <cn> --remote <host|ip>[:port]  Generate .ovpn client config
@@ -253,7 +253,7 @@ case "${1:-}" in
     echo "Usage: $0 {init|client|upload|client-config}"
     echo ""
     echo "Commands:"
-    echo "  init                                     Initialize CA + server cert + DH + ta.key"
+    echo "  init                                     Initialize CA + server cert + ta.key"
     echo "  client <common-name>                     Generate a client certificate"
     echo "  upload --region <r> --prefix <p>          Upload PKI to Secrets Manager"
     echo "  client-config <cn> --remote <host|ip>[:port]  Generate .ovpn client config"

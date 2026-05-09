@@ -33,7 +33,25 @@ hand-window 300
 | `setenv IV_SSO webauth` | Announces WebAuth support to clients via `IV_SSO` environment variable |
 | `hand-window` | Time (seconds) allowed for the full TLS handshake including browser-based auth. Must match `--hand-window` on the daemon. Default is 60s which is too short for browser auth — set to 300s or more |
 
+## Unsupported Directives
+
+Do **not** set `duplicate-cn`.
+
+OpenVPN's default behavior is to allow only one active client instance per certificate common name within a single server process. The `duplicate-cn` directive disables that protection and allows multiple concurrent sessions using the same certificate/CN.
+
+This project assumes `duplicate-cn` is absent:
+
+- Single EC2 / single OpenVPN process: OpenVPN itself handles duplicate CN replacement.
+- UDP + TCP on one EC2: each OpenVPN process enforces duplicate CN only for itself; there is no built-in cross-protocol guarantee.
+- Multi-instance deployments: duplicate-CN prevention requires a global ownership mechanism, not `duplicate-cn`.
+
+The daemon's local CN tracking is only defensive cleanup for stale local state. It must not be treated as a replacement for OpenVPN's default duplicate-CN behavior or for future global single-session enforcement.
+
 ## Recommended Settings
+
+### Systemd Unit
+
+Terraform generates `openvpn-auth-udp.service` and `openvpn-auth-tcp.service` from the cloud-config template. For non-Terraform installs, see [docs/examples/openvpn-auth.service](examples/openvpn-auth.service) for a standalone systemd unit with daemon-specific hardening settings.
 
 ### Verbosity
 

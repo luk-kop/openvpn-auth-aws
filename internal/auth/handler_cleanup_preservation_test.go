@@ -1,22 +1,15 @@
-//go:build post_fix
-
 package auth
 
-// Cleanup preservation tests for cidToCognitoUsername — Property 2: Session Cleanup
+// Cleanup preservation tests for cognitoUsername — Property 2: Session Cleanup
 //
-// These tests MUST PASS on FIXED code. They verify that the new cidToCognitoUsername
-// map introduced by the F3 fix is cleaned up correctly on disconnect and eviction,
-// with no memory leaks.
-//
-// Build tag: post_fix — these tests reference Handler.cidToCognitoUsername which
-// does not exist on unfixed code. They are compiled and run after the fix is applied
-// (task 3.3). Run with: go test -tags post_fix ./internal/auth/...
+// These tests verify that the cognitoUsername field in cidState is cleaned up
+// correctly on disconnect and eviction, with no memory leaks.
 //
 // Properties tested:
 //   - After MarkAuthenticated(cid, cognitoUsername) then CLIENT:DISCONNECT,
-//     cidToCognitoUsername[cid] is deleted (no leak).
+//     cids[cid].cognitoUsername is gone (entry deleted).
 //   - After MarkAuthenticated(cid, cognitoUsername) then evictSession(cid),
-//     cidToCognitoUsername[cid] is deleted (no leak).
+//     cids[cid] is gone entirely.
 //
 // Validates: Requirements 3.6
 
@@ -30,12 +23,11 @@ import (
 )
 
 // TestPreservation_SessionCleanup_Disconnect verifies that handleDisconnect
-// deletes the cidToCognitoUsername entry for the CID, preventing memory leaks.
+// removes the cidState entry (including cognitoUsername) for the CID,
+// preventing memory leaks.
 //
 // Property: after MarkAuthenticated(cid, cognitoUsername) then CLIENT:DISCONNECT,
-// cidToCognitoUsername[cid] must be absent.
-//
-// EXPECTED OUTCOME: PASSES on fixed code.
+// cids[cid] must be absent.
 //
 // Validates: Requirements 3.6
 func TestPreservation_SessionCleanup_Disconnect(t *testing.T) {
@@ -70,7 +62,7 @@ func TestPreservation_SessionCleanup_Disconnect(t *testing.T) {
 	}, sink)
 	time.Sleep(10 * time.Millisecond)
 
-	// Step 2: MarkAuthenticated with cognitoUsername (fixed code signature).
+	// Step 2: MarkAuthenticated with cognitoUsername.
 	handler.MarkAuthenticated(cid, cognitoUsername)
 
 	// Step 3: CLIENT:ESTABLISHED.
@@ -80,49 +72,51 @@ func TestPreservation_SessionCleanup_Disconnect(t *testing.T) {
 	}, sink)
 	time.Sleep(10 * time.Millisecond)
 
-	// Verify the entry was stored.
+	// Verify cognitoUsername was stored.
 	handler.mu.Lock()
-	stored, exists := handler.cidToCognitoUsername[cid]
+	st := handler.cids[cid]
+	var stored string
+	if st != nil {
+		stored = st.cognitoUsername
+	}
 	handler.mu.Unlock()
-	if !exists || stored != cognitoUsername {
-		t.Fatalf("Setup FAILED: cidToCognitoUsername[%q] = %q (exists=%v); expected %q",
-			cid, stored, exists, cognitoUsername)
+	if stored != cognitoUsername {
+		t.Fatalf("Setup FAILED: cids[%q].cognitoUsername = %q; expected %q",
+			cid, stored, cognitoUsername)
 	}
 
-	// Step 4: CLIENT:DISCONNECT — should clean up cidToCognitoUsername.
+	// Step 4: CLIENT:DISCONNECT — should remove cids entry entirely.
 	handler.HandleEvent(ctx, mgmt.Event{
 		Type: mgmt.EventDisconnect,
 		CID:  cid,
 	}, sink)
 	time.Sleep(10 * time.Millisecond)
 
-	// Preservation: cidToCognitoUsername[cid] must be deleted after disconnect.
+	// Preservation: cids[cid] must be deleted after disconnect (no memory leak).
 	handler.mu.Lock()
-	_, stillExists := handler.cidToCognitoUsername[cid]
+	_, stillExists := handler.cids[cid]
 	handler.mu.Unlock()
 	if stillExists {
-		t.Errorf("Preservation FAILED: cidToCognitoUsername[%q] still exists after CLIENT:DISCONNECT; expected deletion (memory leak)", cid)
+		t.Errorf("Preservation FAILED: cids[%q] still exists after CLIENT:DISCONNECT; expected deletion (memory leak)", cid)
 	}
 }
 
-// TestPreservation_SessionCleanup_Eviction verifies that evictSession deletes
-// the cidToCognitoUsername entry for the CID, preventing memory leaks.
+// TestPreservation_SessionCleanup_Eviction verifies that evictSession removes
+// the cidState entry (including cognitoUsername) for the CID, preventing
+// memory leaks.
 //
 // Property: after MarkAuthenticated(cid, cognitoUsername) then evictSession(cid),
-// cidToCognitoUsername[cid] must be absent.
-//
-// EXPECTED OUTCOME: PASSES on fixed code.
+// cids[cid] must be absent.
 //
 // Validates: Requirements 3.6
 func TestPreservation_SessionCleanup_Eviction(t *testing.T) {
 	cfg := config.Config{
-		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:           "test-secret-key!!",
-		HandWindow:           5 * time.Second,
-		AuthTimeout:          5 * time.Second,
-		CallbackPort:         8080,
-		ReauthTimeout:        2 * time.Second,
-		SingleSessionPerUser: true,
+		CallbackURL:   "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:    "test-secret-key!!",
+		HandWindow:    5 * time.Second,
+		AuthTimeout:   5 * time.Second,
+		CallbackPort:  8080,
+		ReauthTimeout: 2 * time.Second,
 	}
 	checker := &recordingChecker{}
 	handler := newPreservationHandlerWithChecker(cfg, checker)
@@ -147,7 +141,7 @@ func TestPreservation_SessionCleanup_Eviction(t *testing.T) {
 	}, sink)
 	time.Sleep(10 * time.Millisecond)
 
-	// Step 2: MarkAuthenticated with cognitoUsername (fixed code signature).
+	// Step 2: MarkAuthenticated with cognitoUsername.
 	handler.MarkAuthenticated(cid, cognitoUsername)
 
 	// Step 3: CLIENT:ESTABLISHED.
@@ -157,26 +151,30 @@ func TestPreservation_SessionCleanup_Eviction(t *testing.T) {
 	}, sink)
 	time.Sleep(10 * time.Millisecond)
 
-	// Verify the entry was stored.
+	// Verify cognitoUsername was stored.
 	handler.mu.Lock()
-	stored, exists := handler.cidToCognitoUsername[cid]
+	st := handler.cids[cid]
+	var stored string
+	if st != nil {
+		stored = st.cognitoUsername
+	}
 	handler.mu.Unlock()
-	if !exists || stored != cognitoUsername {
-		t.Fatalf("Setup FAILED: cidToCognitoUsername[%q] = %q (exists=%v); expected %q",
-			cid, stored, exists, cognitoUsername)
+	if stored != cognitoUsername {
+		t.Fatalf("Setup FAILED: cids[%q].cognitoUsername = %q; expected %q",
+			cid, stored, cognitoUsername)
 	}
 
-	// Step 4: evictSession — should clean up cidToCognitoUsername.
+	// Step 4: evictSession — should remove cids entry entirely.
 	_, evicted := handler.evictSession(cid)
 	if !evicted {
 		t.Fatalf("Setup FAILED: evictSession(%q) returned evicted=false; expected true", cid)
 	}
 
-	// Preservation: cidToCognitoUsername[cid] must be deleted after eviction.
+	// Preservation: cids[cid] must be deleted after eviction (no memory leak).
 	handler.mu.Lock()
-	_, stillExists := handler.cidToCognitoUsername[cid]
+	_, stillExists := handler.cids[cid]
 	handler.mu.Unlock()
 	if stillExists {
-		t.Errorf("Preservation FAILED: cidToCognitoUsername[%q] still exists after evictSession; expected deletion (memory leak)", cid)
+		t.Errorf("Preservation FAILED: cids[%q] still exists after evictSession; expected deletion (memory leak)", cid)
 	}
 }

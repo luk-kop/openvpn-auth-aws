@@ -14,6 +14,7 @@ type Config struct {
 	ManagementSocket       string
 	ManagementPasswordFile string
 	HMACSecret             string
+	HMACSecretSecretID     string
 	RequiredGroup          string
 	CNCrossCheck           bool
 	HandWindow             time.Duration
@@ -40,12 +41,11 @@ type Config struct {
 	CognitoUserPoolID string
 
 	// AWS configuration
-	ALBPublicKeyBaseURL  string
-	AWSRegion            string
-	SingleSessionPerUser bool
-	EMFMetrics           bool
-	EMFInterval          time.Duration
-	LogFormat            string
+	ALBPublicKeyBaseURL string
+	AWSRegion           string
+	EMFMetrics          bool
+	EMFInterval         time.Duration
+	LogFormat           string
 
 	// Session limits
 	MaxSessionDuration time.Duration
@@ -62,6 +62,7 @@ func Parse() (Config, error) {
 	flag.StringVar(&cfg.ManagementSocket, "management-socket", getenv("VPN_AUTH_MANAGEMENT_SOCKET", "/run/openvpn/management.sock"), "path to the OpenVPN management unix socket")
 	flag.StringVar(&cfg.ManagementPasswordFile, "management-password-file", getenv("VPN_AUTH_MANAGEMENT_PASSWORD_FILE", "/etc/openvpn/management-pw"), "file containing the management password")
 	flag.StringVar(&cfg.HMACSecret, "hmac-secret", getenv("VPN_AUTH_HMAC_SECRET", ""), "HMAC secret for signing state values")
+	flag.StringVar(&cfg.HMACSecretSecretID, "hmac-secret-secret-id", getenv("VPN_AUTH_HMAC_SECRET_SECRET_ID", ""), "AWS Secrets Manager secret ID containing the HMAC secret for signing state values")
 	flag.StringVar(&cfg.RequiredGroup, "required-group", getenv("VPN_AUTH_REQUIRED_GROUP", ""), "required Cognito group for VPN access")
 	flag.BoolVar(&cfg.CNCrossCheck, "cn-cross-check", getBoolOrCollect("VPN_AUTH_CN_CROSS_CHECK", true, &envErrors), "enable CN cross-check against ALB JWT email claim")
 	flag.DurationVar(&cfg.HandWindow, "hand-window", getDurationOrCollect("VPN_AUTH_HAND_WINDOW", 300*time.Second, &envErrors), "pending auth timeout (must match OpenVPN server hand-window)")
@@ -90,7 +91,6 @@ func Parse() (Config, error) {
 	// AWS configuration
 	flag.StringVar(&cfg.ALBPublicKeyBaseURL, "alb-public-key-base-url", getenv("VPN_AUTH_ALB_PUBLIC_KEY_BASE_URL", ""), "base URL for ALB public key endpoint (default: https://public-keys.auth.elb.{region}.amazonaws.com)")
 	flag.StringVar(&cfg.AWSRegion, "aws-region", getenv("AWS_REGION", "eu-west-1"), "AWS region")
-	flag.BoolVar(&cfg.SingleSessionPerUser, "single-session-per-user", getBoolOrCollect("VPN_AUTH_SINGLE_SESSION_PER_USER", true, &envErrors), "enforce one active VPN session per certificate CN")
 	flag.BoolVar(&cfg.EMFMetrics, "emf-metrics", getBoolOrCollect("VPN_AUTH_EMF_METRICS", false, &envErrors), "emit CloudWatch EMF metrics to stdout")
 	flag.DurationVar(&cfg.EMFInterval, "emf-interval", getDurationOrCollect("VPN_AUTH_EMF_INTERVAL", 10*time.Second, &envErrors), "interval for EMF heartbeat metrics (0 to disable heartbeat only)")
 	flag.StringVar(&cfg.LogFormat, "log-format", getenv("VPN_AUTH_LOG_FORMAT", "text"), "log output format: text or json")
@@ -161,6 +161,12 @@ func (c Config) Validate() error {
 	}
 	if c.HMACSecret != "" && len(c.HMACSecret) < 16 {
 		problems = append(problems, fmt.Sprintf("hmac-secret must be at least 16 bytes, got %d", len(c.HMACSecret)))
+	}
+	if c.HMACSecret != "" && c.HMACSecretSecretID != "" {
+		problems = append(problems, "hmac-secret and hmac-secret-secret-id are mutually exclusive")
+	}
+	if strings.TrimSpace(c.HMACSecretSecretID) != c.HMACSecretSecretID {
+		problems = append(problems, "hmac-secret-secret-id must not contain leading or trailing whitespace")
 	}
 	if c.CallbackPort < 1 || c.CallbackPort > 65535 {
 		problems = append(problems, fmt.Sprintf("callback-port must be in range 1-65535, got %d", c.CallbackPort))

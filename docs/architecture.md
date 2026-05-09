@@ -15,7 +15,7 @@ sequenceDiagram
     C->>V: TLS connect
     V->>D: >CLIENT:CONNECT (CID, KID, ENV)
 
-    note over D: Pre-checks (IV_SSO, CN, single-session eviction)
+    note over D: Pre-checks (IV_SSO, CN, local stale-state cleanup)
 
     alt IV_SSO missing WebAuth or CN empty
         D->>V: client-deny
@@ -51,7 +51,7 @@ Before starting the OIDC flow, the daemon validates the `CLIENT:CONNECT` event:
 
 - **IV_SSO check** — client must advertise `webauth` or `openurl` in the `IV_SSO` env variable; otherwise `client-deny` with reason `"client does not support WebAuth"`
 - **Common Name** — certificate CN must be non-empty; otherwise `client-deny` with reason `"missing common name"`
-- **Single-session eviction** — when `--single-session-per-user=true` (default), if a session for the same CN already exists, the old session is evicted (`client-deny` for pending, `client-kill ... HALT` for established) before creating a new one
+- **Local stale-state cleanup** — if daemon memory still contains an older CID for the same CN, the old local entry is evicted (`client-deny` for pending, `client-kill ... HALT` for established) before creating a new one. This is defensive bookkeeping; OpenVPN itself rejects duplicate CNs per server process by default when `duplicate-cn` is absent.
 
 ### Steps
 
@@ -350,17 +350,17 @@ Sessions that never reach `ESTABLISHED` have a TTL of `2 × hand-window` and are
 
 ### Management Socket Reconnect and Session Tracking
 
-On each management socket connect, the daemon sends `hold release` followed by `status 3`. OpenVPN responds with a snapshot of all currently established clients. The daemon uses this snapshot to rebuild its in-memory session tracking maps (`cidToCN`, `cnToActiveCID`, `cidToExpiry`) — a process handled by `RebuildSessionTrackingFromStatus`.
+On each management socket connect, the daemon sends `hold release` followed by `status 3`. OpenVPN responds with a snapshot of all currently established clients. The daemon uses this snapshot to rebuild its in-memory session tracking (`cids`, `cnToActiveCID`) — a process handled by `RebuildSessionTrackingFromStatus`.
 
 This covers three scenarios:
 
 | Scenario | What happens |
 | --- | --- |
-| **Daemon restart** (OpenVPN still running) | Daemon starts with empty maps. `status 3` returns all active clients. Maps are populated from scratch — `single-session-per-user` and `max-session-duration` enforcement resume for existing sessions. |
+| **Daemon restart** (OpenVPN still running) | Daemon starts with empty maps. `status 3` returns all active clients. Maps are populated from scratch — local stale-state tracking and `max-session-duration` enforcement resume for existing sessions. |
 | **Management socket drops** (both still running) | Daemon reconnects to the socket. Maps may contain stale entries for clients that disconnected while the socket was down. `status 3` returns the current state — stale entries are pruned, surviving sessions are kept or have their expiry timers restarted. |
 | **OpenVPN restart** | All VPN tunnels are terminated. `status 3` returns an empty list. All map entries and expiry timers are cleaned up. Clients must reconnect (new `CLIENT:CONNECT`), so tracking starts fresh. |
 
-When `--max-session-duration` is disabled (`0`), `RebuildSessionTrackingFromStatus` still rebuilds `cidToCN` and `cnToActiveCID` so that `--single-session-per-user` eviction works correctly after a reconnect. Expiry timer logic is simply skipped.
+When `--max-session-duration` is disabled (`0`), `RebuildSessionTrackingFromStatus` still rebuilds `cids` and `cnToActiveCID` for local stale-state cleanup. Expiry timer logic is simply skipped.
 
 ## Auth Timeout vs Hand-Window
 
@@ -376,15 +376,17 @@ hand-window 300        # OpenVPN server config
 --auth-timeout 270s    # daemon (hand-window minus ~30s)
 ```
 
-## Session Eviction
+## Duplicate CN and Local Cleanup
 
-When `--single-session-per-user=true` (default), only one active session per certificate CN is allowed:
+OpenVPN rejects duplicate certificate CNs by default within a single server process. Do not set `duplicate-cn`; that directive disables OpenVPN's built-in per-process duplicate protection.
 
-- **New connect with same CN while pending** — old session cancelled, `client-deny` sent for old CID
-- **New connect with same CN while established** — old session killed, `client-kill ... HALT` sent for old CID so the replaced client stops instead of auto-reconnecting
-- **Disconnect** — session tracking cleaned up, CN slot freed
+The daemon also tracks `CN -> CID` locally so it can clean up stale state after missed disconnects or management socket reconnects:
 
-> **Multi-instance limitation:** Session tracking is in-memory and local to each daemon instance. In multi-instance (ASG) mode, `--single-session-per-user` only enforces the limit within a single instance — a user can hold concurrent sessions on different instances. See [Single-Session-Per-User in Multi-Instance Mode](multi-instance-single-session.md) for a proposed fix using a DynamoDB shared session store.
+- **New connect with same CN while old local auth is pending** — old local pending session is cancelled and `client-deny` is sent for the old CID
+- **New connect with same CN while old local CID is established** — old local CID is removed and `client-kill ... HALT` is sent as defensive cleanup
+- **Disconnect** — session tracking is cleaned up and the CN slot is freed
+
+This is not a global single-session security control. UDP and TCP daemons have separate memory, and multi-instance deployments require a shared ownership mechanism if strict fleet-wide one-session-per-CN enforcement is required. See [Multi-Instance Single-Session Design](multi-instance-single-session.md).
 
 ## Reauth Flow
 

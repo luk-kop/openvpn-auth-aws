@@ -40,7 +40,7 @@ The `state` parameter embedded in the WebAuth URL (`WEB_AUTH::`) is a signed blo
 base64url(json({ sid, iat, exp })) . HMAC-SHA256(payload)
 ```
 
-On callback, the daemon verifies the HMAC before touching the session store. A request with a forged, tampered, or replayed state is rejected before any session lookup occurs. The HMAC key is either a static secret or fetched from AWS Secrets Manager (`--secrets-manager-secret-id`).
+On callback, the daemon verifies the HMAC before touching the session store. A request with a forged, tampered, or replayed state is rejected before any session lookup occurs. The HMAC key is either a static secret or fetched once at startup from AWS Secrets Manager (`--hmac-secret-secret-id`).
 
 The payload includes:
 
@@ -48,7 +48,7 @@ The payload includes:
 - `iat` — issued-at timestamp
 - `exp` — expiry timestamp (set to `hand_window` seconds from issue)
 
-**Default:** always enforced. Key source: `--hmac-secret` (static) or `--secrets-manager-secret-id` (AWS Secrets Manager).
+**Default:** always enforced. Key source: `--hmac-secret` (static), `--hmac-secret-secret-id` (AWS Secrets Manager), or a random startup key when neither static source is configured. A random startup key is process-local and in-memory only: daemon restarts invalidate in-flight state blobs, and separate daemon instances cannot verify each other's state values.
 
 ---
 
@@ -114,18 +114,13 @@ By default, the group check only runs at initial authentication. When this flag 
 
 ---
 
-## 9. Single Session Per User
+## 9. Duplicate CN Policy
 
-**Flag:** `--single-session-per-user` / `VPN_AUTH_SINGLE_SESSION_PER_USER`
+**OpenVPN config:** `duplicate-cn` must be absent.
 
-Enforces one active VPN session per certificate CN. When a new connect arrives for a CN that already has an active session, the old session is evicted:
+OpenVPN rejects duplicate certificate CNs by default within a single server process. The `duplicate-cn` directive disables that protection and is unsupported for production deployments of this project.
 
-- Pending session → `client-deny` for the old CID
-- Established session → `client-kill ... HALT` for the old CID, so the replaced device does not auto-reconnect into an eviction loop
-
-> **Multi-instance limitation:** enforcement is per-instance only. See [Single-Session-Per-User in Multi-Instance Mode](multi-instance-single-session.md) for details and a proposed fix.
-
-**Default:** `true` (enabled).
+The daemon keeps local `CN -> CID` tracking only as defensive cleanup for stale local state. It is not a replacement for OpenVPN's default duplicate-CN behavior and is not a global single-session security control across UDP/TCP daemons or multiple EC2 instances.
 
 ---
 
@@ -170,13 +165,13 @@ The OpenVPN management socket is protected by a password file. The daemon sends 
 |---------|------|---------|-----------------|
 | WebAuth capability check | — | on | Clients bypassing browser auth |
 | CN presence check | — | on | Anonymous / certificate-less connects |
-| HMAC state signing | `--hmac-secret` / `--secrets-manager-secret-id` | on | State forgery and replay |
+| HMAC state signing | `--hmac-secret` / `--hmac-secret-secret-id` | on | State forgery and replay |
 | State expiry | `--hand-window` | 300s | Long-lived replay window |
 | ALB JWT validation (ES256) | — | on | Forged or tampered OIDC callbacks |
 | CN cross-check | `--cn-cross-check` | on | Identity mismatch between cert and OIDC |
 | Required group | `--required-group` | `vpn-users` | Unauthorised Cognito users |
 | Group check on reauth | `--check-groups-on-reauth` | off | Revoked access persisting after group removal |
-| Single session per user | `--single-session-per-user` | on | Concurrent sessions per CN (single-instance only) |
+| Duplicate CN policy | OpenVPN config (`duplicate-cn` absent) | on | Concurrent sessions per CN in one OpenVPN process |
 | Session TTL | `--auth-timeout` | 300s | Abandoned pending sessions accumulating |
 | Max session duration | `--max-session-duration` | off | Indefinitely long sessions |
 | Management socket auth | OpenVPN config | on | Unauthorised management commands |

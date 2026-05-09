@@ -91,6 +91,13 @@ type DecisionSink interface {
 	Send(Decision) error
 }
 
+// AckDecisionSink sends a decision and returns only after the underlying
+// transport confirms that the command was written or failed.
+type AckDecisionSink interface {
+	DecisionSink
+	SendAck(Decision) error
+}
+
 // AuthSuccessTracker is notified when the callback flow successfully sends
 // client-auth for a CID. Implemented by *Handler.
 type AuthSuccessTracker interface {

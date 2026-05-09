@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -47,7 +48,7 @@ func TestRunFailsWhenCallbackPortBusy(t *testing.T) {
 	m := metrics.NewEmitter(&strings.Builder{}, "test")
 	handler := auth.NewHandler(cfg, sessions, nil, signer, m)
 
-	cbSrv, err := callback.NewServer(sessions, signer, &DaemonSink{CmdCh: make(chan string, 1)}, handler, cfg, m, nil, func() bool { return true })
+	cbSrv, err := callback.NewServer(sessions, signer, &DaemonSink{cmdCh: make(chan queuedCommand, 1)}, handler, cfg, m, nil, func() bool { return true })
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 	}
 	defer func() { _ = cbLn.Close() }()
 
-	cbSrv, err := callback.NewServer(sessions, signer, &DaemonSink{CmdCh: make(chan string, 256)}, handler, cfg, m, nil, func() bool { return true })
+	cbSrv, err := callback.NewServer(sessions, signer, &DaemonSink{cmdCh: make(chan queuedCommand, 256)}, handler, cfg, m, nil, func() bool { return true })
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -262,7 +263,7 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 }
 
 func TestDecisionSinkForwardsKillMode(t *testing.T) {
-	cmdCh := make(chan string, 1)
+	cmdCh := make(chan queuedCommand, 1)
 	sink := decisionSink{cmdCh: cmdCh, done: make(chan struct{})}
 
 	err := sink.Send(auth.Decision{Type: auth.DecisionKill, CID: "3", KillMode: "HALT"})
@@ -271,9 +272,9 @@ func TestDecisionSinkForwardsKillMode(t *testing.T) {
 	}
 
 	select {
-	case cmd := <-cmdCh:
-		if cmd != "client-kill 3 HALT" {
-			t.Fatalf("forwarded command = %q", cmd)
+	case queued := <-cmdCh:
+		if queued.cmd != "client-kill 3 HALT" {
+			t.Fatalf("forwarded command = %q", queued.cmd)
 		}
 	default:
 		t.Fatal("expected forwarded command")
@@ -281,8 +282,8 @@ func TestDecisionSinkForwardsKillMode(t *testing.T) {
 }
 
 func TestDaemonSinkForwardsDefaultKill(t *testing.T) {
-	cmdCh := make(chan string, 1)
-	sink := DaemonSink{CmdCh: cmdCh}
+	cmdCh := make(chan queuedCommand, 1)
+	sink := DaemonSink{cmdCh: cmdCh}
 
 	err := sink.Send(auth.Decision{Type: auth.DecisionKill, CID: "3"})
 	if err != nil {
@@ -290,12 +291,45 @@ func TestDaemonSinkForwardsDefaultKill(t *testing.T) {
 	}
 
 	select {
-	case cmd := <-cmdCh:
-		if cmd != "client-kill 3" {
-			t.Fatalf("forwarded command = %q", cmd)
+	case queued := <-cmdCh:
+		if queued.cmd != "client-kill 3" {
+			t.Fatalf("forwarded command = %q", queued.cmd)
 		}
 	default:
 		t.Fatal("expected forwarded command")
+	}
+}
+
+func TestDaemonSinkSendAckWaitsForCommandResult(t *testing.T) {
+	cmdCh := make(chan queuedCommand, 1)
+	sink := DaemonSink{cmdCh: cmdCh}
+	writeErr := errors.New("write failed")
+
+	done := make(chan error, 1)
+	go func() {
+		done <- sink.SendAck(auth.Decision{Type: auth.DecisionAllow, CID: "3", KID: "7"})
+	}()
+
+	select {
+	case queued := <-cmdCh:
+		if queued.cmd != "client-auth 3 7\nEND" {
+			t.Fatalf("queued command = %q", queued.cmd)
+		}
+		if queued.ack == nil {
+			t.Fatal("expected ack channel")
+		}
+		queued.ack <- writeErr
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for queued command")
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, writeErr) {
+			t.Fatalf("SendAck() error = %v, want %v", err, writeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendAck did not return after ack")
 	}
 }
 
@@ -388,7 +422,7 @@ func TestPreservation_NoCNCrossCheckWarn(t *testing.T) {
 
 	cbSrv, err := callback.NewServer(
 		sessions, signer,
-		&DaemonSink{CmdCh: make(chan string, 1)},
+		&DaemonSink{cmdCh: make(chan queuedCommand, 1)},
 		handler, cfg, m, nil,
 		func() bool { return true },
 	)

@@ -68,9 +68,9 @@ func newPreservationHandlerWithChecker(cfg config.Config, checker IdentityChecke
 // the F3 fix).
 //
 // On unfixed code: handleReauth always uses event.CommonName() — test PASSES.
-// On fixed code:   handleReauth checks cidToCognitoUsername first; if absent,
+// On current code: handleReauth checks cids[cid].cognitoUsername first; if
 //
-//	falls back to event.CommonName() — test still PASSES.
+//	absent, falls back to event.CommonName() — test still PASSES.
 //
 // Property: for all CLIENT:REAUTH events where no cognitoUsername is stored,
 // CheckUser is called with event.CommonName().

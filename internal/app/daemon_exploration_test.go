@@ -76,7 +76,7 @@ func TestBugCondition_F4_NoCNCrossCheckWarn(t *testing.T) {
 
 	cbSrv, err := callback.NewServer(
 		sessions, signer,
-		&DaemonSink{CmdCh: make(chan string, 1)},
+		&DaemonSink{cmdCh: make(chan queuedCommand, 1)},
 		handler, cfg, m, nil,
 		func() bool { return true },
 	)

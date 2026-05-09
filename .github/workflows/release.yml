@@ -12,7 +12,7 @@ env:
   GO_VERSION: "1.26"
 
 jobs:
-  release:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -21,31 +21,91 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Test
+      - name: Format Check
         run: |
-          go test -v -short ./...
-          cd lambda-router && go test -v -short ./...
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
 
-      - name: Build daemon (linux/amd64)
+      - name: Module Tidy Check
+        run: go mod tidy -diff
+
+      - name: Lint daemon
+        uses: golangci/golangci-lint-action@v9
+
+      - name: Vet daemon
+        run: go vet ./...
+
+      - name: Module Tidy Check Lambda Router
+        run: cd lambda-router && go mod tidy -diff
+
+      - name: Lint Lambda Router
+        uses: golangci/golangci-lint-action@v9
+        with:
+          working-directory: lambda-router
+
+      - name: Vet Lambda Router
+        run: cd lambda-router && go vet ./...
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Test daemon
+        run: go test -v -short ./...
+
+      - name: Test Lambda Router
+        run: cd lambda-router && go test -v -short ./...
+
+  race-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Race Test daemon
+        run: go test -race -short ./...
+
+      - name: Race Test Lambda Router
+        run: cd lambda-router && go test -race -short ./...
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [lint, test, race-test]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build release artifacts
         env:
-          GOARCH: amd64
-        run: go build -ldflags="-s -w" -o openvpn-auth-daemon-linux-amd64 ./cmd/openvpn-auth-daemon
-
-      - name: Build daemon (linux/arm64)
-        env:
-          GOARCH: arm64
-        run: go build -ldflags="-s -w" -o openvpn-auth-daemon-linux-arm64 ./cmd/openvpn-auth-daemon
-
-      - name: Build Lambda Router
-        run: make build-lambda
+          VERSION: ${{ github.ref_name }}
+        run: make build-release
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create ${{ github.ref_name }}
-          openvpn-auth-daemon-linux-amd64
-          openvpn-auth-daemon-linux-arm64
-          lambda-router/lambda-arm64.zip
-          lambda-router/lambda-amd64.zip
-          --generate-notes
+          TAG: ${{ github.ref_name }}
+        run: |
+          V="${TAG#v}"
+          gh release create "$TAG" \
+            "bin/openvpn-auth-daemon_${V}_linux_amd64.tar.gz" \
+            "bin/openvpn-auth-daemon_${V}_linux_arm64.tar.gz" \
+            "bin/lambda-router_${V}_linux_amd64.zip" \
+            "bin/lambda-router_${V}_linux_arm64.zip" \
+            "bin/checksums.txt" \
+            --generate-notes

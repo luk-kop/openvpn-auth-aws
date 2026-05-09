@@ -1,6 +1,6 @@
 # OpenVPN Auth Daemon
 
-![Go](https://img.shields.io/badge/Go-1.26.1-00ADD8?logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.26.3-00ADD8?logo=go&logoColor=white)
 ![OpenVPN](https://img.shields.io/badge/OpenVPN_CE-2.6.19-EA7E20?logo=openvpn&logoColor=white)
 ![AWS](https://img.shields.io/badge/AWS-Cognito-FF9900?logo=amazonaws&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -21,11 +21,18 @@ The implementation here uses a different architecture centered around an OpenVPN
 - Two independent daemons per EC2 (UDP + TCP), each with its own callback port and session store
 - `/healthz` endpoint for ALB target group health checks and EIP association gating
 - Reauth on TLS renegotiation with Cognito user lookup (+ optional cache for IdP outages)
-- Configurable single-session-per-user enforcement (`--single-session-per-user`)
 - CN cross-check: certificate CN must match OIDC email claim (`--cn-cross-check`)
 - Structured logging via `log/slog` with text/JSON output (`--log-format`)
 - Optional CloudWatch EMF metrics (`--emf-metrics`)
 - Graceful shutdown with in-flight session draining
+
+## Deployment Modes
+
+The default Terraform deployment is **single-instance mode** (`multi_instance_mode = false`): one Auto Scaling Group with `desired=1`, `min=1`, and `max=2`, static ALB callback paths, and an Elastic IP assigned to the VPN server only after daemon health checks pass. The second ASG capacity slot exists only for rolling replacement; the EIP is attached to one healthy instance at a time. During replacement, the EIP moves to the new healthy instance and VPN clients reconnect to the same public address.
+
+**Multi-instance mode** (`multi_instance_mode = true`) disables EIP association. OpenVPN client traffic goes through an NLB, and browser callback routing is handled by the Lambda Router.
+
+See [Architecture](docs/architecture.md#eip-association), [Architecture Design](docs/architecture-design.md), and [Terraform](terraform/README.md) for details.
 
 ## Quick Start
 

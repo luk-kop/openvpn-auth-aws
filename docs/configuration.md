@@ -13,6 +13,7 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--alb-arn` | `VPN_AUTH_ALB_ARN` | — | ALB ARN used to validate the `signer` field in ALB JWTs. If absent, JWT signature validation is skipped (dev/test only). Always set in production. |
 | `--alb-public-key-base-url` | `VPN_AUTH_ALB_PUBLIC_KEY_BASE_URL` | — | Base URL for fetching ALB public keys. Default: `https://public-keys.auth.elb.{region}.amazonaws.com` (derived from `--aws-region`). Override for AWS China partition (e.g. `https://public-keys.auth.elb.cn-north-1.amazonaws.com.cn`). |
 | `--hmac-secret` | `VPN_AUTH_HMAC_SECRET` | — | HMAC secret for signing state blobs |
+| `--hmac-secret-secret-id` | `VPN_AUTH_HMAC_SECRET_SECRET_ID` | — | AWS Secrets Manager secret ID containing the HMAC secret for signing state blobs. Mutually exclusive with `--hmac-secret`; fetched once at daemon startup. |
 | `--aws-region` | `AWS_REGION` | `eu-west-1` | AWS region |
 | `--cognito-user-pool-id` | `VPN_AUTH_COGNITO_USER_POOL_ID` | — | Cognito User Pool ID |
 | `--cognito-issuer-url` | `VPN_AUTH_COGNITO_ISSUER_URL` | — | Cognito issuer URL for JWT `iss` field validation |
@@ -28,7 +29,6 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--check-groups-on-reauth` | `VPN_AUTH_CHECK_GROUPS_ON_REAUTH` | `false` | Check required group during `CLIENT:REAUTH` |
 | `--reauth-cache` | `VPN_AUTH_REAUTH_CACHE` | `false` | Allow cached reauth decisions during IdP outage. When enabled, a successful reauth result is stored in memory keyed by username (CN for native users, Cognito lookup username for federated users). The cache entry TTL is `reneg-interval + 10m`. On the next reauth for the same user, if the Cognito call fails and a cache entry exists, the daemon allows the reauth from cache instead of denying. The cache entry is also consulted when `--reauth-timeout` elapses. Does not bypass group checks if `--check-groups-on-reauth` is set. |
 | `--reauth-timeout` | `VPN_AUTH_REAUTH_TIMEOUT` | `5s` | Timeout for Cognito calls during `CLIENT:REAUTH` |
-| `--single-session-per-user` | `VPN_AUTH_SINGLE_SESSION_PER_USER` | `true` | Enforce one active VPN session per certificate CN. **Note:** enforcement is per-instance only — in multi-instance (ASG) mode a user can hold concurrent sessions on different instances. See [multi-instance-single-session.md](multi-instance-single-session.md) for a proposed fix. |
 | `--max-session-duration` | `VPN_AUTH_MAX_SESSION_DURATION` | `0` | Maximum VPN session duration (`0` to disable). After this time, the client is forcibly disconnected. Typical values: `8h`, `10h`, `12h`. Must be `0` or `>= 1m`. When `reneg-sec=0`, this is the only enforcement mechanism for session limits. Enforcement uses two independent mechanisms: (1) a **hard timer** — a goroutine started at authentication sends `client-kill` when the duration elapses; (2) a **reauth backstop** — on every `CLIENT:REAUTH`, if the session has already exceeded its duration, the daemon sends `client-deny` without calling Cognito. Both paths emit the `SessionExpired` metric with a `Reason` dimension (`hard_timer` or `reauth_backstop`). |
 | `--emf-metrics` | `VPN_AUTH_EMF_METRICS` | `false` | Emit CloudWatch EMF metrics to stdout |
 | `--emf-interval` | `VPN_AUTH_EMF_INTERVAL` | `10s` | Interval for EMF heartbeat metrics (`0` to disable heartbeat only) |
@@ -38,6 +38,84 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--instance-id` | `VPN_AUTH_INSTANCE_ID` | `local-dev` | Instance identifier used in EMF metrics |
 
 See `--help` for the full list.
+
+### HMAC Secret From AWS Secrets Manager
+
+Store the signing key as a plain Secrets Manager `SecretString` value. The value must be at least 16 bytes:
+
+```bash
+aws secretsmanager create-secret \
+  --name openvpn-auth-aws/hmac-state \
+  --secret-string "$(openssl rand -base64 32)"
+```
+
+Start the daemon with the secret ID instead of `--hmac-secret`:
+
+```bash
+openvpn-auth-daemon \
+  --hmac-secret-secret-id openvpn-auth-aws/hmac-state \
+  --aws-region eu-west-1 \
+  --callback-url https://vpn-auth.example.com/callback/01/udp \
+  --cognito-user-pool-id eu-west-1_Example \
+  --cognito-issuer-url https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_Example
+```
+
+The same configuration can be provided via environment variables:
+
+```bash
+export VPN_AUTH_HMAC_SECRET_SECRET_ID=openvpn-auth-aws/hmac-state
+export AWS_REGION=eu-west-1
+```
+
+The daemon fetches the secret once at startup. Its IAM role must allow `secretsmanager:GetSecretValue` on that secret ARN.
+
+If neither `--hmac-secret` nor `--hmac-secret-secret-id` is set, the daemon generates a random HMAC key at startup. State signing remains enabled, but the key is process-local and in-memory only. Restarting the daemon invalidates in-flight browser auth callbacks, and multiple daemon instances cannot verify each other's state values. Use a static source in production or any deployment where callbacks can return after a restart or to a different daemon instance.
+
+### Forward Proxy For Daemon Egress
+
+The daemon does not have a dedicated `--proxy-url` flag. Runtime proxying uses the standard Go/AWS SDK environment variables:
+
+```bash
+HTTPS_PROXY=http://proxy.example.com:3128
+HTTP_PROXY=http://proxy.example.com:3128
+NO_PROXY=localhost,127.0.0.1,169.254.169.254
+```
+
+Set these in `/etc/openvpn-auth/env` when running under the provided systemd unit, because the service loads that file with `EnvironmentFile=/etc/openvpn-auth/env`:
+
+```ini
+VPN_AUTH_CALLBACK_URL=https://vpn-auth.example.com/callback/01/udp
+VPN_AUTH_HMAC_SECRET_SECRET_ID=openvpn-auth-aws/hmac-state
+AWS_REGION=eu-west-1
+
+HTTPS_PROXY=http://proxy.example.com:3128
+HTTP_PROXY=http://proxy.example.com:3128
+NO_PROXY=localhost,127.0.0.1,169.254.169.254
+```
+
+For AWS service calls, `HTTPS_PROXY` is the critical setting because AWS endpoints use HTTPS. The proxy must allow outbound HTTPS, typically via `CONNECT`, to the endpoints the enabled features require:
+
+| Feature | Endpoint pattern |
+|---|---|
+| HMAC secret from Secrets Manager | `secretsmanager.<region>.amazonaws.com` |
+| Cognito reauth/group checks | `cognito-idp.<region>.amazonaws.com` |
+| ALB JWT public key validation | `public-keys.auth.elb.<region>.amazonaws.com` |
+
+Keep the EC2 Instance Metadata Service address (`169.254.169.254`) in `NO_PROXY` when using instance-role credentials. Otherwise credential lookup can fail or be sent to the proxy. Also include local addresses such as `localhost` and `127.0.0.1`; OpenVPN management uses a Unix socket, but local admin tooling and health checks should not be proxied.
+
+Authenticated proxy URLs are supported by Go's HTTP transport:
+
+```bash
+HTTPS_PROXY=http://proxy-user:proxy-pass@proxy.example.com:3128
+```
+
+Be careful with this form in systemd environment files because the proxy password becomes readable to users who can read that file or inspect the unit environment.
+
+External references:
+
+- [AWS SDK for Go v2: Customize the HTTP Client](https://docs.aws.amazon.com/sdk-for-go/v2/developer-guide/configure-http.html)
+- [Go `net/http`: DefaultTransport and proxy environment variables](https://pkg.go.dev/net/http#DefaultTransport)
+- [AWS CLI proxy environment variable guidance](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-proxy.html)
 
 ## Lambda Router Environment Variables
 
@@ -70,7 +148,7 @@ See [Lambda Router](lambda-router-proxy.md) for architecture, security model, an
 In production: set `--alb-arn` and `--cognito-user-pool-id`, leave both `--cognito-*` flags unset.
 In local dev: omit `--alb-arn` and `--cognito-user-pool-id`, set `--cognito-groups-from-claims` and `--cognito-skip-reauth`.
 
-**Startup validation:** The daemon will refuse to start if `--alb-arn` is set without `--cognito-user-pool-id` or `--cognito-issuer-url` (production misconfiguration), if `--required-group` is set without `--cognito-user-pool-id` and `--cognito-groups-from-claims` (group enforcement without a backend to check against), or if `--hmac-secret` is provided but shorter than 16 bytes.
+**Startup validation:** The daemon will refuse to start if `--alb-arn` is set without `--cognito-user-pool-id` or `--cognito-issuer-url` (production misconfiguration), if `--required-group` is set without `--cognito-user-pool-id` and `--cognito-groups-from-claims` (group enforcement without a backend to check against), if `--hmac-secret` is provided but shorter than 16 bytes, or if both `--hmac-secret` and `--hmac-secret-secret-id` are set.
 
 ## Logging
 

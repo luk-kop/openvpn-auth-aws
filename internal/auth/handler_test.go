@@ -505,12 +505,11 @@ func TestHandleEstablishedClearsInFlight(t *testing.T) {
 
 func TestHandleConnectEvictsInFlightSessionOnReconnect(t *testing.T) {
 	cfg := config.Config{
-		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:           "test-secret-key!!",
-		HandWindow:           5 * time.Second,
-		AuthTimeout:          5 * time.Second,
-		CallbackPort:         8080,
-		SingleSessionPerUser: true,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "test-secret-key!!",
+		HandWindow:   5 * time.Second,
+		AuthTimeout:  5 * time.Second,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -562,12 +561,11 @@ func TestHandleConnectEvictsInFlightSessionOnReconnect(t *testing.T) {
 
 func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 	cfg := config.Config{
-		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:           "test-secret-key!!",
-		HandWindow:           5 * time.Second,
-		AuthTimeout:          5 * time.Second,
-		CallbackPort:         8080,
-		SingleSessionPerUser: true,
+		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:   "test-secret-key!!",
+		HandWindow:   5 * time.Second,
+		AuthTimeout:  5 * time.Second,
+		CallbackPort: 8080,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -639,7 +637,8 @@ func TestStrayEstablishedDoesNotStartExpiryTimer(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	handler.mu.Lock()
-	_, hasExpiry := handler.cidToExpiry["99"]
+	st99 := handler.cids["99"]
+	hasExpiry := st99 != nil && st99.expiry != nil
 	handler.mu.Unlock()
 
 	if hasExpiry {
@@ -684,11 +683,12 @@ func TestEstablishedStartsExpiryTimer(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	handler.mu.Lock()
-	_, hasExpiry := handler.cidToExpiry["1"]
+	st1e := handler.cids["1"]
+	hasExpiry := st1e != nil && st1e.expiry != nil
 	handler.mu.Unlock()
 
 	if !hasExpiry {
-		t.Fatal("expected cidToExpiry entry after ESTABLISHED with max-session-duration")
+		t.Fatal("expected expiry entry after ESTABLISHED with max-session-duration")
 	}
 }
 
@@ -776,13 +776,12 @@ func TestDisconnectCancelsExpiryTimer(t *testing.T) {
 
 func TestEvictionCancelsExpiryTimer(t *testing.T) {
 	cfg := config.Config{
-		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:           "test-secret-key!!",
-		HandWindow:           5 * time.Second,
-		AuthTimeout:          5 * time.Second,
-		CallbackPort:         8080,
-		SingleSessionPerUser: true,
-		MaxSessionDuration:   100 * time.Millisecond,
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: 100 * time.Millisecond,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -1094,11 +1093,12 @@ func TestNoExpiryTimerWhenDurationZero(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	handler.mu.Lock()
-	_, hasExpiry := handler.cidToExpiry["1"]
+	st1z := handler.cids["1"]
+	hasExpiry := st1z != nil && st1z.expiry != nil
 	handler.mu.Unlock()
 
 	if hasExpiry {
-		t.Fatal("expected no cidToExpiry entry when MaxSessionDuration=0")
+		t.Fatal("expected no expiry entry when MaxSessionDuration=0")
 	}
 }
 
@@ -1127,9 +1127,10 @@ func TestMarkAuthenticatedPromotesButDefersExpiry(t *testing.T) {
 	handler.MarkAuthenticated("1", "")
 
 	handler.mu.Lock()
-	_, inFlight := handler.inFlight["1"]
-	_, isPromoted := handler.promoted["1"]
-	_, hasExpiry := handler.cidToExpiry["1"]
+	st1m := handler.cids["1"]
+	inFlight := st1m != nil && st1m.cancel != nil
+	isPromoted := st1m != nil && st1m.promoted
+	hasExpiry := st1m != nil && st1m.expiry != nil
 	handler.mu.Unlock()
 
 	if inFlight {
@@ -1149,14 +1150,19 @@ func TestMarkAuthenticatedPromotesButDefersExpiry(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	handler.mu.Lock()
-	_, isPromoted = handler.promoted["1"]
-	exp, hasExpiry := handler.cidToExpiry["1"]
+	st1me := handler.cids["1"]
+	isPromoted = st1me != nil && st1me.promoted
+	var exp *sessionExpiry
+	if st1me != nil {
+		exp = st1me.expiry
+	}
+	hasExpiry = exp != nil
 	handler.mu.Unlock()
 
 	if isPromoted {
 		t.Fatal("expected promoted marker to be cleared after ESTABLISHED")
 	}
-	if !hasExpiry || exp == nil {
+	if !hasExpiry {
 		t.Fatal("expected expiry tracking to start after ESTABLISHED")
 	}
 }
@@ -1166,13 +1172,12 @@ func TestMarkAuthenticatedPromotesButDefersExpiry(t *testing.T) {
 // across a management socket reconnect (RebuildSessionTrackingFromStatus).
 func TestPromotedCIDSurvivesReconnectBootstrap(t *testing.T) {
 	cfg := config.Config{
-		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:           "test-secret-key!!",
-		HandWindow:           5 * time.Second,
-		AuthTimeout:          5 * time.Second,
-		CallbackPort:         8080,
-		MaxSessionDuration:   time.Hour,
-		SingleSessionPerUser: true,
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: time.Hour,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -1194,13 +1199,17 @@ func TestPromotedCIDSurvivesReconnectBootstrap(t *testing.T) {
 	handler.RebuildSessionTrackingFromStatus(nil)
 
 	handler.mu.Lock()
-	cn := handler.cidToCN["1"]
+	var cn string
+	isPromoted := false
+	if st := handler.cids["1"]; st != nil {
+		cn = st.cn
+		isPromoted = st.promoted
+	}
 	activeCID := handler.cnToActiveCID["alice@example.com"]
-	_, isPromoted := handler.promoted["1"]
 	handler.mu.Unlock()
 
 	if cn != "alice@example.com" {
-		t.Fatalf("expected cidToCN preserved for promoted CID, got %q", cn)
+		t.Fatalf("expected cn preserved for promoted CID, got %q", cn)
 	}
 	if activeCID != "1" {
 		t.Fatalf("expected cnToActiveCID preserved for promoted CID, got %q", activeCID)
@@ -1216,8 +1225,9 @@ func TestPromotedCIDSurvivesReconnectBootstrap(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	handler.mu.Lock()
-	_, hasExpiry := handler.cidToExpiry["1"]
-	_, stillPromoted := handler.promoted["1"]
+	st1p := handler.cids["1"]
+	hasExpiry := st1p != nil && st1p.expiry != nil
+	stillPromoted := st1p != nil && st1p.promoted
 	handler.mu.Unlock()
 
 	if !hasExpiry {
@@ -1230,13 +1240,12 @@ func TestPromotedCIDSurvivesReconnectBootstrap(t *testing.T) {
 
 func TestRebuildSessionTrackingFromStatusRestoresTracking(t *testing.T) {
 	cfg := config.Config{
-		CallbackURL:          "https://vpn-auth.example.com/callback/01/udp",
-		HMACSecret:           "test-secret-key!!",
-		HandWindow:           5 * time.Second,
-		AuthTimeout:          5 * time.Second,
-		CallbackPort:         8080,
-		MaxSessionDuration:   time.Hour,
-		SingleSessionPerUser: true,
+		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:         "test-secret-key!!",
+		HandWindow:         5 * time.Second,
+		AuthTimeout:        5 * time.Second,
+		CallbackPort:       8080,
+		MaxSessionDuration: time.Hour,
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
@@ -1250,8 +1259,12 @@ func TestRebuildSessionTrackingFromStatusRestoresTracking(t *testing.T) {
 	}})
 
 	handler.mu.Lock()
-	exp := handler.cidToExpiry["7"]
-	cn := handler.cidToCN["7"]
+	var exp *sessionExpiry
+	var cn string
+	if st := handler.cids["7"]; st != nil {
+		exp = st.expiry
+		cn = st.cn
+	}
 	activeCID := handler.cnToActiveCID["alice@example.com"]
 	handler.mu.Unlock()
 
@@ -1262,7 +1275,7 @@ func TestRebuildSessionTrackingFromStatusRestoresTracking(t *testing.T) {
 		t.Fatalf("connectedAt = %v, want %v", exp.connectedAt, connectedAt)
 	}
 	if cn != "alice@example.com" {
-		t.Fatalf("cidToCN = %q, want alice@example.com", cn)
+		t.Fatalf("cn = %q, want alice@example.com", cn)
 	}
 	if activeCID != "7" {
 		t.Fatalf("cnToActiveCID = %q, want 7", activeCID)
@@ -1294,7 +1307,10 @@ func TestDuplicateEstablishedAfterBootstrapDoesNotResetExpiry(t *testing.T) {
 	}})
 
 	handler.mu.Lock()
-	expBefore := handler.cidToExpiry["5"]
+	var expBefore *sessionExpiry
+	if st := handler.cids["5"]; st != nil {
+		expBefore = st.expiry
+	}
 	handler.mu.Unlock()
 	if expBefore == nil {
 		t.Fatal("expected expiry tracking from snapshot")
@@ -1310,7 +1326,10 @@ func TestDuplicateEstablishedAfterBootstrapDoesNotResetExpiry(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	handler.mu.Lock()
-	expAfter := handler.cidToExpiry["5"]
+	var expAfter *sessionExpiry
+	if st := handler.cids["5"]; st != nil {
+		expAfter = st.expiry
+	}
 	handler.mu.Unlock()
 
 	if expAfter == nil {

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -31,11 +32,30 @@ import (
 
 type captureSink struct {
 	decisions []auth.Decision
+	ackErr    error
 }
 
 func (c *captureSink) Send(d auth.Decision) error {
 	c.decisions = append(c.decisions, d)
 	return nil
+}
+
+func (c *captureSink) SendAck(d auth.Decision) error {
+	c.decisions = append(c.decisions, d)
+	return c.ackErr
+}
+
+type captureTracker struct {
+	calls []trackedAuth
+}
+
+type trackedAuth struct {
+	cid             string
+	cognitoUsername string
+}
+
+func (c *captureTracker) MarkAuthenticated(cid, cognitoUsername string) {
+	c.calls = append(c.calls, trackedAuth{cid: cid, cognitoUsername: cognitoUsername})
 }
 
 type fakeMetrics struct {
@@ -455,6 +475,37 @@ func TestHandleCallback_Success_WithALBJWT(t *testing.T) {
 		t.Fatalf("expected client-auth decision, got %+v", sink.decisions)
 	}
 	assertHTMLResponse(t, w, "Authenticated")
+}
+
+func TestHandleCallback_AllowAckFailureDoesNotPromoteSession(t *testing.T) {
+	cfg := defaultCfg()
+	srv, sessions, sink, m := newTestServerWithSessions(cfg, nil)
+	sink.ackErr = errors.New("management socket write failed")
+	tracker := &captureTracker{}
+	srv.tracker = tracker
+
+	sid := "allow-ack-fail-sid"
+	addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", nil, time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected attempted client-auth decision, got %+v", sink.decisions)
+	}
+	if len(tracker.calls) != 0 {
+		t.Fatalf("expected MarkAuthenticated not to be called, got %+v", tracker.calls)
+	}
+	assertHTMLResponse(t, w, "Service Unavailable")
+	assertRejectedReason(t, m, "send_failed")
 }
 
 func TestHandleCallback_CNMismatch(t *testing.T) {

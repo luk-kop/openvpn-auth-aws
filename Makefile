@@ -1,7 +1,15 @@
-.PHONY: test setup build build-lambda clean \
+.PHONY: test setup build build-release build-lambda clean \
 	stack-up stack-down stack-rebuild \
 	run-daemon run-alb-mock run-mgmt-mock \
 	pki-init pki-client pki-upload pki-client-config
+
+BINARY := openvpn-auth-daemon
+BINDIR := bin
+RELEASE_TMP := $(BINDIR)/release
+GO_BUILD_CACHE := $(CURDIR)/.cache/go-build
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION_NO_V := $(VERSION:v%=%)
+LDFLAGS := -s -w
 
 # Unit tests (fast, no AWS)
 test:
@@ -74,13 +82,40 @@ build:
 	go build -o alb-mock ./cmd/alb-mock
 
 clean:
+	rm -rf $(BINDIR)
+	rm -rf .cache
 	rm -f openvpn-auth-daemon mgmt-mock alb-mock
 	go clean -testcache
 
+# Build release artifacts for GitHub Releases.
+build-release:
+	rm -rf $(RELEASE_TMP)
+	mkdir -p $(RELEASE_TMP)
+	GOCACHE=$(GO_BUILD_CACHE) CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(RELEASE_TMP)/$(BINARY)_linux_amd64 ./cmd/openvpn-auth-daemon
+	mkdir -p $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_amd64/docs
+	cp $(RELEASE_TMP)/$(BINARY)_linux_amd64 $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_amd64/$(BINARY)
+	cp README.md $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_amd64/README.md
+	cp LICENSE $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_amd64/LICENSE
+	if [ -f docs/examples/openvpn-auth.service ]; then cp docs/examples/openvpn-auth.service $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_amd64/openvpn-auth.service; fi
+	cp docs/configuration.md docs/openvpn-server.md docs/troubleshooting.md $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_amd64/docs/
+	tar -C $(RELEASE_TMP) -czf $(BINDIR)/$(BINARY)_$(VERSION_NO_V)_linux_amd64.tar.gz $(BINARY)_$(VERSION_NO_V)_linux_amd64
+	GOCACHE=$(GO_BUILD_CACHE) CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(RELEASE_TMP)/$(BINARY)_linux_arm64 ./cmd/openvpn-auth-daemon
+	mkdir -p $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_arm64/docs
+	cp $(RELEASE_TMP)/$(BINARY)_linux_arm64 $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_arm64/$(BINARY)
+	cp README.md $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_arm64/README.md
+	cp LICENSE $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_arm64/LICENSE
+	if [ -f docs/examples/openvpn-auth.service ]; then cp docs/examples/openvpn-auth.service $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_arm64/openvpn-auth.service; fi
+	cp docs/configuration.md docs/openvpn-server.md docs/troubleshooting.md $(RELEASE_TMP)/$(BINARY)_$(VERSION_NO_V)_linux_arm64/docs/
+	tar -C $(RELEASE_TMP) -czf $(BINDIR)/$(BINARY)_$(VERSION_NO_V)_linux_arm64.tar.gz $(BINARY)_$(VERSION_NO_V)_linux_arm64
+	$(MAKE) build-lambda
+	cp lambda-router/lambda-amd64.zip $(BINDIR)/lambda-router_$(VERSION_NO_V)_linux_amd64.zip
+	cp lambda-router/lambda-arm64.zip $(BINDIR)/lambda-router_$(VERSION_NO_V)_linux_arm64.zip
+	cd $(BINDIR) && sha256sum $(BINARY)_$(VERSION_NO_V)_linux_amd64.tar.gz $(BINARY)_$(VERSION_NO_V)_linux_arm64.tar.gz lambda-router_$(VERSION_NO_V)_linux_amd64.zip lambda-router_$(VERSION_NO_V)_linux_arm64.zip > checksums.txt
+
 # Build Lambda Router binaries for AWS Lambda (linux/arm64 + linux/amd64)
 build-lambda:
-	cd lambda-router && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -ldflags="-s -w" -o bootstrap . && zip lambda-arm64.zip bootstrap && rm bootstrap
-	cd lambda-router && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags lambda.norpc -ldflags="-s -w" -o bootstrap . && zip lambda-amd64.zip bootstrap && rm bootstrap
+	cd lambda-router && GOCACHE=$(GO_BUILD_CACHE) GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -ldflags="-s -w" -o bootstrap . && zip lambda-arm64.zip bootstrap && rm bootstrap
+	cd lambda-router && GOCACHE=$(GO_BUILD_CACHE) GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags lambda.norpc -ldflags="-s -w" -o bootstrap . && zip lambda-amd64.zip bootstrap && rm bootstrap
 
 # --- PKI Management (offline, for AWS deployments) ---
 PKI_REGION ?= eu-west-1

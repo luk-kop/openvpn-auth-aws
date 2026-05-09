@@ -36,7 +36,7 @@ write_files:
       ca      /etc/openvpn/server/ca.crt
       cert    /etc/openvpn/server/server.crt
       key     /etc/openvpn/server/server.key
-      dh      /etc/openvpn/server/dh.pem
+      dh      none
       tls-auth /etc/openvpn/server/ta.key 0
 
       server ${cidrhost(openvpn_udp_cidr, 0)} ${cidrnetmask(openvpn_udp_cidr)}
@@ -69,6 +69,9 @@ write_files:
 
       hand-window ${hand_window}
 
+      # Do not add duplicate-cn. OpenVPN rejects duplicate certificate CNs by
+      # default; this project relies on that behavior per OpenVPN process.
+
   # --- OpenVPN TCP server config ---
   - path: /etc/openvpn/server/tcp.conf
     content: |
@@ -79,7 +82,7 @@ write_files:
       ca      /etc/openvpn/server/ca.crt
       cert    /etc/openvpn/server/server.crt
       key     /etc/openvpn/server/server.key
-      dh      /etc/openvpn/server/dh.pem
+      dh      none
       tls-auth /etc/openvpn/server/ta.key 0
 
       server ${cidrhost(openvpn_tcp_cidr, 0)} ${cidrnetmask(openvpn_tcp_cidr)}
@@ -111,6 +114,9 @@ write_files:
       setenv IV_SSO webauth
 
       hand-window ${hand_window}
+
+      # Do not add duplicate-cn. OpenVPN rejects duplicate certificate CNs by
+      # default; this project relies on that behavior per OpenVPN process.
 
   # --- Daemon environment ---
   - path: /etc/openvpn-auth/env
@@ -145,9 +151,6 @@ write_files:
 
       chmod 600 /etc/openvpn/server/server.key
       chmod 600 /etc/openvpn/server/ta.key
-
-      # Generate DH params locally (not a secret, just large primes)
-      openssl dhparam -out /etc/openvpn/server/dh.pem 2048
 
       echo "PKI setup complete."
 

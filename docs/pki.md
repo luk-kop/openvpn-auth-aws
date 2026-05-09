@@ -166,7 +166,7 @@ make pki-upload
 | PKI generation | `lab/setup.sh` (inline in Docker) | `make pki-init` (offline) |
 | Cert storage | Inline in `openvpn.conf` / `client.ovpn` | AWS Secrets Manager |
 | CA algorithm | RSA (easy-rsa default) | EC secp384r1 |
-| DH | `dh none` (ECDH only) | Generated on EC2 at boot (`openssl dhparam`) |
+| DH | `dh none` (ECDH only) | `dh none` (ECDH only) |
 | TLS auth | Not used | `ta.key` |
 | Client certs | Auto-generated (`user@example.com`) | Per-user via `make pki-client` |
 
