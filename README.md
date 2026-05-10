@@ -129,6 +129,7 @@ openvpn-auth-aws/
 
 ## Documentation
 
+- [Overview](docs/overview.md) — high-level solution flow and documentation entry point
 - [Configuration](docs/configuration.md) — all flags, env vars, logging, EMF metrics
 - [Architecture](docs/architecture.md) — auth flow, ALB JWT validation, healthz, EIP association, session lifecycle
 - [ALB Authenticate Users](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-authenticate-users.html) — AWS docs on ALB Cognito authenticate action

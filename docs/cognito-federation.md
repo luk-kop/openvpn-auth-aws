@@ -228,27 +228,27 @@ Recommended validation procedure:
 5. Only then decide whether group checks should use:
    - Cognito Admin API
    - forwarded JWT claims
-   - custom mapped claims such as `custom:groups`
+   - custom mapped claims transformed into `cognito:groups`
 
 Until that verification is done, the safe default for external IdP deployments is to assume that group membership may need to be resolved through the Cognito Admin API rather than through ALB-forwarded claims.
 
 ### Daemon flags for federated deployments
 
-The auth daemon has two known issues affecting federated users that are not yet fixed (see `CODE_REVIEW_EXTERNAL.md`):
+The auth daemon supports federated users by storing the Cognito lookup username from callback claims and by treating `EXTERNAL_PROVIDER` users as enabled during Cognito checks.
 
-| Issue | Affected path | Workaround |
-|---|---|---|
-| `UserStatus = EXTERNAL_PROVIDER` causes reauth denial | Reauth | `--cognito-skip-reauth` |
-| `AdminGetUser` lookup fails for federated users | Callback (group check), Reauth | `--cognito-groups-from-claims` + `--cognito-skip-reauth` |
+| Path | Federated behavior |
+|---|---|
+| Callback group check | Uses `cognito:username` when present and falls back to `username` for `AdminGetUser` / `AdminListGroupsForUser` |
+| Reauth | Uses the Cognito lookup username stored at callback time, not the certificate CN |
+| User status | Accepts both `CONFIRMED` and `EXTERNAL_PROVIDER` users when the account is enabled |
 
-Until the fixes described in `CODE_REVIEW_EXTERNAL.md` are implemented, the only fully working configuration for deployments with an external IdP is:
+The default Cognito Admin API path is the recommended production mode when the forwarded claims contain a usable Cognito username. Claim-based group checks are available only when `cognito:groups` is present in the ALB-forwarded JWT:
 
 ```
 --cognito-groups-from-claims=true
---cognito-skip-reauth=true
 ```
 
-This bypasses both broken paths at the cost of not verifying user account status on TLS renegotiation. Group membership is read from JWT claims instead of the Cognito API, which requires those claims to be present in the ALB-forwarded token. In observed ALB traffic, `cognito:groups` was not present by default, so claim-based group checks require explicit claim mapping such as `custom:groups`.
+Group membership is then read from JWT claims instead of the Cognito API. In observed ALB traffic, `cognito:groups` was not present by default, so claim-based group checks require explicit token customization or mapping that produces `cognito:groups`. A custom attribute such as `custom:groups` is not read by the daemon unless it is transformed into `cognito:groups`.
 
 ## AWS Documentation References
 
@@ -265,10 +265,10 @@ This bypasses both broken paths at the cost of not verifying user account status
 
 ### Flag matrix: native vs federated IdP
 
-| Configuration | Native users | Federated users (pre-fix) | Federated users (post-fix) |
-|---|---|---|---|
-| Default (no extra flags) | ✅ full support | ✗ reauth fails | ✅ full support |
-| `--required-group` set | ✅ full support | ✗ callback + reauth fail | ✅ full support |
-| `--cognito-groups-from-claims` | ✅ | ✗ reauth fails | ✅ |
-| `--cognito-skip-reauth` | ✅ (no reauth check) | ✗ callback fails if `--required-group` set | ✅ (no reauth check) |
-| `--cognito-groups-from-claims` + `--cognito-skip-reauth` | ✅ (no reauth check) | ✅ (no reauth check) | ✅ (no reauth check) |
+| Configuration | Native users | Federated users |
+|---|---|---|
+| Default (no extra flags) | Full support | Full support when ALB forwards a Cognito lookup username |
+| `--required-group` set | Full support | Full support through Cognito Admin API |
+| `--cognito-groups-from-claims` | Supported when `cognito:groups` is present | Supported when `cognito:groups` is present |
+| `--cognito-skip-reauth` | Supported, but skips reauth account-status checks | Supported, but skips reauth account-status checks |
+| `--cognito-groups-from-claims` + `--cognito-skip-reauth` | Supported, with both trade-offs above | Supported, with both trade-offs above |

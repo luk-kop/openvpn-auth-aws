@@ -2,6 +2,39 @@
 
 Security controls implemented in the auth daemon, grouped by the attack they mitigate.
 
+## Layered Security Model
+
+This project intentionally uses a layered VPN authentication model:
+
+```text
+OpenVPN profile possession
+  -> TLS client certificate + tls-crypt
+  -> OpenVPN management-client-auth hold
+  -> signed WebAuth callback state
+  -> ALB/Cognito OIDC authentication
+  -> certificate CN to OIDC email cross-check
+  -> Cognito group authorization
+  -> reauth/session lifetime enforcement
+```
+
+The client certificate is the first identity signal. The browser OIDC flow is the interactive user authorization step. A successful connection requires both: a valid OpenVPN client profile and a successful authenticated callback.
+
+For the detailed OpenVPN management-message and callback flow, see [OpenVPN WebAuth Protocol](webauth-protocol.md).
+
+Key properties:
+
+- **Client profile possession is required.** The generated client profile includes a TLS client certificate and private key. The server expects a certificate-derived `common_name`; certificate-less connects are denied by the daemon.
+- **`tls-crypt` protects the OpenVPN control channel.** It encrypts and authenticates the TLS control channel with a shared static key, reducing unauthenticated exposure before the TLS/auth flow.
+- **No static VPN password is required.** The server uses `auth-user-pass-optional` so clients do not need `auth-user-pass`; identity comes from the certificate CN and authorization comes from OIDC.
+- **OpenVPN cannot complete auth without the daemon.** `management-client-auth` puts the client into pending authentication, and the daemon must send `client-auth <cid> <kid>` before the tunnel is established.
+- **The WebAuth callback is bound to daemon state.** The `state` parameter in the `WEB_AUTH::` URL is HMAC-signed and expires after the configured handshake window.
+- **The callback must be authenticated by ALB/Cognito.** The daemon verifies the ALB-signed OIDC JWT before accepting a callback.
+- **Certificate identity is bound to browser identity.** With `--cn-cross-check=true`, the certificate CN must match the OIDC `email` claim.
+- **Authorization is separate from authentication.** `--required-group` restricts access to a Cognito group, and optional reauth group checks can remove access after group membership changes.
+- **Session controls limit stale access.** Pending sessions expire, optional maximum session duration can kill long-lived tunnels, and OpenVPN duplicate-CN protection prevents concurrent sessions for the same CN within one server process.
+
+This is deliberately more conservative than an SSO-only or certificate-less OpenVPN design. The certificate gates entry into the OpenVPN auth flow, while OIDC decides whether the human using that certificate may establish the tunnel.
+
 ---
 
 ## 1. WebAuth Client Capability Check
@@ -86,7 +119,7 @@ After validating the ALB JWT, the daemon compares the `email` claim from `x-amzn
 
 This prevents a scenario where a user with a valid certificate for one identity authenticates via OIDC as a different identity.
 
-> **Note:** This check should be disabled (`--cn-cross-check=false`) when using federated Cognito identities, because the certificate CN is the user's email but the Cognito username has the form `providerName_externalId`. See [Cognito Federation](cognito-federation.md) for details.
+> **Federated Cognito note:** keep this check enabled when the external IdP provides an email attribute, Cognito maps it to the `email` claim, and that email matches the certificate CN. Disable it only for deployments where the IdP cannot provide a stable email claim that matches certificate issuance policy. `username` / `cognito:username` is not used for this check and may have a provider-specific form such as `providerName_externalId`. See [Cognito Federation](cognito-federation.md) for details.
 
 **Default:** `true` (enabled).
 
@@ -100,7 +133,7 @@ After a successful callback, the daemon calls Cognito `AdminListGroupsForUser` t
 
 When empty, group membership is not checked and any authenticated Cognito user can connect.
 
-**Default:** `"vpn-users"` (as set in the Terraform `required_group` variable).
+**Default:** empty in the daemon, which disables group enforcement. Terraform sets `required_group = "vpn-users"` by default for deployed infrastructure.
 
 ---
 
@@ -130,7 +163,7 @@ The daemon keeps local `CN -> CID` tracking only as defensive cleanup for stale 
 
 Pending sessions (awaiting browser completion) are reaped after `--auth-timeout` seconds. A session that is never completed (user abandons the browser flow) is cleaned up automatically — it cannot linger and be replayed later.
 
-**Default:** `300s`.
+**Default:** `270s` (`4m30s`).
 
 ---
 
@@ -169,9 +202,9 @@ The OpenVPN management socket is protected by a password file. The daemon sends 
 | State expiry | `--hand-window` | 300s | Long-lived replay window |
 | ALB JWT validation (ES256) | — | on | Forged or tampered OIDC callbacks |
 | CN cross-check | `--cn-cross-check` | on | Identity mismatch between cert and OIDC |
-| Required group | `--required-group` | `vpn-users` | Unauthorised Cognito users |
+| Required group | `--required-group` | empty (Terraform: `vpn-users`) | Unauthorised Cognito users |
 | Group check on reauth | `--check-groups-on-reauth` | off | Revoked access persisting after group removal |
 | Duplicate CN policy | OpenVPN config (`duplicate-cn` absent) | on | Concurrent sessions per CN in one OpenVPN process |
-| Session TTL | `--auth-timeout` | 300s | Abandoned pending sessions accumulating |
+| Session TTL | `--auth-timeout` | 270s | Abandoned pending sessions accumulating |
 | Max session duration | `--max-session-duration` | off | Indefinitely long sessions |
 | Management socket auth | OpenVPN config | on | Unauthorised management commands |

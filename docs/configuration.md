@@ -17,9 +17,9 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--aws-region` | `AWS_REGION` | `eu-west-1` | AWS region |
 | `--cognito-user-pool-id` | `VPN_AUTH_COGNITO_USER_POOL_ID` | — | Cognito User Pool ID |
 | `--cognito-issuer-url` | `VPN_AUTH_COGNITO_ISSUER_URL` | — | Cognito issuer URL for JWT `iss` field validation |
-| `--cognito-groups-from-claims` | `VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS` | `false` | Read group membership from ALB JWT claims instead of calling `AdminListGroupsForUser`. Use in local dev with `alb-mock`. |
+| `--cognito-groups-from-claims` | `VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS` | `false` | Read group membership from the `cognito:groups` claim instead of calling `AdminListGroupsForUser`. Use only when that claim is present in the ALB-forwarded JWT, or in local dev with `alb-mock`. |
 | `--cognito-skip-reauth` | `VPN_AUTH_COGNITO_SKIP_REAUTH` | `false` | Skip Cognito `AdminGetUser` call on `CLIENT:REAUTH` (dev/test only) |
-| `--required-group` | `VPN_AUTH_REQUIRED_GROUP` | — | Required Cognito group for VPN access |
+| `--required-group` | `VPN_AUTH_REQUIRED_GROUP` | empty | Required Cognito group for VPN access. Empty disables group enforcement in the daemon; Terraform sets this to `vpn-users` by default. |
 | `--hand-window` | `VPN_AUTH_HAND_WINDOW` | `5m` | OpenVPN `hand-window` — time allowed for the full TLS handshake including auth. Must match the OpenVPN server config |
 | `--auth-timeout` | `VPN_AUTH_AUTH_TIMEOUT` | `4m30s` | How long the daemon waits for the browser auth callback. Must be less than `--hand-window` so `AUTH_FAILED` reaches the client before it self-restarts |
 | `--reneg-interval` | `VPN_AUTH_RENEG_INTERVAL` | `1h` | OpenVPN `reneg-sec` value. Used to compute reauth cache TTL (`reneg-interval + 10m`) |
@@ -39,6 +39,8 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--instance-id` | `VPN_AUTH_INSTANCE_ID` | `local-dev` | Instance identifier used in EMF metrics |
 
 See `--help` for the full list.
+
+Startup validation requires non-empty `--management-socket`, `--management-password-file`, and `--callback-url`. The management socket and password file have daemon defaults; `--callback-url` does not and must be provided by the operator or Terraform.
 
 ### Raw Management Debug Logging
 
@@ -165,7 +167,7 @@ See [Lambda Router](lambda-router-proxy.md) for architecture, security model, an
 | `--alb-arn` set | Validate ALB JWT signature + `signer` field |
 | `--alb-arn` absent | Skip JWT signature validation (dev/test only) |
 | `--cognito-groups-from-claims` absent | Resolve groups via `AdminListGroupsForUser` |
-| `--cognito-groups-from-claims` set | Read groups directly from ALB JWT claims |
+| `--cognito-groups-from-claims` set | Read groups directly from the `cognito:groups` claim in the ALB-forwarded JWT |
 | `--cognito-skip-reauth` absent | Reauth calls Cognito `AdminGetUser` |
 | `--cognito-skip-reauth` set | Skip Cognito API call on reauth (dev/test only) |
 
@@ -228,7 +230,7 @@ All metrics are emitted under the `VPNAuth` namespace with `InstanceId` as the p
 | `StoredSessions` | gauge | — | Number of in-memory sessions, emitted on heartbeat interval |
 | `AuthAttempt` | counter | — | `CLIENT:CONNECT` received and session created |
 | `AuthSuccess` | counter | — | Callback verification passed, `client-auth` sent |
-| `AuthDenied` | counter | `timeout`, `no_webauth`, `missing_common_name`, `url_too_long`, `internal_error` | Auth denied via `client-deny` (handler-level rejections) |
+| `AuthDenied` | counter | `timeout`, `no_webauth`, `missing_common_name`, `url_too_long`, `internal_error`, `missing_oidc_header`, `invalid_jwt_header`, `jwt_validation_failed`, `invalid_jwt_claims`, `cn_mismatch`, `group_check_error`, `group_denied` | Auth denied via `client-deny` |
 | `CallbackRejected` | counter | see below | HTTP callback rejected (all error paths in `handleCallback`) |
 | `ReauthSuccess` | counter | — | `CLIENT:REAUTH` allowed |
 | `ReauthDenied` | counter | `missing_common_name`, `user_not_found`, `user_disabled`, `group_denied`, `cognito_error`, `session_untracked` | Reauth denied |
@@ -255,6 +257,7 @@ All metrics are emitted under the `VPNAuth` namespace with `InstanceId` as the p
 | `cn_mismatch` | 403 | JWT email does not match certificate CN |
 | `group_check_error` | 403 | Cognito API error during group lookup |
 | `group_denied` | 403 | User not in required group |
+| `send_failed` | 503 | Callback checks passed, but writing `client-auth` to the management socket failed |
 
 For production with CloudWatch agent, enable with:
 

@@ -74,3 +74,4 @@ terraform/.build/
 *.log
 notes/
 *.zip
+TODO.md

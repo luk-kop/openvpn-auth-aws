@@ -20,39 +20,25 @@ graph TD
     subgraph ALB_Block["ALB (shared, public) — vpn-auth.example.com — ACM cert"]
         direction TB
         ALB_Auth("Cognito authenticate action on all /callback/* rules")
-        Rule1("/callback/01/udp → TG-01:8080")
-        Rule2("/callback/01/tcp → TG-01:8081")
-        Rule3("/callback/02/udp → TG-02:8080")
-        Rule4("/callback/02/tcp → TG-02:8081")
+        Rule1("/callback/01/udp → TG-UDP:8080")
+        Rule2("/callback/01/tcp → TG-TCP:8081")
     end
 
-    subgraph ASG1["ASG vpn-01 — desired=1, max=2 — EIP: 1.2.3.4"]
-        VPN1_UDP("openvpn-udp :1194")
-        VPN1_TCP("openvpn-tcp :1195")
-        D1_UDP("daemon-udp :8080")
-        D1_TCP("daemon-tcp :8081")
+    subgraph ASG["module vpn_server — one ASG — desired=1, max=2 — EIP: 1.2.3.4"]
+        VPN_UDP("openvpn-server@udp :1194")
+        VPN_TCP("openvpn-server@tcp :1195")
+        D_UDP("openvpn-auth-udp :8080")
+        D_TCP("openvpn-auth-tcp :8081")
     end
 
-    subgraph ASG2["ASG vpn-02 — desired=1, max=2 — EIP: 5.6.7.8"]
-        VPN2_UDP("openvpn-udp :1194")
-        VPN2_TCP("openvpn-tcp :1195")
-        D2_UDP("daemon-udp :8080")
-        D2_TCP("daemon-tcp :8081")
-    end
-
-    Rule1 --> D1_UDP
-    Rule2 --> D1_TCP
-    Rule3 --> D2_UDP
-    Rule4 --> D2_TCP
+    Rule1 --> D_UDP
+    Rule2 --> D_TCP
 
     style ALB_Block fill:#1a5276,stroke:#154360,color:#ecf0f1
-    style ASG1 fill:#1e8449,stroke:#186a3b,color:#fff
-    style ASG2 fill:#1e8449,stroke:#186a3b,color:#fff
+    style ASG fill:#1e8449,stroke:#186a3b,color:#fff
     style ALB_Auth fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
     style Rule1 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
     style Rule2 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
-    style Rule3 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
-    style Rule4 fill:#2c3e50,stroke:#1a252f,color:#ecf0f1
 ```
 
 Terraform modules in the current implementation:
@@ -62,7 +48,7 @@ Terraform modules in the current implementation:
 | 1x | `module "cognito"` | User pool, app client, domain |
 | 1x | `module "alb"` | Shared ALB, listener, Cognito auth action, security groups |
 | 1x | `module "nlb"` | NLB for OpenVPN traffic (multi-instance mode only) |
-| 1x | `module "vpn-server"` | ASG + launch template + EIP/target groups in single-instance mode, or ASG attached to NLB in multi-instance mode |
+| 1x | `module "vpn_server"` | ASG + launch template + EIP/target groups in single-instance mode, or ASG attached to NLB in multi-instance mode |
 | 1x | `module "lambda-router"` | Lambda proxy for callback routing (multi-instance mode only) |
 | — | Root: `secrets.tf` | PKI secrets in Secrets Manager (ca-cert, server-cert, server-key, tls-crypt-key) |
 | — | Root: `cost_saving_mode` | Skips ALB, EIP, ASG when true (Cognito + secrets preserved) |
@@ -113,9 +99,9 @@ Byte budget (229-byte OpenVPN CE limit):
 |-----------|------:|
 | `OPEN_URL:` | 9 |
 | `https://vpn-auth.example.com/callback/01/udp?state=` | 52 |
-| State blob (base64url JSON + `.` + HMAC-SHA256) | ~162 |
-| **Total** | **~223** |
-| **Margin** | **~6** |
+| State blob (base64url JSON + `.` + HMAC-SHA256) | up to ~128 |
+| **Total** | **~189** |
+| **Margin** | **~40** |
 
 Short ALB domain and short server names (`01`, `02`) are important to stay within the 229-byte limit.
 
@@ -143,15 +129,15 @@ The daemon must validate the `x-amzn-oidc-data` JWT:
 
 Cognito `cognito:groups` can be present in the ID token, but ALB does not forward the ID token to the backend. In the tested native-Cognito flow, neither `x-amzn-oidc-data` nor `x-amzn-oidc-accesstoken` contained `cognito:groups`, even after the user was added to a Cognito User Pool group.
 
-Two options for resolving group membership:
+Options for resolving group membership:
 
 1. **Cognito API call (default):** Daemon resolves the Cognito lookup username from callback claims, preferring `cognito:username` when present and falling back to `username`, then calls Cognito Admin APIs (`AdminGetUser`, `AdminListGroupsForUser`). In the tested native-Cognito flow, `username` was the working lookup key and `cognito:username` was absent. For federated/SAML users the exact forwarded claims must be verified empirically. This is the default and most reliable approach. Adds ~10-50ms latency per connect (Cognito API call).
 
-2. **Pre-token generation Lambda trigger (no API call on connect):** Configure a Cognito [pre-token generation Lambda trigger](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-token-generation.html) to inject `cognito:groups` into the access token claims. The daemon then parses groups directly from `x-amzn-oidc-accesstoken` — no Cognito API call needed on the connect path. Trade-offs: requires a Lambda trigger in Cognito, `x-amzn-oidc-accesstoken` is signed by Cognito (not ALB) so validation uses Cognito JWKS instead of ALB public keys, and **access token customization requires Cognito Essentials or Plus feature plan** (`user_pool_tier = "ESSENTIALS"`) with event version V2_0 or V3_0. The Lite plan does not support access token customization.
+2. **Pre-token generation Lambda trigger (future/no API call on connect):** Configure a Cognito [pre-token generation Lambda trigger](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-token-generation.html) to inject `cognito:groups` into token claims. The current daemon's claim-based path reads `cognito:groups` only from the ALB-forwarded `x-amzn-oidc-data` JWT; it does not parse `x-amzn-oidc-accesstoken`. Using access-token customization directly would require daemon support for Cognito access-token parsing and Cognito JWKS validation. Access token customization also requires Cognito Essentials or Plus feature plan (`user_pool_tier = "ESSENTIALS"`) with event version V2_0 or V3_0. The Lite plan does not support access token customization.
 
-3. **SAML federation: `custom:groups` attribute mapping (no API call, no Lambda):** When using SAML IdP (Okta, Azure AD, etc.), map the SAML group attribute to a Cognito custom attribute (`custom:groups`). This attribute is returned by the userInfo endpoint and appears in the `x-amzn-oidc-data` JWT — the daemon reads it directly from ALB headers.
+3. **SAML federation with claim-based groups (no API call, no Lambda):** The current daemon reads claim-based groups only from the `cognito:groups` claim. If an external IdP emits groups as a different SAML or custom Cognito attribute such as `custom:groups`, map or transform that value so the ALB-forwarded claims contain `cognito:groups`, or use the default Cognito Admin API lookup instead.
 
-   Configuration:
+   Example source-attribute configuration before adding the required transformation to `cognito:groups`:
 
    ```hcl
    resource "aws_cognito_user_pool" "pool" {
@@ -174,7 +160,7 @@ Two options for resolving group membership:
    ```
 
    Constraints:
-   - `custom:groups` is a string, max 2048 chars (Cognito custom string attribute limit) — behavior when the value exceeds this limit is not documented; verify during implementation
+   - `custom:groups` is a string, max 2048 chars (Cognito custom string attribute limit) — if used as the source attribute, it still must be transformed or mapped to `cognito:groups` before the daemon can use claim-based group checks
    - Value is set at federation (login) — if groups change in IdP, Cognito updates the attribute on next login (which in this flow is every connect, so effectively real-time)
    - `custom:groups` (SAML-mapped attribute) is different from `cognito:groups` (Cognito native groups) — userInfo returns the former but not the latter
    - If Cognito native groups are needed (e.g. for other AWS services), use option 1 (Cognito Admin API lookup)
@@ -206,12 +192,12 @@ Each EC2 runs two OpenVPN servers (UDP + TCP), each with its own management sock
 graph TD
     subgraph EC2["EC2 Instance"]
         subgraph UDP_Stack["UDP Stack"]
-            OVPN_UDP("openvpn-udp.service<br>proto udp, port 1194<br>mgmt: /run/openvpn/udp-mgmt.sock")
+            OVPN_UDP("openvpn-server@udp<br>proto udp, port 1194<br>mgmt: /run/openvpn/management-udp.sock")
             AUTH_UDP("openvpn-auth-udp.service<br>callback-port 8080<br>callback-url .../callback/01/udp")
         end
 
         subgraph TCP_Stack["TCP Stack"]
-            OVPN_TCP("openvpn-tcp.service<br>proto tcp, port 1195<br>mgmt: /run/openvpn/tcp-mgmt.sock")
+            OVPN_TCP("openvpn-server@tcp<br>proto tcp, port 1195<br>mgmt: /run/openvpn/management-tcp.sock")
             AUTH_TCP("openvpn-auth-tcp.service<br>callback-port 8081<br>callback-url .../callback/01/tcp")
         end
 
@@ -522,7 +508,7 @@ The daemon infers local dev behavior from its configuration — no hidden mode s
 | `--hmac-secret` set | Use local HMAC secret directly |
 | `--hmac-secret-secret-id` set | Fetch the HMAC secret once from AWS Secrets Manager at daemon startup |
 | `--cognito-user-pool-id` omitted | Use static identity checker automatically — no AWS credentials needed |
-| `--cognito-groups-from-claims` | Read groups from `x-amzn-oidc-data` JWT claims instead of calling `AdminListGroupsForUser`. Use with SAML `custom:groups` mapping or in local dev. |
+| `--cognito-groups-from-claims` | Read groups from the `cognito:groups` claim instead of calling `AdminListGroupsForUser`. Use only when that claim is present in the ALB-forwarded JWT, or in local dev. |
 | `--cognito-skip-reauth` | Skip `AdminGetUser` call on reauth — auto-approve renegotiation without verifying user status in Cognito. |
 
 **Always active regardless of config:** state HMAC validation, session lifecycle, CN cross-check (if enabled).

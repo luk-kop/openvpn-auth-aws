@@ -177,7 +177,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	oidcData := r.Header.Get("x-amzn-oidc-data")
 	if oidcData == "" {
 		slog.Warn("callback: missing x-amzn-oidc-data header", "sid", sess.SessionID)
-		s.denySession(sess, "missing oidc header")
+		s.denySession(sess, "missing oidc header", "missing_oidc_header")
 		s.metrics.CallbackRejected("missing_oidc_header")
 		s.renderError(w, http.StatusForbidden, "Authentication Failed", "Identity verification failed.", sess.SessionID)
 		return
@@ -187,7 +187,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	jwtHeader, err := parseJWTHeader(oidcData)
 	if err != nil {
 		slog.Warn("callback: failed to parse JWT header", "sid", sess.SessionID, "error", err)
-		s.denySession(sess, "invalid jwt header")
+		s.denySession(sess, "invalid jwt header", "invalid_jwt_header")
 		s.metrics.CallbackRejected("invalid_jwt_header")
 		s.renderError(w, http.StatusForbidden, "Authentication Failed", "Identity verification failed.", sess.SessionID)
 		return
@@ -212,7 +212,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("callback: ALB JWT validation failed",
 				"sid", sess.SessionID, "error", err)
-			s.denySession(sess, "jwt validation failed")
+			s.denySession(sess, "jwt validation failed", "jwt_validation_failed")
 			s.metrics.CallbackRejected("jwt_validation_failed")
 			s.renderError(w, http.StatusForbidden, "Authentication Failed", "Identity verification failed.", sess.SessionID)
 			return
@@ -226,7 +226,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		if parseErr != nil {
 			slog.Warn("callback: failed to parse JWT claims (dev mode)",
 				"sid", sess.SessionID, "error", parseErr)
-			s.denySession(sess, "invalid jwt claims")
+			s.denySession(sess, "invalid jwt claims", "invalid_jwt_claims")
 			s.metrics.CallbackRejected("invalid_jwt_claims")
 			s.renderError(w, http.StatusForbidden, "Authentication Failed", "Identity verification failed.", sess.SessionID)
 			return
@@ -242,7 +242,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 				"sid", sess.SessionID,
 				"cn", sess.CommonName,
 				"email", claims.Email)
-			s.denySession(sess, "cn mismatch")
+			s.denySession(sess, "cn mismatch", "cn_mismatch")
 			s.metrics.CallbackRejected("cn_mismatch")
 			s.renderError(w, http.StatusForbidden, "Certificate Mismatch", "Your certificate CN does not match your identity.", sess.SessionID)
 			return
@@ -255,7 +255,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Error("callback: group check error",
 				"sid", sess.SessionID, "error", err)
-			s.denySession(sess, "group check error")
+			s.denySession(sess, "group check error", "group_check_error")
 			s.metrics.CallbackRejected("group_check_error")
 			s.renderError(w, http.StatusForbidden, "Authorization Error", "Authorization could not be verified. Please try again.", sess.SessionID)
 			return
@@ -265,7 +265,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 				"sid", sess.SessionID,
 				"group", sess.RequiredGroup,
 				"email", claims.Email)
-			s.denySession(sess, "not in required group")
+			s.denySession(sess, "not in required group", "group_denied")
 			s.metrics.CallbackRejected("group_denied")
 			s.renderError(w, http.StatusForbidden, "Access Denied", "You are not a member of the required group.", sess.SessionID)
 			return
@@ -327,18 +327,19 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// denySession marks the session as failed and sends client-deny.
-func (s *Server) denySession(sess *auth.PendingSession, reason string) {
+// denySession marks the session as failed, sends the client-facing deny reason,
+// and emits a stable low-cardinality metric reason.
+func (s *Server) denySession(sess *auth.PendingSession, clientReason, metricReason string) {
 	s.sessions.MarkFailed(sess.SessionID)
 	if err := s.sink.Send(auth.Decision{
 		Type:   auth.DecisionDeny,
 		CID:    sess.CID,
 		KID:    sess.KID,
-		Reason: reason,
+		Reason: clientReason,
 	}); err != nil {
 		slog.Warn("callback: failed to send deny decision", "sid", sess.SessionID, "error", err)
 	}
-	s.metrics.AuthDenied(reason)
+	s.metrics.AuthDenied(metricReason)
 }
 
 // getOrFetchKey returns the cached public key for kid, fetching it if not cached.
