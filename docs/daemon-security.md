@@ -139,7 +139,7 @@ When empty, group membership is not checked and any authenticated Cognito user c
 
 ## 8. Group Check on Reauth
 
-**Flag:** `--check-groups-on-reauth` / `VPN_AUTH_CHECK_GROUPS_ON_REAUTH`
+**Flag:** `--check-required-group-on-reauth` / `VPN_AUTH_CHECK_REQUIRED_GROUP_ON_REAUTH`
 
 By default, the group check only runs at initial authentication. When this flag is enabled, group membership is re-verified on every `CLIENT:REAUTH` (TLS renegotiation). Users removed from the required group are disconnected at the next renegotiation cycle (`reneg-sec`).
 
@@ -203,7 +203,7 @@ The OpenVPN management socket is protected by a password file. The daemon sends 
 | ALB JWT validation (ES256) | — | on | Forged or tampered OIDC callbacks |
 | CN cross-check | `--cn-cross-check` | on | Identity mismatch between cert and OIDC |
 | Required group | `--required-group` | empty (Terraform: `vpn-users`) | Unauthorised Cognito users |
-| Group check on reauth | `--check-groups-on-reauth` | off | Revoked access persisting after group removal |
+| Required group check on reauth | `--check-required-group-on-reauth` | off | Revoked access persisting after group removal |
 | Duplicate CN policy | OpenVPN config (`duplicate-cn` absent) | on | Concurrent sessions per CN in one OpenVPN process |
 | Session TTL | `--auth-timeout` | 270s | Abandoned pending sessions accumulating |
 | Max session duration | `--max-session-duration` | off | Indefinitely long sessions |

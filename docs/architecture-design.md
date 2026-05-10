@@ -432,7 +432,7 @@ Cognito app client needs only one callback URL: `https://vpn-auth.example.com/oa
 
 ### Constraints
 
-- **Cognito User Pool should be in the same region as the ALB** when using `authenticate-cognito` action. The action takes `user_pool_arn` and `user_pool_domain` but has no parameter for a cross-region endpoint — ALB likely resolves Cognito endpoints based on the ARN region. This is operationally expected but not explicitly confirmed in AWS documentation; verify empirically if cross-region is needed. If a central Cognito in a different region is required, use `authenticate-oidc` action instead — this allows explicit endpoint configuration but requires a client secret and loses the native Cognito integration.
+- **Cognito User Pool should be in the same region as the ALB** when using `authenticate-cognito` action. The action takes `user_pool_arn` and `user_pool_domain` but has no parameter for a cross-region endpoint — ALB likely resolves Cognito endpoints based on the ARN region. This is operationally expected but not explicitly confirmed in AWS documentation; verify empirically if cross-region is needed. If a central Cognito in a different region is required, `authenticate-oidc` is the likely direction because it allows explicit endpoint configuration, but that mode is not implemented in this repository today and still needs AWS validation.
 - **Cognito app client must have a client secret** and use the authorization code grant flow (required by ALB Cognito integration).
 - **Cognito domain is required** — ALB `authenticate-cognito` action needs `user_pool_domain` to construct the authorization URL. Either a Cognito-hosted domain (`xxx.auth.<region>.amazoncognito.com`) or a custom domain.
 - **OAuth scope must include `email`** if the daemon needs the user's email from `x-amzn-oidc-data` claims. ALB defaults to `openid` only. Configure `scope = "openid email"` in the `authenticate_cognito` action block. `openid` enables OIDC login, `email` requests the `email` claim from Cognito userInfo so ALB can include it in `x-amzn-oidc-data`. Add `profile` if additional claims are needed.
@@ -508,7 +508,7 @@ The daemon infers local dev behavior from its configuration — no hidden mode s
 | `--hmac-secret` set | Use local HMAC secret directly |
 | `--hmac-secret-secret-id` set | Fetch the HMAC secret once from AWS Secrets Manager at daemon startup |
 | `--cognito-user-pool-id` omitted | Use static identity checker automatically — no AWS credentials needed |
-| `--cognito-groups-from-claims` | Read groups from the `cognito:groups` claim instead of calling `AdminListGroupsForUser`. Use only when that claim is present in the ALB-forwarded JWT, or in local dev. |
+| `--cognito-groups-from-claims` | During callback/connect, read groups from the `cognito:groups` claim instead of calling `AdminListGroupsForUser`. Use only when that claim is present in the ALB-forwarded JWT, or in local dev. Reauth group checks still require Cognito Admin API access. |
 | `--cognito-skip-reauth` | Skip `AdminGetUser` call on reauth — auto-approve renegotiation without verifying user status in Cognito. |
 
 **Always active regardless of config:** state HMAC validation, session lifecycle, CN cross-check (if enabled).

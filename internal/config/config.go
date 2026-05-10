@@ -11,20 +11,20 @@ import (
 )
 
 type Config struct {
-	ManagementSocket       string
-	ManagementPasswordFile string
-	HMACSecret             string
-	HMACSecretSecretID     string
-	RequiredGroup          string
-	CNCrossCheck           bool
-	HandWindow             time.Duration
-	ReconnectMaxInterval   time.Duration
-	ShutdownGracePeriod    time.Duration
-	CheckGroupsOnReauth    bool
-	ReauthCache            bool
-	ReauthTimeout          time.Duration
-	RenegInterval          time.Duration
-	InstanceID             string
+	ManagementSocket           string
+	ManagementPasswordFile     string
+	HMACSecret                 string
+	HMACSecretSecretID         string
+	RequiredGroup              string
+	CNCrossCheck               bool
+	HandWindow                 time.Duration
+	ReconnectMaxInterval       time.Duration
+	ShutdownGracePeriod        time.Duration
+	CheckRequiredGroupOnReauth bool
+	ReauthCache                bool
+	ReauthTimeout              time.Duration
+	RenegInterval              time.Duration
+	InstanceID                 string
 
 	// Auth timeout (callback flow)
 	AuthTimeout  time.Duration
@@ -69,7 +69,7 @@ func Parse() (Config, error) {
 	flag.DurationVar(&cfg.HandWindow, "hand-window", getDurationOrCollect("VPN_AUTH_HAND_WINDOW", 300*time.Second, &envErrors), "pending auth timeout (must match OpenVPN server hand-window)")
 	flag.DurationVar(&cfg.ReconnectMaxInterval, "reconnect-max-interval", getDurationOrCollect("VPN_AUTH_RECONNECT_MAX_INTERVAL", 5*time.Second, &envErrors), "max backoff between management socket reconnect attempts")
 	flag.DurationVar(&cfg.ShutdownGracePeriod, "shutdown-grace-period", getDurationOrCollect("VPN_AUTH_SHUTDOWN_GRACE_PERIOD", 300*time.Second, &envErrors), "grace period for shutdown")
-	flag.BoolVar(&cfg.CheckGroupsOnReauth, "check-groups-on-reauth", getBoolOrCollect("VPN_AUTH_CHECK_GROUPS_ON_REAUTH", false, &envErrors), "check required group during CLIENT:REAUTH")
+	flag.BoolVar(&cfg.CheckRequiredGroupOnReauth, "check-required-group-on-reauth", getBoolOrCollect("VPN_AUTH_CHECK_REQUIRED_GROUP_ON_REAUTH", false, &envErrors), "check required group during CLIENT:REAUTH")
 	flag.BoolVar(&cfg.ReauthCache, "reauth-cache", getBoolOrCollect("VPN_AUTH_REAUTH_CACHE", false, &envErrors), "allow cached reauth decisions during identity provider outage")
 	flag.DurationVar(&cfg.ReauthTimeout, "reauth-timeout", getDurationOrCollect("VPN_AUTH_REAUTH_TIMEOUT", 5*time.Second, &envErrors), "timeout for Cognito calls during CLIENT:REAUTH")
 	flag.DurationVar(&cfg.RenegInterval, "reneg-interval", getDurationOrCollect("VPN_AUTH_RENEG_INTERVAL", 3600*time.Second, &envErrors), "OpenVPN reneg-sec value (for reauth cache TTL calculation)")
@@ -138,6 +138,9 @@ func (c Config) Validate() error {
 	}
 	if c.CognitoUserPoolID == "" && !c.CognitoGroupsClaims && c.RequiredGroup != "" {
 		problems = append(problems, "cognito-user-pool-id is required when required-group is set without cognito-groups-from-claims")
+	}
+	if c.CognitoUserPoolID == "" && c.RequiredGroup != "" && c.CheckRequiredGroupOnReauth {
+		problems = append(problems, "cognito-user-pool-id is required when check-required-group-on-reauth is set with required-group")
 	}
 	if c.CognitoUserPoolID == "" && c.ALBARN == "" {
 		slog.Info("local dev mode: cognito-user-pool-id and alb-arn not set, using static identity checker")

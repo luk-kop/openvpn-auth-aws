@@ -190,7 +190,7 @@ The reauth flow:
 
 This means:
 - **User disabled in Cognito** — disconnected at next renegotiation (within `reneg-sec`)
-- **User removed from required group** — disconnected if `--check-groups-on-reauth=true`
+- **User removed from required group** — disconnected if `--check-required-group-on-reauth=true`
 - **Cognito unavailable** — denied by default, or allowed from cache if `--reauth-cache=true`
 
 Daemon logs for reauth:

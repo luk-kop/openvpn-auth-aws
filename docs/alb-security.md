@@ -176,7 +176,7 @@ rule {
 
 The ALB always injects `x-amzn-oidc-data` after a successful Cognito authentication. Direct requests from the internet (e.g. attempts to bypass the ALB auth flow) will not carry this header.
 
-> This rule only makes sense if EC2 traffic flows exclusively through the ALB (security group blocks direct access). Otherwise an attacker could simply add a fake header — but the daemon will still reject the request via ES256 signature verification.
+> This rule only makes sense if EC2 traffic flows exclusively through the ALB (security group blocks direct access). Otherwise an attacker could simply add a fake header — but the daemon will still reject the request via ES256 signature verification, provided `--alb-arn` is set so the JWT `signer` field is cross-checked against the expected ALB. See [`docs/configuration.md`](configuration.md) for the flag and [`docs/architecture.md`](architecture.md) for the full validation pipeline.
 
 ```hcl
 rule {
@@ -397,3 +397,8 @@ If you run multiple VPN instances with separate ALBs, each requires its own Web 
 - Use `scope = "REGIONAL"` for ALB — do not confuse with `CLOUDFRONT` scope
 - Start with `count` mode (instead of `block`) for custom rules to observe false positives before enabling blocking
 - WAF logs can be sent to CloudWatch Logs, S3, or Kinesis Firehose — useful for debugging and auditing
+
+## See Also
+
+- [`docs/configuration.md`](configuration.md) — `--alb-arn` / `VPN_AUTH_ALB_ARN` flag: ALB ARN used by the daemon to validate the `signer` field in ALB-issued JWTs. If absent, JWT signature validation is skipped (dev/test only).
+- [`docs/architecture.md`](architecture.md) — full callback validation pipeline (state HMAC → session lookup → `x-amzn-oidc-data` → ES256 signature + `signer` check → CN cross-check → group check).

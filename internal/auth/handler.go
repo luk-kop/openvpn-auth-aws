@@ -343,7 +343,7 @@ func (h *Handler) handleReauth(ctx context.Context, event mgmt.Event, sink Decis
 	checkCtx, cancel := context.WithTimeout(ctx, h.cfg.ReauthTimeout)
 	defer cancel()
 
-	result, err := h.identity.CheckUser(checkCtx, lookup, h.cfg.RequiredGroup, h.cfg.CheckGroupsOnReauth)
+	result, err := h.identity.CheckUser(checkCtx, lookup, h.cfg.RequiredGroup, h.cfg.CheckRequiredGroupOnReauth)
 	if err == nil {
 		if h.cache != nil {
 			h.cache.Put(lookup, result)
@@ -353,7 +353,7 @@ func (h *Handler) handleReauth(ctx context.Context, event mgmt.Event, sink Decis
 	}
 
 	if h.cache != nil {
-		if cached, ok := h.cache.Get(lookup); ok && cached.Exists && cached.Enabled && (!h.cfg.CheckGroupsOnReauth || cached.InGroup) {
+		if cached, ok := h.cache.Get(lookup); ok && cached.Exists && cached.Enabled && (!h.cfg.CheckRequiredGroupOnReauth || cached.InGroup) {
 			slog.Info("reauth allowed", "cid", event.CID, "cn", lookup, "source", "cache", "cognito_error", err)
 			h.metrics.ReauthCacheHit()
 			sendOrLog(sink, Decision{Type: DecisionAllowNT, CID: event.CID, KID: event.KID})
@@ -379,7 +379,7 @@ func (h *Handler) finishReauth(event mgmt.Event, result IdentityResult, sink Dec
 		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "user disabled"})
 		return
 	}
-	if h.cfg.CheckGroupsOnReauth && !result.InGroup {
+	if h.cfg.CheckRequiredGroupOnReauth && !result.InGroup {
 		slog.Warn("reauth denied", "cid", event.CID, "cn", event.CommonName(), "reason", "group denied", "group", h.cfg.RequiredGroup)
 		h.metrics.ReauthDenied("group_denied")
 		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: fmt.Sprintf("not in required group: %s", h.cfg.RequiredGroup)})

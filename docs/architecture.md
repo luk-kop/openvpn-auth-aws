@@ -224,7 +224,7 @@ flowchart TD
 | 5 | **ALB public key fetch** — fetches ECDSA public key from `https://public-keys.auth.elb.{region}.amazonaws.com/{kid}`, cached in memory | N/A (infrastructure step) | 503 (retryable) | `public_key_fetch_failed` |
 | 6 | **JWT signature + claims** — verifies ES256 signature with the ALB public key, checks `signer` matches `--alb-arn`, requires valid `exp` | Token forgery, ALB spoofing, expired tokens | 403 + deny | `jwt_validation_failed` / `invalid_jwt_claims` |
 | 7 | **CN cross-check** — compares JWT `email` claim with the client certificate's Common Name (case-insensitive) | User A authenticating with User B's browser session | 403 + deny | `cn_mismatch` |
-| 8 | **Group membership** — checks if the user belongs to the required Cognito group. By default this uses Cognito Admin APIs. With `--cognito-groups-from-claims`, the daemon reads only the `cognito:groups` JWT claim. | Unauthorized access by authenticated but unprivileged users | 403 + deny | `group_check_error` / `group_denied` |
+| 8 | **Group membership** — checks if the user belongs to the required Cognito group. By default this uses Cognito Admin APIs. With `--cognito-groups-from-claims`, the callback/connect decision reads only the `cognito:groups` JWT claim; reauth group checks still require Cognito Admin API access. | Unauthorized access by authenticated but unprivileged users | 403 + deny | `group_check_error` / `group_denied` |
 
 All rejection reasons are emitted as `CallbackRejected` EMF metric with a `Reason` dimension. See [EMF Metrics](configuration.md#emf-metrics) for the full list.
 
