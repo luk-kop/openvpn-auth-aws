@@ -64,7 +64,7 @@ Terraform modules in the current implementation:
 | 1x | `module "nlb"` | NLB for OpenVPN traffic (multi-instance mode only) |
 | 1x | `module "vpn-server"` | ASG + launch template + EIP/target groups in single-instance mode, or ASG attached to NLB in multi-instance mode |
 | 1x | `module "lambda-router"` | Lambda proxy for callback routing (multi-instance mode only) |
-| — | Root: `secrets.tf` | PKI secrets in Secrets Manager (ca-cert, server-cert, server-key, ta-key) |
+| — | Root: `secrets.tf` | PKI secrets in Secrets Manager (ca-cert, server-cert, server-key, tls-crypt-key) |
 | — | Root: `cost_saving_mode` | Skips ALB, EIP, ASG when true (Cognito + secrets preserved) |
 
 

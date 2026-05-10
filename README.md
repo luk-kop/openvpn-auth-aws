@@ -1,7 +1,7 @@
-# OpenVPN Auth Daemon
+# OpenVPN Auth Daemon for AWS
 
 ![Go](https://img.shields.io/badge/Go-1.26.3-00ADD8?logo=go&logoColor=white)
-![OpenVPN](https://img.shields.io/badge/OpenVPN_CE-2.6.19-EA7E20?logo=openvpn&logoColor=white)
+![OpenVPN](https://img.shields.io/badge/OpenVPN_CE-2.7.4-EA7E20?logo=openvpn&logoColor=white)
 ![AWS](https://img.shields.io/badge/AWS-Cognito-FF9900?logo=amazonaws&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey?logo=linux)
@@ -19,6 +19,7 @@ The implementation here uses a different architecture centered around an OpenVPN
 - Browser-based OIDC authentication via WebAuth (`WEB_AUTH::` URL)
 - ALB JWT validation (ES256) — ALB handles the full OIDC flow and forwards signed `x-amzn-oidc-*` headers
 - Two independent daemons per EC2 (UDP + TCP), each with its own callback port and session store
+- OpenVPN CE 2.7.4 target with a verified multi-socket lab path: one OpenVPN process can listen on UDP and TCP while using one management socket
 - `/healthz` endpoint for ALB target group health checks and EIP association gating
 - Reauth on TLS renegotiation with Cognito user lookup (+ optional cache for IdP outages)
 - CN cross-check: certificate CN must match OIDC email claim (`--cn-cross-check`)
@@ -40,7 +41,7 @@ See [Architecture](docs/architecture.md#eip-association), [Architecture Design](
 
 - Docker + Docker Compose
 - `make`
-- Go 1.26.x
+- Go `1.26.x`
 - OpenVPN client (`openvpn`) for the full-stack test flow
 
 Choose one of these local workflows:
@@ -60,6 +61,18 @@ make stack-down                            # stop
 ```
 
 Expected result: the OpenVPN client opens the browser-based auth flow, `alb-mock` forwards the callback to the daemon, and the VPN session is authenticated.
+
+### OpenVPN 2.7 Multi-Socket Lab
+
+The project includes a separate lab for the OpenVPN 2.7 multi-socket target: one OpenVPN process listens on UDP `1194` and TCP `1195`, while the daemon uses one management socket.
+
+```bash
+VPN_AUTH_MANAGEMENT_RAW_LOG=true RENEG_SEC=30 make stack-rebuild-multisocket
+REAUTH_WAIT=35 make verify-multisocket
+make stack-down-multisocket
+```
+
+This verifies the current daemon flow against OpenVPN 2.7.4 multi-socket management events. Listener/protocol data from OpenVPN is diagnostic only; daemon routing and auth decisions use signed state plus `cid/kid`.
 
 ### Manual Testing with mgmt-mock
 
@@ -109,7 +122,7 @@ openvpn-auth-aws/
 ├── lambda-router/ # Go Lambda proxy for multi-instance EC2 callback routing
 ├── terraform/     # AWS infrastructure (modules: alb, cognito, lambda-router, nlb, vpn-server)
 ├── scripts/       # PKI management script (pki.sh)
-├── pki/           # Generated PKI artifacts (CA, server/client certs, TLS auth key)
+├── pki/           # Generated PKI artifacts (CA, server/client certs, TLS crypt key)
 ├── docs/          # Documentation
 └── lab/           # Docker compose stack, PKI setup, test configs
 ```
@@ -122,6 +135,7 @@ openvpn-auth-aws/
 - [Architecture Design](docs/architecture-design.md) — detailed design doc with infrastructure diagrams, instance replacement, local dev setup
 - [PKI](docs/pki.md) — certificate management with `scripts/pki.sh`
 - [OpenVPN Server](docs/openvpn-server.md) — required directives, verb levels, UDP disconnect behavior, client config
+- [OpenVPN 2.7 Migration Notes](docs/openvpn-2.7-migration.md) — multi-socket lab findings and supervisor/runtime migration plan
 - [Testing](docs/testing.md) — test strategy, local and AWS modes, CI/CD
 - [Troubleshooting](docs/troubleshooting.md) — useful commands, known issues, debugging auth flow
 - [Lambda Router](docs/lambda-router-proxy.md) — Go Lambda proxy for multi-instance EC2 deployments: path-based IP routing, VPC CIDR validation, security model

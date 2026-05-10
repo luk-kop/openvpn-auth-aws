@@ -28,7 +28,11 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	setupLogging(cfg.LogFormat)
+	setupLogging(cfg)
+
+	if cfg.ManagementRawLog {
+		slog.Warn("management raw logging enabled; lab/debug only, do not enable in production")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -136,10 +140,13 @@ func main() {
 	}
 }
 
-func setupLogging(format string) {
+func setupLogging(cfg appconfig.Config) {
 	var handler slog.Handler
 	opts := &slog.HandlerOptions{}
-	switch format {
+	if cfg.ManagementRawLog {
+		opts.Level = slog.LevelDebug
+	}
+	switch cfg.LogFormat {
 	case "json":
 		handler = slog.NewJSONHandler(os.Stderr, opts)
 	default:

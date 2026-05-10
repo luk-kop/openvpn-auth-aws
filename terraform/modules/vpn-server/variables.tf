@@ -195,9 +195,9 @@ variable "ec2_sg_rules" {
 # --- OpenVPN ---
 
 variable "openvpn_version" {
-  description = "Pinned OpenVPN CE version for apt install (e.g. '2.6.19'). The distro suffix is appended automatically."
+  description = "Pinned OpenVPN CE version for apt install from the official 2.7 repo. The Ubuntu Noble package suffix is appended automatically."
   type        = string
-  default     = "2.6.19"
+  default     = "2.7.4"
 }
 
 # --- EC2 ---

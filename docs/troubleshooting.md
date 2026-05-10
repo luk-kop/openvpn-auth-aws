@@ -166,6 +166,43 @@ journalctl -u openvpn-auth-udp --no-pager | grep -i "cross-check"
 journalctl -u openvpn-auth-udp --no-pager | grep -i "jwt"
 ```
 
+### NetworkManager OpenVPN GUI Fails Before Browser Opens
+
+The standard Ubuntu/Mint `network-manager-openvpn` plugin is not a supported
+client for this project's WebAuth flow. In the observed Ubuntu/Mint flow it
+imports `push-peer-info`, but does not pass `IV_SSO=webauth` and does not open
+the `WEB_AUTH` URL.
+
+Server-side symptoms:
+
+```text
+peer info: IV_VER=...
+peer info: IV_PLAT=linux
+...
+MANAGEMENT: CMD 'client-deny <cid> <kid> "client does not support WebAuth"'
+AUTH_FAILED
+```
+
+Client-side symptom:
+
+```text
+AUTH: Received control message: AUTH_FAILED
+SIGUSR1[soft,auth-failure] received, process restarting
+```
+
+Check the imported NetworkManager profile:
+
+```bash
+nmcli -g vpn.data connection show "<connection-name>" | tr ',' '\n' | grep -Ei 'push|peer|setenv|IV_SSO|webauth'
+```
+
+`push-peer-info = yes` is not enough. The client must also send
+`IV_SSO=webauth`. If the OpenVPN server log has no `peer info: IV_SSO=webauth`
+line, the daemon will reject the connection.
+
+Use OpenVPN3 Linux, OpenVPN 2.x CLI with a profile containing
+`setenv IV_SSO webauth`, or a purpose-built SSO client/plugin instead.
+
 ### SSM Session Manager
 
 ```bash

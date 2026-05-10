@@ -30,8 +30,10 @@ import (
 )
 
 const (
-	socketPath   = "/tmp/openvpn-mgmt.sock"
-	passwordFile = "/tmp/mgmt-pw"
+	socketPath        = "/tmp/openvpn-mgmt.sock"
+	passwordFile      = "/tmp/mgmt-pw"
+	mockClientVersion = "2.7.4"
+	mockServerTitle   = "OpenVPN 2.7.4 mock"
 )
 
 // nextKID auto-increments per CID to simulate TLS renegotiation.
@@ -332,7 +334,7 @@ func sendConnect(conn net.Conn, cid, kid, username, sso, password string) {
 	}
 	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,untrusted_ip=10.0.0.2\r\n")
 	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,untrusted_port=51234\r\n")
-	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,IV_VER=2.6.12\r\n")
+	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,IV_VER=%s\r\n", mockClientVersion)
 	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,IV_PLAT=linux\r\n")
 	_, _ = fmt.Fprintf(conn, ">CLIENT:ENV,END\r\n")
 	extra := ""
@@ -362,7 +364,7 @@ func sendDisconnect(conn net.Conn, cid string) {
 }
 
 func writeStatus(conn net.Conn) {
-	_, _ = fmt.Fprintf(conn, "TITLE,OpenVPN 2.6 mock\r\n")
+	_, _ = fmt.Fprintf(conn, "TITLE,%s\r\n", mockServerTitle)
 	_, _ = fmt.Fprintf(conn, "HEADER,CLIENT_LIST,Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since (time_t),Username,Client ID,Peer ID\r\n")
 	_, _ = fmt.Fprintf(conn, "TIME,%d\r\n", time.Now().Unix())
 	activeSessionsMu.Lock()

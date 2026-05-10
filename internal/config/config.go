@@ -46,6 +46,7 @@ type Config struct {
 	EMFMetrics          bool
 	EMFInterval         time.Duration
 	LogFormat           string
+	ManagementRawLog    bool
 
 	// Session limits
 	MaxSessionDuration time.Duration
@@ -94,6 +95,7 @@ func Parse() (Config, error) {
 	flag.BoolVar(&cfg.EMFMetrics, "emf-metrics", getBoolOrCollect("VPN_AUTH_EMF_METRICS", false, &envErrors), "emit CloudWatch EMF metrics to stdout")
 	flag.DurationVar(&cfg.EMFInterval, "emf-interval", getDurationOrCollect("VPN_AUTH_EMF_INTERVAL", 10*time.Second, &envErrors), "interval for EMF heartbeat metrics (0 to disable heartbeat only)")
 	flag.StringVar(&cfg.LogFormat, "log-format", getenv("VPN_AUTH_LOG_FORMAT", "text"), "log output format: text or json")
+	flag.BoolVar(&cfg.ManagementRawLog, "management-raw-log", getBoolOrCollect("VPN_AUTH_MANAGEMENT_RAW_LOG", false, &envErrors), "lab/debug only: log redacted raw OpenVPN management lines at DEBUG level")
 	flag.DurationVar(&cfg.MaxSessionDuration, "max-session-duration", getDurationOrCollect("VPN_AUTH_MAX_SESSION_DURATION", 0, &envErrors), "maximum VPN session duration; 0 to disable (e.g. 8h, 10h, 12h)")
 	flag.StringVar(&cfg.TemplatesDir, "templates-dir", getenv("VPN_AUTH_TEMPLATES_DIR", ""), "path to custom HTML templates (overrides built-in)")
 	flag.StringVar(&cfg.ServerName, "server-name", getenv("VPN_AUTH_SERVER_NAME", ""), "human-readable server name exposed to HTML templates")

@@ -75,7 +75,7 @@ No modules.
 | <a name="input_nlb_security_group_id"></a> [nlb\_security\_group\_id](#input\_nlb\_security\_group\_id) | Security group ID of the NLB (used for EC2 ingress from NLB in multi-instance mode) | `string` | n/a | yes |
 | <a name="input_nlb_target_group_arns"></a> [nlb\_target\_group\_arns](#input\_nlb\_target\_group\_arns) | NLB target group ARNs to attach to the ASG (multi-instance mode) | `list(string)` | `[]` | no |
 | <a name="input_openvpn_allowed_cidrs"></a> [openvpn\_allowed\_cidrs](#input\_openvpn\_allowed\_cidrs) | CIDR blocks allowed to connect to OpenVPN directly (single-instance mode). Use ["0.0.0.0/0"] for public access. | `list(string)` | <pre>[<br/>  "0.0.0.0/0"<br/>]</pre> | no |
-| <a name="input_openvpn_version"></a> [openvpn\_version](#input\_openvpn\_version) | Pinned OpenVPN CE version for apt install (e.g. '2.6.19'). The distro suffix is appended automatically. | `string` | `"2.6.19"` | no |
+| <a name="input_openvpn_version"></a> [openvpn\_version](#input\_openvpn\_version) | Pinned OpenVPN CE version for apt install from the official 2.7 repo. The Ubuntu Noble package suffix is appended automatically. | `string` | `"2.7.4"` | no |
 | <a name="input_pki_secret_arns"></a> [pki\_secret\_arns](#input\_pki\_secret\_arns) | ARNs of PKI secrets in Secrets Manager (for IAM policy scoping) | `list(string)` | n/a | yes |
 | <a name="input_project_name"></a> [project\_name](#input\_project\_name) | Project name used for resource naming | `string` | n/a | yes |
 | <a name="input_pushed_routes"></a> [pushed\_routes](#input\_pushed\_routes) | CIDR blocks pushed to VPN clients as routes via OpenVPN 'push route' directive. | `list(string)` | `[]` | no |

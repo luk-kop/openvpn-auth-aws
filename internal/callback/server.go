@@ -129,7 +129,13 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	s.metrics.CallbackReceived()
 
 	// Step 1: Extract and verify state blob.
-	stateParam := r.URL.Query().Get("state")
+	// OpenVPN 2.x logs WEB_AUTH as ('URL'); some terminals include the
+	// closing apostrophe when linkifying the URL. ALB's OAuth roundtrip can
+	// preserve that encoded artifact through one extra layer, so after Go's
+	// single-pass query decoding it arrives as either "'" or literal "%27".
+	rawState := r.URL.Query().Get("state")
+	stateParam := strings.TrimSuffix(rawState, "%27")
+	stateParam = strings.TrimSuffix(stateParam, "'")
 	if stateParam == "" {
 		s.metrics.CallbackRejected("missing_state")
 		s.renderError(w, http.StatusBadRequest, "Session Error", "Authentication state is missing or invalid.", "")
@@ -138,7 +144,15 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	payload, err := auth.DecodeState(stateParam, s.signer)
 	if err != nil {
-		slog.Info("callback: invalid state", "error", err)
+		rawTail := rawState
+		if len(rawTail) > 12 {
+			rawTail = rawTail[len(rawTail)-12:]
+		}
+		slog.Info("callback: invalid state",
+			"error", err,
+			"raw_len", len(rawState),
+			"raw_tail", rawTail,
+			"trimmed", rawState != stateParam)
 		s.metrics.CallbackRejected("invalid_state")
 		s.renderError(w, http.StatusBadRequest, "Session Error", "Authentication state is missing or invalid.", "")
 		return

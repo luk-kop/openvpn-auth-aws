@@ -2,14 +2,64 @@
 
 ## Tested Version
 
-This project is tested with **OpenVPN CE 2.6.19** (installed from the [official OpenVPN repository](https://build.openvpn.net/debian/openvpn/release/2.6)). The version is pinned and configurable:
+This project targets **OpenVPN CE 2.7.4** (installed from the [official OpenVPN 2.7 repository](https://build.openvpn.net/debian/openvpn/release/2.7/)). The version is pinned and configurable:
 
 | Environment | How to change | Default |
 |-------------|---------------|---------|
-| Docker lab | `OPENVPN_VERSION` build arg in `lab/Dockerfile.openvpn` | `2.6.19` |
-| Terraform | `openvpn_version` variable in `terraform/variables.tf` | `"2.6.19"` |
+| Docker lab | `OPENVPN_VERSION` build arg in `lab/Dockerfile.openvpn` | `2.7.4` |
+| Terraform | `openvpn_version` variable in `terraform/variables.tf` | `"2.7.4"` |
 
-**Minimum required:** OpenVPN 2.6+ — earlier versions do not support the `IV_SSO webauth` mechanism used for browser-based authentication.
+**Minimum required:** OpenVPN 2.7.4 for the first release target. OpenVPN 2.6+ has the `IV_SSO webauth` mechanism used for browser-based authentication, but this project is migrating to 2.7.4 before release so multi-socket behavior can be tested against the supported target.
+
+## OpenVPN 2.7 Multi-Socket Example
+
+OpenVPN 2.7 can run one server process with multiple listening sockets. The verified Docker lab uses one UDP listener, one TCP listener, and one management Unix socket:
+
+```text
+local 0.0.0.0 1194 udp
+local 0.0.0.0 1195 tcp-server
+dev tun
+
+tls-server
+server 10.8.0.0 255.255.255.0
+topology subnet
+
+keepalive 10 120
+persist-tun
+cipher AES-256-GCM
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+tls-version-min 1.2
+verb 3
+reneg-sec 3600
+
+management /run/openvpn/management.sock unix /etc/openvpn/management-pw
+management-client-auth
+management-hold
+auth-user-pass-optional
+hand-window 300
+
+dh none
+tls-crypt /etc/openvpn/server/tls-crypt.key
+```
+
+Lab commands:
+
+```bash
+VPN_AUTH_MANAGEMENT_RAW_LOG=true RENEG_SEC=30 make stack-rebuild-multisocket
+REAUTH_WAIT=35 make verify-multisocket
+make stack-down-multisocket
+```
+
+Current verified behavior:
+
+- UDP and TCP clients both reach `AUTH_PENDING`, complete browser callback, and establish tunnels through one OpenVPN process.
+- Both listener types emit `CLIENT:CONNECT`, `CLIENT:ESTABLISHED`, `CLIENT:REAUTH`, and `CLIENT:DISCONNECT` through the same management socket.
+- `client-auth <cid> <kid>` works for UDP and TCP clients in the same OpenVPN process.
+- `status 3` after daemon reconnect can rebuild established sessions from `CLIENT_LIST`.
+
+Important limitation: OpenVPN 2.7.4 management events do not expose the exact local listener that accepted the client. `CLIENT:*` env includes the configured listener list, and `status 3` includes coarse protocol hints such as `udp4` or `tcp4-server`, but not the local bind address/port that accepted the client. Treat listener/protocol data as diagnostics only. Daemon routing and auth decisions use signed state plus `cid/kid`.
+
+The Terraform deployment may still use separate OpenVPN processes while the supervisor/runtime migration is in progress. See [OpenVPN 2.7 Migration Notes](openvpn-2.7-migration.md) for the full plan and raw lab findings.
 
 ## Required Directives
 
@@ -20,8 +70,11 @@ management /run/openvpn/management.sock unix /path/to/management-pw
 management-client-auth
 management-hold
 auth-user-pass-optional
-setenv IV_SSO webauth
 hand-window 300
+tls-crypt /etc/openvpn/server/tls-crypt.key
+cipher AES-256-GCM
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+tls-version-min 1.2
 ```
 
 | Directive | Purpose |
@@ -30,8 +83,10 @@ hand-window 300
 | `management-client-auth` | Delegates client authentication to the management interface (daemon) |
 | `management-hold` | Holds OpenVPN startup until daemon sends `hold release` |
 | `auth-user-pass-optional` | Allows connection without username/password — identity comes from TLS certificate CN |
-| `setenv IV_SSO webauth` | Announces WebAuth support to clients via `IV_SSO` environment variable |
 | `hand-window` | Time (seconds) allowed for the full TLS handshake including browser-based auth. Must match `--hand-window` on the daemon. Default is 60s which is too short for browser auth — set to 300s or more |
+| `tls-crypt` | Encrypts and authenticates the TLS control channel using a shared static key. This project uses plain `tls-crypt`, not `tls-auth`, for the first release target. |
+| `cipher` / `data-ciphers` | Pins AEAD data-channel negotiation and avoids legacy fallback behavior. |
+| `tls-version-min` | Sets the minimum TLS version explicitly. First release target is TLS 1.2 or newer. |
 
 ## Unsupported Directives
 
@@ -242,12 +297,14 @@ proto udp
 remote <server-ip> 1194
 resolv-retry infinite
 nobind
-persist-key
 persist-tun
 remote-cert-tls server
 verb 3
 push-peer-info
 setenv IV_SSO webauth
+cipher AES-256-GCM
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+tls-version-min 1.2
 
 <ca>
 ... CA certificate ...
@@ -260,12 +317,18 @@ setenv IV_SSO webauth
 <key>
 ... client private key ...
 </key>
+
+<tls-crypt>
+... shared tls-crypt key ...
+</tls-crypt>
 ```
 
 Notes:
 - **No `auth-user-pass`** — authentication happens via browser (OIDC), not username/password
 - **Certificate CN** should match the user's email in Cognito (used for CN cross-check when `--cn-cross-check=true`)
 - **OpenVPN 2.x CLI** is recommended to include `push-peer-info` and `setenv IV_SSO webauth` so the client sends WebAuth support metadata to the server consistently in the tested CLI flow
+- **Do not set `IV_SSO` in the server config.** `IV_SSO` is client capability metadata. Setting it on the server can make the daemon send `WEB_AUTH` to clients that did not actually advertise browser-auth support.
+- **OpenVPN 2.x CLI URL clicks:** the CLI logs WebAuth as `('URL')`; some terminals include the closing apostrophe when linkifying the URL. The daemon tolerates a trailing artifact in the `state` parameter in two forms: `'` (direct hit) and the literal `%27` (after Lambda Router query re-encoding in multi-instance mode).
 - Client must support WebAuth (OpenVPN 2.6+ with `IV_SSO` or `IV_PROTO` flags)
 - **`push-peer-info`** causes the client to send additional environment variables to the server on connect. The daemon logs the following fields on every `connect` event:
 
@@ -294,9 +357,24 @@ Notes:
   msg=connect cid=2 kid=1 cn=user@example.com ip=203.0.113.42 port=55288 hwaddr="" plat=linux plat_ver="" ver=3.11.6 gui_ver=OpenVPN3/Linux/v27 ssl=""
   ```
 
+## Client Compatibility
+
+| Client | Status | Notes |
+|--------|--------|-------|
+| OpenVPN3 Linux CLI | Supported | Opens the browser for OIDC in the tested flow. |
+| OpenVPN 2.x CLI | Supported with caveat | Requires `push-peer-info` and `setenv IV_SSO webauth`; some Linux environments may require manually opening the logged `WEB_AUTH::` URL. |
+| OpenVPN GUI on Windows | Supported | Sends GUI/WebAuth peer metadata in tested client logs. |
+| Tunnelblick 4 on macOS | Expected compatible | Tunnelblick 4 documents support for `WEB_AUTH`; not part of this repo's automated lab. |
+| Ubuntu/Mint NetworkManager `network-manager-openvpn` | Unsupported | The standard plugin may import `push-peer-info`, but does not pass `IV_SSO=webauth` or handle the `WEB_AUTH` URL in the observed Ubuntu/Mint flow. The daemon rejects it with `client does not support WebAuth`. |
+| `nm-openvpn-sso` third-party plugin | Experimental | Designed for NetworkManager + OpenVPN SSO/OAuth. Not bundled, audited, or tested by this project. |
+
 ## OpenVPN3 Linux CLI
 
 OpenVPN3 Linux (`openvpn3-linux`) works with this project out of the box. Run without `sudo` — OpenVPN3 uses D-Bus and separates privileges internally.
+
+References:
+- OpenVPN 3 Linux Client: https://openvpn.net/community-docs/openvpn-client-for-linux.html
+- Community OpenVPN 3 Linux Wiki: https://community.openvpn.net/Pages/OpenVPN3Linux
 
 ```bash
 # Connect

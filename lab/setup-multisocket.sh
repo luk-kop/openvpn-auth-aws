@@ -1,19 +1,17 @@
 #!/bin/bash
 set -e
 
-OVPN_DATA="./openvpn-data"
+OVPN_DATA="./openvpn-data-multisocket"
 RENEG_SEC="${RENEG_SEC:-600}"
 
-echo "==> Setting up test OpenVPN environment"
+echo "==> Setting up OpenVPN 2.7 multi-socket lab environment"
 
+rm -rf "$OVPN_DATA"
 mkdir -p "$OVPN_DATA"
 
-# Generate management password
 echo "test-management-password" > "$OVPN_DATA/management-pw"
 chmod 644 "$OVPN_DATA/management-pw"
 
-# Initialize PKI + generate all certs in one container run
-# Run as root so apk/easyrsa can write freely, then chown to current user
 echo "==> Initializing PKI and generating certificates..."
 docker run --rm \
   -v "$(pwd)/$OVPN_DATA:/etc/openvpn" \
@@ -28,29 +26,28 @@ docker run --rm \
     /usr/share/easy-rsa/easyrsa gen-req server nopass
   EASYRSA_EXTRA_EXTS='subjectAltName=DNS:server,IP:127.0.0.1' \
     /usr/share/easy-rsa/easyrsa sign-req server server
-  /usr/share/easy-rsa/easyrsa build-client-full test-user@example.com nopass
+  /usr/share/easy-rsa/easyrsa build-client-full udp-user@example.com nopass
+  /usr/share/easy-rsa/easyrsa build-client-full tcp-user@example.com nopass
   openvpn --genkey tls-crypt /etc/openvpn/tls-crypt.key
   chown -R $(id -u):$(id -g) /etc/openvpn/pki
   chown $(id -u):$(id -g) /etc/openvpn/tls-crypt.key
 "
 
-# Read generated certs
-# Easy-RSA .crt files contain a human-readable header before the PEM block — strip it
 CA_CERT=$(cat "$OVPN_DATA/pki/ca.crt")
 SERVER_CERT=$(openssl x509 -in "$OVPN_DATA/pki/issued/server.crt")
 SERVER_KEY=$(cat "$OVPN_DATA/pki/private/server.key")
-CLIENT_CERT=$(openssl x509 -in "$OVPN_DATA/pki/issued/test-user@example.com.crt")
-CLIENT_KEY=$(cat "$OVPN_DATA/pki/private/test-user@example.com.key")
+UDP_CLIENT_CERT=$(openssl x509 -in "$OVPN_DATA/pki/issued/udp-user@example.com.crt")
+UDP_CLIENT_KEY=$(cat "$OVPN_DATA/pki/private/udp-user@example.com.key")
+TCP_CLIENT_CERT=$(openssl x509 -in "$OVPN_DATA/pki/issued/tcp-user@example.com.crt")
+TCP_CLIENT_KEY=$(cat "$OVPN_DATA/pki/private/tcp-user@example.com.key")
 TLS_CRYPT_KEY=$(cat "$OVPN_DATA/tls-crypt.key")
 
-# pki/ is no longer needed — certs are embedded inline in the configs
 rm -rf "$OVPN_DATA/pki"
 
-# Server config with inline certs
-echo "==> Creating OpenVPN server config..."
+echo "==> Creating multi-socket OpenVPN server config..."
 cat > "$OVPN_DATA/openvpn.conf" <<EOF
-port 1194
-proto udp
+local 0.0.0.0 1194 udp
+local 0.0.0.0 1195 tcp-server
 dev tun
 
 tls-server
@@ -64,28 +61,18 @@ data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
 tls-version-min 1.2
 verb 3
 
-# TLS renegotiation interval — triggers CLIENT:REAUTH on management interface.
-# Daemon re-checks user identity in Cognito on each renegotiation.
-# Default is 3600s (1h). Lower value for faster testing of reauth flow.
+# TLS renegotiation interval — use RENEG_SEC=30 for faster lab REAUTH capture.
 reneg-sec $RENEG_SEC
 
-# Management interface for auth daemon
 management /run/openvpn/management.sock unix /etc/openvpn/management-pw
 management-client-auth
 management-hold
-
-# Allow connection without username/password — identity comes from TLS certificate CN
 auth-user-pass-optional
-
-# Time allowed for browser-based auth to complete.
-# MUST match daemon --hand-window (default 300s). If these differ, the shorter
-# side will time out and kill the session before auth completes.
 hand-window 300
 
-# Do not add duplicate-cn. OpenVPN rejects duplicate certificate CNs by default;
-# this project relies on that behavior for single-process duplicate protection.
+# Keep duplicate-cn disabled. This lab uses different CNs so listener behavior
+# can be observed without duplicate-session eviction noise.
 
-# Disable finite-field DH; use ECDH/TLS named groups.
 dh none
 tls-crypt /etc/openvpn/tls-crypt.key
 
@@ -102,13 +89,18 @@ $SERVER_KEY
 </key>
 EOF
 
-# Client config with inline certs
-echo "==> Creating client config..."
-cat > client.ovpn <<EOF
+write_client_config() {
+  local path="$1"
+  local proto="$2"
+  local port="$3"
+  local cert="$4"
+  local key="$5"
+
+  cat > "$path" <<EOF
 client
 dev tun
-proto udp
-remote localhost 1194
+proto $proto
+remote localhost $port
 resolv-retry infinite
 nobind
 persist-tun
@@ -125,22 +117,28 @@ $CA_CERT
 </ca>
 
 <cert>
-$CLIENT_CERT
+$cert
 </cert>
 
 <key>
-$CLIENT_KEY
+$key
 </key>
 
 <tls-crypt>
 $TLS_CRYPT_KEY
 </tls-crypt>
 EOF
+}
+
+echo "==> Creating UDP and TCP client configs..."
+write_client_config client-udp.ovpn udp 1194 "$UDP_CLIENT_CERT" "$UDP_CLIENT_KEY"
+write_client_config client-tcp.ovpn tcp-client 1195 "$TCP_CLIENT_CERT" "$TCP_CLIENT_KEY"
 
 echo ""
 echo "==> Done"
 echo "    Server config: $OVPN_DATA/openvpn.conf"
-echo "    Client config: client.ovpn"
+echo "    UDP client:    client-udp.ovpn"
+echo "    TCP client:    client-tcp.ovpn"
 echo ""
-echo "Start: docker compose up -d"
-echo "Connect: sudo openvpn --config client.ovpn"
+echo "Start:  docker compose -f docker-compose.multisocket.yml up -d"
+echo "Verify: ./run-multisocket-verification.sh"

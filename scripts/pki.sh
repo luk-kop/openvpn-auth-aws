@@ -5,7 +5,8 @@
 # Uploads PKI artifacts to AWS Secrets Manager for EC2 boot-time retrieval.
 #
 # Usage:
-#   ./scripts/pki.sh init                                     Initialize CA + server cert + ta.key
+#   ./scripts/pki.sh init                                     Initialize CA + server cert + tls-crypt.key
+#   ./scripts/pki.sh tls-crypt [--force]                      Generate tls-crypt.key only (does not touch CA)
 #   ./scripts/pki.sh client <common-name>                     Generate a client certificate
 #   ./scripts/pki.sh upload --region <r> --prefix <p>         Upload PKI to Secrets Manager
 #   ./scripts/pki.sh client-config <cn> --remote <host|ip>[:port]  Generate .ovpn client config
@@ -29,7 +30,7 @@ cmd_init() {
     die "PKI already initialized at $PKI_DIR/pki. Remove it first to reinitialize."
   fi
 
-  echo "==> Initializing PKI (CA + server cert + ta.key)..."
+  echo "==> Initializing PKI (CA + server cert + tls-crypt.key)..."
   mkdir -p "$PKI_DIR"
 
   docker run --rm \
@@ -57,7 +58,7 @@ VARS
     EASYRSA_REQ_CN=server /usr/share/easy-rsa/easyrsa gen-req server nopass
     /usr/share/easy-rsa/easyrsa sign-req server server
 
-    openvpn --genkey tls-auth /pki/ta.key
+    openvpn --genkey tls-crypt /pki/tls-crypt.key
 
     # Strip human-readable header from certs (keep only PEM block)
     openssl x509 -in pki/ca.crt > /pki/ca.crt
@@ -72,7 +73,38 @@ VARS
   echo "    CA cert:     $PKI_DIR/ca.crt"
   echo "    Server cert: $PKI_DIR/server.crt"
   echo "    Server key:  $PKI_DIR/server.key"
-  echo "    TLS auth:    $PKI_DIR/ta.key"
+  echo "    TLS crypt:   $PKI_DIR/tls-crypt.key"
+  echo ""
+  echo "Next: make pki-upload to store in AWS Secrets Manager"
+}
+
+cmd_tls_crypt() {
+  local force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  mkdir -p "$PKI_DIR"
+
+  if [ -f "$PKI_DIR/tls-crypt.key" ] && [ -s "$PKI_DIR/tls-crypt.key" ] && [ "$force" -eq 0 ]; then
+    die "$PKI_DIR/tls-crypt.key already exists. Pass --force to overwrite (rotating this key invalidates existing client .ovpn files)."
+  fi
+
+  echo "==> Generating $PKI_DIR/tls-crypt.key..."
+
+  docker run --rm \
+    -v "$(cd "$PKI_DIR" && pwd):/pki" \
+    "$EASYRSA_IMAGE" sh -c "
+    apk add --no-cache openvpn
+    openvpn --genkey tls-crypt /pki/tls-crypt.key
+    chown $(id -u):$(id -g) /pki/tls-crypt.key
+  "
+
+  echo ""
+  echo "==> Generated $PKI_DIR/tls-crypt.key"
   echo ""
   echo "Next: make pki-upload to store in AWS Secrets Manager"
 }
@@ -123,7 +155,7 @@ cmd_upload() {
   [ -n "$region" ] || die "Missing --region"
   [ -n "$prefix" ] || die "Missing --prefix"
 
-  for file in ca.crt server.crt server.key ta.key; do
+  for file in ca.crt server.crt server.key tls-crypt.key; do
     [ -f "$PKI_DIR/$file" ] || die "Missing $PKI_DIR/$file. Run: make pki-init"
   done
 
@@ -155,7 +187,7 @@ cmd_upload() {
   upload_secret "ca-cert"     "$PKI_DIR/ca.crt"
   upload_secret "server-cert" "$PKI_DIR/server.crt"
   upload_secret "server-key"  "$PKI_DIR/server.key"
-  upload_secret "ta-key"      "$PKI_DIR/ta.key"
+  upload_secret "tls-crypt-key" "$PKI_DIR/tls-crypt.key"
 
   echo ""
   echo "==> Upload complete. Secrets stored under: $prefix/pki/*"
@@ -189,7 +221,7 @@ cmd_client_config() {
     port="1194"
   fi
 
-  local ca_cert server_ta client_cert client_key
+  local ca_cert client_cert client_key
   ca_cert=$(cat "$PKI_DIR/ca.crt")
   client_cert=$(cat "$PKI_DIR/clients/$cn.crt")
   client_key=$(cat "$PKI_DIR/clients/$cn.key")
@@ -204,7 +236,6 @@ proto $proto
 remote $host $port
 resolv-retry infinite
 nobind
-persist-key
 persist-tun
 remote-cert-tls server
 verb 3
@@ -213,6 +244,7 @@ setenv IV_SSO webauth
 
 cipher AES-256-GCM
 data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+tls-version-min 1.2
 
 <ca>
 $ca_cert
@@ -227,16 +259,15 @@ $client_key
 </key>
 EOF
 
-  # Append tls-auth if ta.key exists
-  if [ -f "$PKI_DIR/ta.key" ]; then
-    local ta_key
-    ta_key=$(cat "$PKI_DIR/ta.key")
+  # Append tls-crypt if the shared control-channel key exists.
+  if [ -f "$PKI_DIR/tls-crypt.key" ]; then
+    local tls_crypt_key
+    tls_crypt_key=$(cat "$PKI_DIR/tls-crypt.key")
     cat >> "$outfile" <<EOF
 
-key-direction 1
-<tls-auth>
-$ta_key
-</tls-auth>
+<tls-crypt>
+$tls_crypt_key
+</tls-crypt>
 EOF
   fi
 
@@ -246,14 +277,16 @@ EOF
 # --- Main ---
 case "${1:-}" in
   init)           cmd_init ;;
+  tls-crypt)      shift; cmd_tls_crypt "$@" ;;
   client)         shift; cmd_client "$@" ;;
   upload)         shift; cmd_upload "$@" ;;
   client-config)  shift; cmd_client_config "$@" ;;
   *)
-    echo "Usage: $0 {init|client|upload|client-config}"
+    echo "Usage: $0 {init|tls-crypt|client|upload|client-config}"
     echo ""
     echo "Commands:"
-    echo "  init                                     Initialize CA + server cert + ta.key"
+    echo "  init                                     Initialize CA + server cert + tls-crypt.key"
+    echo "  tls-crypt [--force]                      Generate tls-crypt.key only (does not touch CA)"
     echo "  client <common-name>                     Generate a client certificate"
     echo "  upload --region <r> --prefix <p>          Upload PKI to Secrets Manager"
     echo "  client-config <cn> --remote <host|ip>[:port]  Generate .ovpn client config"

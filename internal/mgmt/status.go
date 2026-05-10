@@ -11,6 +11,10 @@ import (
 // returns the currently established sessions plus any async CLIENT events that
 // arrived while reading the snapshot.
 func BootstrapStatus(client *Client) ([]EstablishedSession, []Event, error) {
+	return BootstrapStatusWithRawLog(client, nil)
+}
+
+func BootstrapStatusWithRawLog(client *Client, rawLog RawLogFunc) ([]EstablishedSession, []Event, error) {
 	if err := client.WriteLine("hold release"); err != nil {
 		return nil, nil, fmt.Errorf("write hold release: %w", err)
 	}
@@ -27,6 +31,9 @@ func BootstrapStatus(client *Client) ([]EstablishedSession, []Event, error) {
 	scanner := client.Scanner()
 	for scanner.Scan() {
 		line := scanner.Text()
+		if rawLog != nil {
+			rawLog(line)
+		}
 		switch {
 		case isStatusLine(line):
 			gotStatus = true
@@ -38,7 +45,7 @@ func BootstrapStatus(client *Client) ([]EstablishedSession, []Event, error) {
 				return parser.sessions, events, nil
 			}
 		case strings.HasPrefix(line, ">CLIENT:"):
-			event, err := ReadEvent(scanner, line)
+			event, err := ReadEventWithRawLog(scanner, line, rawLog)
 			if err != nil {
 				return nil, nil, err
 			}

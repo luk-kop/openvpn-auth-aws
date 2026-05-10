@@ -298,7 +298,8 @@ func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) (con
 		connCancel()
 		return connCancel, fmt.Errorf("set bootstrap read deadline: %w", err)
 	}
-	snapshot, bufferedEvents, err := mgmt.BootstrapStatus(client)
+	rawLog := d.managementRawLogger()
+	snapshot, bufferedEvents, err := mgmt.BootstrapStatusWithRawLog(client, rawLog)
 	if clearErr := client.SetReadDeadline(time.Time{}); clearErr != nil && err == nil {
 		connCancel()
 		return connCancel, fmt.Errorf("clear bootstrap read deadline: %w", clearErr)
@@ -332,9 +333,12 @@ func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) (con
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		if rawLog != nil {
+			rawLog(line)
+		}
 		switch {
 		case strings.HasPrefix(line, ">CLIENT:"):
-			event, err := mgmt.ReadEvent(scanner, line)
+			event, err := mgmt.ReadEventWithRawLog(scanner, line, rawLog)
 			if err != nil {
 				connCancel()
 				return connCancel, err
@@ -371,6 +375,58 @@ func (d *Daemon) commandWriter(ctx context.Context, client *mgmt.Client, mu *syn
 			}
 		}
 	}
+}
+
+func (d *Daemon) managementRawLogger() mgmt.RawLogFunc {
+	if !d.cfg.ManagementRawLog {
+		return nil
+	}
+	return func(line string) {
+		slog.Debug("MGMT_RAW", "line", redactManagementRawLine(line))
+	}
+}
+
+func redactManagementRawLine(line string) string {
+	line = redactEnvValue(line, ">CLIENT:ENV,password=")
+	line = redactEnvValue(line, "password=")
+	line = redactQueryValue(line, "state=")
+	return line
+}
+
+func redactEnvValue(line, prefix string) string {
+	idx := strings.Index(line, prefix)
+	if idx < 0 {
+		return line
+	}
+	start := idx + len(prefix)
+	end := start
+	for end < len(line) {
+		switch line[end] {
+		case '&', ' ', '\t', '\r', '\n', '"', '\'':
+			return line[:start] + "[REDACTED]" + line[end:]
+		default:
+			end++
+		}
+	}
+	return line[:start] + "[REDACTED]"
+}
+
+func redactQueryValue(line, key string) string {
+	idx := strings.Index(line, key)
+	if idx < 0 {
+		return line
+	}
+	start := idx + len(key)
+	end := start
+	for end < len(line) {
+		switch line[end] {
+		case '&', ' ', '\t', '\r', '\n', '"', '\'':
+			return line[:start] + "[REDACTED]" + line[end:]
+		default:
+			end++
+		}
+	}
+	return line[:start] + "[REDACTED]"
 }
 
 func (d *Daemon) heartbeatLoop(ctx context.Context) {
