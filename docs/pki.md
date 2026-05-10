@@ -13,7 +13,7 @@ This keeps the CA private key off production infrastructure and makes certificat
 
 ## Prerequisites
 
-- Docker (for easy-rsa container)
+- Docker (for easy-rsa/OpenVPN tooling in a container)
 - AWS CLI (for Secrets Manager upload)
 - `make` (for convenience targets)
 
@@ -54,7 +54,7 @@ Initializes a new PKI in the `pki/` directory:
 - Server certificate signed by CA (825-day expiry)
 - TLS crypt static key (`tls-crypt.key`)
 
-DH parameters are generated on the EC2 instance at boot (not a secret, just large primes).
+The generated OpenVPN server configs use `dh none` with ECDH/TLS named groups, so no finite-field DH parameter file is generated or uploaded.
 
 Uses easy-rsa inside a Docker container for portability.
 
@@ -138,7 +138,7 @@ make pki-client-config CN=alice@example.com REMOTE=vpn.example.com:1194
 
 Output: `pki/clients/alice@example.com.ovpn`
 
-The file includes inline `<ca>`, `<cert>`, `<key>`, and `<tls-crypt>` blocks — no separate files needed.
+The file includes inline `<ca>`, `<cert>`, and `<key>` blocks. It also includes an inline `<tls-crypt>` block when `pki/tls-crypt.key` exists, which is the normal output of `make pki-init`. No separate client-side files are needed.
 
 ## Deployment Workflow
 

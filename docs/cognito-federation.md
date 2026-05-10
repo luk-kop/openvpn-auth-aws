@@ -82,6 +82,14 @@ Cognito derives the federated Cognito username from the SAML `NameID` assertion 
 
 Additionally, Cognito's SAML NameID matching is **case-sensitive**, even if the user pool is configured as case-insensitive. A user who logs in with `Carlos@example.com` one session and `carlos@example.com` the next will be treated as two different users.
 
+### SP-initiated vs IdP-initiated flows
+
+Only **SP-initiated** flows work with this daemon. The auth flow starts with the browser redirect triggered by OpenVPN's `WEB_AUTH::` URL, which lands on the ALB at `/callback/{server}/{proto}?state=<blob>`. The ALB then drives the Cognito hosted UI, which in turn drives the SAML AuthnRequest to the IdP.
+
+**IdP-initiated** SSO (where the user clicks a tile in their corporate IdP portal and an unsolicited SAML assertion arrives at Cognito's ACS URL) is **not supported** by this flow. The daemon expects a callback request with a valid HMAC-signed `state` parameter scoped to an in-memory pending session. Without that state, the session cannot be resolved and the callback is rejected before JWT validation runs.
+
+This is an ALB + Cognito design constraint, not a daemon limitation — the Cognito hosted UI only issues SP-initiated SAMLRequests.
+
 ### SAML attribute mapping for email
 
 SAML IdPs use non-standard URN attribute names. The email attribute name varies by IdP:
@@ -169,6 +177,84 @@ Without the `email` attribute mapping, `claims.Email` in the ALB JWT is empty an
 > - ALB-forwarded lookup key for `AdminGetUser` → in observed production traffic for the native-Cognito flow this was `username`, not `cognito:username`. The daemon now supports both, preferring `cognito:username` and falling back to `username`.
 > - Cognito User Pool group membership → in observed production traffic for the native-Cognito flow, it did **not** automatically appear in either `x-amzn-oidc-data` or `x-amzn-oidc-accesstoken`. Group membership was therefore verified through the Cognito Admin API. External IdP federation may differ and must be verified empirically.
 
+## End-to-End SAML Federation Walkthrough
+
+This section traces a single VPN connect from browser redirect through `client-auth`, for a SAML-federated user. It does not re-describe mechanics covered above (NameID, attribute mapping, Admin API vs claims) — it shows how they combine in one concrete flow.
+
+**Scenario:** Corporate SAML IdP (`MySAML`) is linked to Cognito. The user has certificate CN `alice@corp.com`, the IdP emits `NameID=alice@corp.com` and the `emailaddress` SAML attribute, and the Cognito provider is configured with `email` and `username` attribute mapping. The required group is `vpn-users`, resolved via the Cognito Admin API (default mode).
+
+1. **OpenVPN client.** `CLIENT:CONNECT` arrives on the management socket.
+2. **Daemon.** Creates `PendingSession{SID}`, HMAC-signs the state blob, and sends `client-pending-auth` with `WEB_AUTH::,<callback-url>?state=<blob>`.
+3. **OpenVPN client.** Opens the URL in the user's browser.
+4. **Browser → ALB.** `GET /callback/{server}/{proto}?state=<blob>`.
+5. **ALB (Cognito authenticate action).** No session cookie, so 302 to the Cognito hosted UI.
+6. **Browser → Cognito.** Hosted UI shows "Sign in with MySAML".
+7. **Cognito → IdP.** SP-initiated SAML `AuthnRequest`.
+8. **IdP.** User authenticates (password, MFA, etc.).
+9. **IdP → Cognito.** SAML Response posted to the Cognito ACS URL:
+   - `NameID: alice@corp.com`
+   - `.../emailaddress: alice@corp.com`
+10. **Cognito.** First login auto-creates the user (`Username: MySAML_alice@corp.com`, `UserStatus: EXTERNAL_PROVIDER`, `email: alice@corp.com` via attribute mapping). Subsequent logins reuse the same user.
+11. **Cognito → ALB.** OAuth2 code exchange returns the ID and access tokens.
+12. **ALB.** Sets the session cookie, re-invokes the original request, and constructs the ES256-signed `x-amzn-oidc-data` JWT.
+13. **ALB → Daemon.** `GET /callback/{server}/{proto}?state=<blob>` with headers:
+    - `x-amzn-oidc-data: <ES256 JWT>`
+    - `x-amzn-oidc-accesstoken: <Cognito access token>`
+    - `x-amzn-oidc-identity: <Cognito sub>`
+14. **Daemon (callback server).** State HMAC verified → `SID` → session looked up and atomically moved `PENDING` → `PROCESSING`.
+15. **Daemon.** JWT header parsed (`kid`, `signer`). `signer == --alb-arn`, so ES256 is verified against the ALB public key fetched for `kid` (and `exp` is checked).
+16. **Daemon.** Extracts claims:
+    - `email: alice@corp.com`
+    - `username: MySAML_alice@corp.com`
+    - `cognito:username`: absent in this SAML flow
+    - `sub: <Cognito UUID>`
+17. **Daemon (CN cross-check).** Certificate CN `alice@corp.com` equals `claims.Email` → pass.
+18. **Daemon (group resolution).** Default mode: `AdminGetUser("MySAML_alice@corp.com")` returns `UserStatus=EXTERNAL_PROVIDER`, `Enabled=true`. `AdminListGroupsForUser(...)` returns `[vpn-users]` → required group satisfied.
+19. **Daemon.** Session `PROCESSING` → `AUTHORIZED`. The Cognito lookup username `MySAML_alice@corp.com` is stored on the session for later reauth.
+20. **Daemon → OpenVPN.** `client-auth` plus push directives.
+21. **OpenVPN.** Tunnel established. Later TLS renegotiations trigger `CLIENT:REAUTH`, which reuses the stored lookup username (not the certificate CN) for `AdminGetUser`.
+
+Key differences vs a native-Cognito flow:
+
+- Step 10: Cognito auto-provisions the user on first federated login; the username is always `MySAML_<NameID>`, not an email and not a UUID.
+- Step 16: `cognito:username` is typically absent in the ALB-forwarded SAML JWT — the daemon falls back to `username`, which already contains `MySAML_alice@corp.com`.
+- Step 18: `AdminGetUser` must receive the full `MySAML_alice@corp.com` value. Passing just `alice@corp.com` returns `UserNotFoundException`.
+- Step 19: The stored lookup username (not CN) is what makes reauth work correctly for federated users across TLS renegotiations.
+
+If the SAML provider instead emitted a persistent NameID (`MySAML_a3f7b2...`), steps 10, 16, 18, 19 would all use that opaque identifier as the username — step 17 (CN cross-check) still depends only on the separately-mapped `email` attribute and is unaffected.
+
+## Group Resolution for Federated Users (Consolidated)
+
+Group membership resolution is split across three mechanisms in this project. This section collects them in one place and states which works for federated users and under what conditions. For the IdP-side attribute-mapping details, see [SAML attribute mapping for email](#saml-attribute-mapping-for-email) above and the Terraform example in [`docs/architecture-design.md`](architecture-design.md).
+
+| Mode | Flag | What the daemon does | Works for federated users? |
+|---|---|---|---|
+| Cognito Admin API (default) | *(no flag)* | On callback/connect, `AdminListGroupsForUser` with the Cognito username from claims (`cognito:username` → fallback `username`). On reauth, group membership is checked only when `--check-required-group-on-reauth` is enabled. | **Yes.** Works with any federated IdP as long as ALB forwards a usable Cognito username. Production default. |
+| JWT claim (`cognito:groups`) | `--cognito-groups-from-claims` | On callback/connect, reads `cognito:groups` from `x-amzn-oidc-data` instead of calling `AdminListGroupsForUser`. Reauth cannot use this claim because no new ALB JWT is available on `CLIENT:REAUTH`; if `--check-required-group-on-reauth` is enabled, reauth still needs the Cognito Admin API. | Only if `cognito:groups` is explicitly present in the ALB-forwarded JWT. Not present by default for federated users — requires explicit mapping (see below). |
+
+### How to get `cognito:groups` into the forwarded JWT for federated users
+
+Two options, neither of which happens automatically:
+
+1. **Attribute mapping from IdP → Cognito `custom:groups`, then transform to `cognito:groups`.** The IdP emits a groups attribute (SAML: e.g. `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/groups`; OIDC: a `groups` claim). Map it to a custom Cognito attribute such as `custom:groups`, and configure the token flow so `cognito:groups` carries the same value. The daemon only reads `cognito:groups` — `custom:groups` alone is not read. See `docs/architecture-design.md` for a Terraform snippet and the 2048-char limit caveat.
+
+2. **Pre-token generation Lambda trigger.** A Cognito pre-token Lambda can inject `cognito:groups` into the ID token by reading IdP claims or by calling `AdminListGroupsForUser` internally. This requires the Cognito Essentials or Plus feature plan (`user_pool_tier = "ESSENTIALS"`) with event version V2_0 or V3_0; the Lite plan does not support access token customization.
+
+If neither is configured, claim-based group checks will always fail for federated users — use the default Cognito Admin API path instead.
+
+### Trade-offs
+
+| Concern | Cognito Admin API | Claim-based (`cognito:groups`) |
+|---|---|---|
+| Extra AWS API call per connect | Yes (~10–50 ms) | No |
+| IdP outage tolerance | Improved by `--reauth-cache` for reauth | N/A (claims already in token) |
+| IAM permissions required | `cognito-idp:AdminGetUser`, `cognito-idp:AdminListGroupsForUser` | None for callback group checks. Reauth still needs `cognito-idp:AdminGetUser`, and also `cognito-idp:AdminListGroupsForUser` if `--check-required-group-on-reauth` is enabled. |
+| Works out of the box for federated users | Yes | No — requires explicit mapping or Lambda trigger |
+| Reflects group changes in IdP | Next connect; next reauth only when `--check-required-group-on-reauth` is enabled | Next federated login (Cognito refreshes attributes) |
+| Compatible with Cognito native groups | Yes | Only if `cognito:groups` ends up in the JWT |
+
+For any new federated deployment, start with the Cognito Admin API path. Move to claim-based checks only after verifying that `cognito:groups` is actually present in the ALB-forwarded JWT for that IdP (see [What Must Be Verified For External IdP](#what-must-be-verified-for-external-idp)).
+
 ## CN Cross-Check and Federated Users
 
 The daemon's `--cn-cross-check` flag (enabled by default) compares the OpenVPN certificate CN against `claims.Email` from the ALB JWT:
@@ -228,27 +314,29 @@ Recommended validation procedure:
 5. Only then decide whether group checks should use:
    - Cognito Admin API
    - forwarded JWT claims
-   - custom mapped claims such as `custom:groups`
+   - custom mapped claims transformed into `cognito:groups`
 
 Until that verification is done, the safe default for external IdP deployments is to assume that group membership may need to be resolved through the Cognito Admin API rather than through ALB-forwarded claims.
 
 ### Daemon flags for federated deployments
 
-The auth daemon has two known issues affecting federated users that are not yet fixed (see `CODE_REVIEW_EXTERNAL.md`):
+The auth daemon supports federated users by storing the Cognito lookup username from callback claims and by treating `EXTERNAL_PROVIDER` users as enabled during Cognito checks.
 
-| Issue | Affected path | Workaround |
-|---|---|---|
-| `UserStatus = EXTERNAL_PROVIDER` causes reauth denial | Reauth | `--cognito-skip-reauth` |
-| `AdminGetUser` lookup fails for federated users | Callback (group check), Reauth | `--cognito-groups-from-claims` + `--cognito-skip-reauth` |
+| Path | Federated behavior |
+|---|---|
+| Callback group check | Uses `cognito:username` when present and falls back to `username` for `AdminGetUser` / `AdminListGroupsForUser` |
+| Reauth | Uses the Cognito lookup username stored at callback time, not the certificate CN. Reauth checks account existence/enabled status by default; it checks group membership only when `--check-required-group-on-reauth` is enabled. |
+| User status | Accepts both `CONFIRMED` and `EXTERNAL_PROVIDER` users when the account is enabled |
 
-Until the fixes described in `CODE_REVIEW_EXTERNAL.md` are implemented, the only fully working configuration for deployments with an external IdP is:
+The default Cognito Admin API path is the recommended production mode when the forwarded claims contain a usable Cognito username. Claim-based group checks are available only for the callback/connect decision, and only when `cognito:groups` is present in the ALB-forwarded JWT:
 
 ```
 --cognito-groups-from-claims=true
---cognito-skip-reauth=true
 ```
 
-This bypasses both broken paths at the cost of not verifying user account status on TLS renegotiation. Group membership is read from JWT claims instead of the Cognito API, which requires those claims to be present in the ALB-forwarded token. In observed ALB traffic, `cognito:groups` was not present by default, so claim-based group checks require explicit claim mapping such as `custom:groups`.
+Group membership is then read from JWT claims instead of the Cognito API during callback handling. In observed ALB traffic, `cognito:groups` was not present by default, so claim-based group checks require explicit token customization or mapping that produces `cognito:groups`. A custom attribute such as `custom:groups` is not read by the daemon unless it is transformed into `cognito:groups`.
+
+This flag does not make reauth claim-based. `CLIENT:REAUTH` is an OpenVPN management event, not a browser callback, so there is no fresh ALB JWT to inspect. If reauth group enforcement is required, set `--check-required-group-on-reauth` and keep Cognito Admin API access configured.
 
 ## AWS Documentation References
 
@@ -265,10 +353,10 @@ This bypasses both broken paths at the cost of not verifying user account status
 
 ### Flag matrix: native vs federated IdP
 
-| Configuration | Native users | Federated users (pre-fix) | Federated users (post-fix) |
-|---|---|---|---|
-| Default (no extra flags) | ✅ full support | ✗ reauth fails | ✅ full support |
-| `--required-group` set | ✅ full support | ✗ callback + reauth fail | ✅ full support |
-| `--cognito-groups-from-claims` | ✅ | ✗ reauth fails | ✅ |
-| `--cognito-skip-reauth` | ✅ (no reauth check) | ✗ callback fails if `--required-group` set | ✅ (no reauth check) |
-| `--cognito-groups-from-claims` + `--cognito-skip-reauth` | ✅ (no reauth check) | ✅ (no reauth check) | ✅ (no reauth check) |
+| Configuration | Native users | Federated users |
+|---|---|---|
+| Default (no extra flags) | Full support | Full support when ALB forwards a Cognito lookup username |
+| `--required-group` set | Enforced on callback/connect; also enforced on reauth only with `--check-required-group-on-reauth` | Enforced on callback/connect through Cognito Admin API; also enforced on reauth only with `--check-required-group-on-reauth` |
+| `--cognito-groups-from-claims` | Callback/connect only; supported when `cognito:groups` is present | Callback/connect only; supported when `cognito:groups` is present |
+| `--cognito-skip-reauth` | Supported, but skips reauth account-status checks | Supported, but skips reauth account-status checks |
+| `--cognito-groups-from-claims` + `--cognito-skip-reauth` | Supported, with both trade-offs above | Supported, with both trade-offs above |

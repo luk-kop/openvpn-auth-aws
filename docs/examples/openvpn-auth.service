@@ -15,7 +15,7 @@ Type=simple
 EnvironmentFile=/etc/openvpn-auth/env
 
 ExecStart=/usr/local/bin/openvpn-auth-daemon \
-    --management-socket=/run/openvpn/udp-mgmt.sock \
+    --management-socket=/run/openvpn/management-udp.sock \
     --management-password-file=/etc/openvpn/management-pw \
     --callback-url=${VPN_AUTH_CALLBACK_URL} \
     --callback-port=8080 \

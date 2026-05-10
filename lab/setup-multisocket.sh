@@ -105,6 +105,7 @@ resolv-retry infinite
 nobind
 persist-tun
 remote-cert-tls server
+verify-x509-name server name
 verb 3
 push-peer-info
 setenv IV_SSO webauth

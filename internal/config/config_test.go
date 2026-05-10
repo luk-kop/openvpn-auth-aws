@@ -128,6 +128,18 @@ func TestValidate_EmptyCognitoUserPoolID_WithRequiredGroup_ClaimsMode_NoError(t 
 	}
 }
 
+func TestValidate_EmptyCognitoUserPoolID_WithRequiredGroupClaimsModeAndReauthGroupCheck_Error(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.CognitoUserPoolID = ""
+	cfg.ALBARN = ""
+	cfg.RequiredGroup = "vpn-users"
+	cfg.CognitoGroupsClaims = true
+	cfg.CheckRequiredGroupOnReauth = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when reauth group checks require Cognito but cognito-user-pool-id is empty")
+	}
+}
+
 func TestValidate_MissingIssuerURL_WithALB_Error(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.ALBARN = "arn:aws:elasticloadbalancing:eu-west-1:123456789012:loadbalancer/app/vpn-auth/abc123"

@@ -96,7 +96,7 @@ func main() {
 	}
 
 	if cfg.CognitoUserPoolID == "" {
-		identity = cognito.NewStaticChecker(cfg.CheckGroupsOnReauth)
+		identity = cognito.NewStaticChecker(cfg.CheckRequiredGroupOnReauth)
 	} else {
 		loaded, err := loadAWSConfig()
 		if err != nil {

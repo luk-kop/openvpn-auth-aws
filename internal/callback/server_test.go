@@ -60,12 +60,15 @@ func (c *captureTracker) MarkAuthenticated(cid, cognitoUsername string) {
 
 type fakeMetrics struct {
 	rejectedReasons []string
+	deniedReasons   []string
 }
 
 func (m *fakeMetrics) Heartbeat(bool, int) {}
 func (m *fakeMetrics) AuthAttempt(string)  {}
 func (m *fakeMetrics) AuthSuccess()        {}
-func (m *fakeMetrics) AuthDenied(string)   {}
+func (m *fakeMetrics) AuthDenied(reason string) {
+	m.deniedReasons = append(m.deniedReasons, reason)
+}
 func (m *fakeMetrics) ReauthSuccess()      {}
 func (m *fakeMetrics) ReauthDenied(string) {}
 func (m *fakeMetrics) ReauthCacheHit()     {}
@@ -331,6 +334,7 @@ func TestHandleCallback_ALBJWTValidationFailure(t *testing.T) {
 	}
 	assertHTMLResponse(t, w, "Authentication Failed")
 	assertRejectedReason(t, m, "jwt_validation_failed")
+	assertDeniedReason(t, m, "jwt_validation_failed")
 }
 
 func TestHandleCallback_GroupCheckFailure(t *testing.T) {
@@ -358,6 +362,7 @@ func TestHandleCallback_GroupCheckFailure(t *testing.T) {
 	}
 	assertHTMLResponse(t, w, "Access Denied")
 	assertRejectedReason(t, m, "group_denied")
+	assertDeniedReason(t, m, "group_denied")
 }
 
 func TestHandleCallback_GroupCheckFromClaims_Failure(t *testing.T) {
@@ -385,6 +390,7 @@ func TestHandleCallback_GroupCheckFromClaims_Failure(t *testing.T) {
 	}
 	assertHTMLResponse(t, w, "Access Denied")
 	assertRejectedReason(t, m, "group_denied")
+	assertDeniedReason(t, m, "group_denied")
 }
 
 func TestHandleCallback_Success_DevMode(t *testing.T) {
@@ -571,6 +577,7 @@ func TestHandleCallback_CNMismatch(t *testing.T) {
 	}
 	assertHTMLResponse(t, w, "Certificate Mismatch")
 	assertRejectedReason(t, m, "cn_mismatch")
+	assertDeniedReason(t, m, "cn_mismatch")
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +781,17 @@ func assertRejectedReason(t *testing.T, m *fakeMetrics, expected string) {
 	got := m.rejectedReasons[len(m.rejectedReasons)-1]
 	if got != expected {
 		t.Errorf("expected CallbackRejected reason %q, got %q (all: %v)", expected, got, m.rejectedReasons)
+	}
+}
+
+func assertDeniedReason(t *testing.T, m *fakeMetrics, expected string) {
+	t.Helper()
+	if len(m.deniedReasons) == 0 {
+		t.Fatalf("expected AuthDenied(%q) but no denials were recorded", expected)
+	}
+	got := m.deniedReasons[len(m.deniedReasons)-1]
+	if got != expected {
+		t.Errorf("expected AuthDenied reason %q, got %q (all: %v)", expected, got, m.deniedReasons)
 	}
 }
 

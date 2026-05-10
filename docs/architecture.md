@@ -4,6 +4,8 @@ OpenVPN auth daemon that authenticates OpenVPN clients via browser-based OIDC wi
 
 ## Auth Flow
 
+For the detailed OpenVPN WebAuth protocol used by this flow, see [OpenVPN WebAuth Protocol](webauth-protocol.md).
+
 ```mermaid
 sequenceDiagram
     participant C as Client (browser)
@@ -113,12 +115,12 @@ graph TD
         subgraph UDP["openvpn-auth-udp — port 8080"]
             UDP_CB("GET /callback/01/udp")
             UDP_HZ("GET /healthz")
-            UDP_MGMT("mgmt: /run/openvpn/udp/management.sock")
+            UDP_MGMT("mgmt: /run/openvpn/management-udp.sock")
         end
         subgraph TCP["openvpn-auth-tcp — port 8081"]
             TCP_CB("GET /callback/01/tcp")
             TCP_HZ("GET /healthz")
-            TCP_MGMT("mgmt: /run/openvpn/tcp/management.sock")
+            TCP_MGMT("mgmt: /run/openvpn/management-tcp.sock")
         end
     end
 
@@ -222,7 +224,7 @@ flowchart TD
 | 5 | **ALB public key fetch** — fetches ECDSA public key from `https://public-keys.auth.elb.{region}.amazonaws.com/{kid}`, cached in memory | N/A (infrastructure step) | 503 (retryable) | `public_key_fetch_failed` |
 | 6 | **JWT signature + claims** — verifies ES256 signature with the ALB public key, checks `signer` matches `--alb-arn`, requires valid `exp` | Token forgery, ALB spoofing, expired tokens | 403 + deny | `jwt_validation_failed` / `invalid_jwt_claims` |
 | 7 | **CN cross-check** — compares JWT `email` claim with the client certificate's Common Name (case-insensitive) | User A authenticating with User B's browser session | 403 + deny | `cn_mismatch` |
-| 8 | **Group membership** — checks if the user belongs to the required Cognito group (via JWT claim such as `custom:groups` when explicitly mapped, or via Cognito Admin API) | Unauthorized access by authenticated but unprivileged users | 403 + deny | `group_check_error` / `group_denied` |
+| 8 | **Group membership** — checks if the user belongs to the required Cognito group. By default this uses Cognito Admin APIs. With `--cognito-groups-from-claims`, the callback/connect decision reads only the `cognito:groups` JWT claim; reauth group checks still require Cognito Admin API access. | Unauthorized access by authenticated but unprivileged users | 403 + deny | `group_check_error` / `group_denied` |
 
 All rejection reasons are emitted as `CallbackRejected` EMF metric with a `Reason` dimension. See [EMF Metrics](configuration.md#emf-metrics) for the full list.
 
@@ -294,10 +296,8 @@ At startup, the daemon also estimates the worst-case URL length from `--callback
 |-----------|------:|
 | `OPEN_URL:` | 9 |
 | `https://<domain>/callback/01/udp?state=` | 45-65 (varies by domain) |
-| State blob: base64url(JSON payload, ~60 bytes) | ~80 |
-| `.` separator | 1 |
-| HMAC-SHA256 (32 bytes) base64url, no padding | 43 |
-| **Total** | **178-198** |
+| State blob (base64url JSON + `.` + HMAC-SHA256) | up to ~128 |
+| **Total** | `9 + len(callback-url) + 7 + up to ~128` |
 | **229-byte limit** | **229** |
 
 Keep `--callback-url` short. A custom domain (e.g. `vpn-auth.example.com`) is recommended over long auto-generated hostnames.
@@ -392,7 +392,7 @@ This is not a global single-session security control. UDP and TCP daemons have s
 
 OpenVPN triggers `>CLIENT:REAUTH` on TLS renegotiation (controlled by `reneg-sec`). The daemon:
 
-1. Looks up user by CN in Cognito (`AdminGetUser`)
+1. Looks up the user in Cognito (`AdminGetUser`) using the Cognito lookup username stored at callback time; for older/native-only sessions without that value, the CN is the fallback identity.
 2. Checks user exists, is enabled, and optionally is in the required group
 3. Sends `client-auth-nt` (allow) or `client-deny` (deny)
 
