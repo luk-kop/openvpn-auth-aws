@@ -33,11 +33,37 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--emf-metrics` | `VPN_AUTH_EMF_METRICS` | `false` | Emit CloudWatch EMF metrics to stdout |
 | `--emf-interval` | `VPN_AUTH_EMF_INTERVAL` | `10s` | Interval for EMF heartbeat metrics (`0` to disable heartbeat only) |
 | `--log-format` | `VPN_AUTH_LOG_FORMAT` | `text` | Log output format: `text` or `json` |
+| `--management-raw-log` | `VPN_AUTH_MANAGEMENT_RAW_LOG` | `false` | Lab/debug only. Logs redacted raw OpenVPN management lines at DEBUG level with `MGMT_RAW` prefix. Do not enable in production. |
 | `--templates-dir` | `VPN_AUTH_TEMPLATES_DIR` | — | Path to custom HTML templates directory. Overrides built-in templates. Must contain both `success.html` and `error.html`. |
 | `--server-name` | `VPN_AUTH_SERVER_NAME` | — | Human-readable server name exposed to HTML templates via `{{ .ServerName }}` |
 | `--instance-id` | `VPN_AUTH_INSTANCE_ID` | `local-dev` | Instance identifier used in EMF metrics |
 
 See `--help` for the full list.
+
+### Raw Management Debug Logging
+
+`--management-raw-log` is for lab/debug verification only. Do not enable it in production.
+
+When enabled, the daemon logs raw OpenVPN management lines at DEBUG level with the message `MGMT_RAW`. This is useful for capturing OpenVPN compatibility fixtures such as `CLIENT:CONNECT`, `CLIENT:REAUTH`, `CLIENT:DISCONNECT`, and `status 3` output.
+
+The logger redacts sensitive values before writing:
+
+```text
+password=... -> password=[REDACTED]
+state=...    -> state=[REDACTED]
+```
+
+Example:
+
+```bash
+openvpn-auth-daemon \
+  --management-raw-log \
+  --log-format=text \
+  --hmac-secret=test-secret-key!! \
+  --callback-url http://localhost:8080/callback/01/udp
+```
+
+The flag affects structured logs only. It does not emit EMF metrics and should stay disabled outside controlled lab runs because management lines can contain user identifiers, source IPs, callback URLs, and other operational detail.
 
 ### HMAC Secret From AWS Secrets Manager
 

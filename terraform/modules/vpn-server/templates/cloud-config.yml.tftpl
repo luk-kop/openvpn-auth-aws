@@ -37,7 +37,7 @@ write_files:
       cert    /etc/openvpn/server/server.crt
       key     /etc/openvpn/server/server.key
       dh      none
-      tls-auth /etc/openvpn/server/ta.key 0
+      tls-crypt /etc/openvpn/server/tls-crypt.key
 
       server ${cidrhost(openvpn_udp_cidr, 0)} ${cidrnetmask(openvpn_udp_cidr)}
 
@@ -45,11 +45,11 @@ write_files:
       keepalive 10 120
       cipher AES-256-GCM
       data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+      tls-version-min 1.2
 %{ for cidr in pushed_routes ~}
       push "route ${cidrhost(cidr, 0)} ${cidrnetmask(cidr)}"
 %{ endfor ~}
 
-      persist-key
       persist-tun
 
       user nobody
@@ -64,8 +64,6 @@ write_files:
       management-hold
 
       auth-user-pass-optional
-
-      setenv IV_SSO webauth
 
       hand-window ${hand_window}
 
@@ -83,7 +81,7 @@ write_files:
       cert    /etc/openvpn/server/server.crt
       key     /etc/openvpn/server/server.key
       dh      none
-      tls-auth /etc/openvpn/server/ta.key 0
+      tls-crypt /etc/openvpn/server/tls-crypt.key
 
       server ${cidrhost(openvpn_tcp_cidr, 0)} ${cidrnetmask(openvpn_tcp_cidr)}
 
@@ -91,11 +89,11 @@ write_files:
       keepalive 10 120
       cipher AES-256-GCM
       data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+      tls-version-min 1.2
 %{ for cidr in pushed_routes ~}
       push "route ${cidrhost(cidr, 0)} ${cidrnetmask(cidr)}"
 %{ endfor ~}
 
-      persist-key
       persist-tun
 
       user nobody
@@ -110,8 +108,6 @@ write_files:
       management-hold
 
       auth-user-pass-optional
-
-      setenv IV_SSO webauth
 
       hand-window ${hand_window}
 
@@ -133,12 +129,29 @@ write_files:
       REGION="${aws_region}"
       PREFIX="${pki_secret_prefix}"
 
+      # Fetch a secret to a temp file and only move it into place if non-empty.
+      # Prevents zero-byte keyfiles when the secret has no AWSCURRENT version
+      # (e.g. terraform created the resource but the value was never uploaded),
+      # which would otherwise crash OpenVPN with a misleading "Cannot pre-load
+      # keyfile" error instead of failing fast here.
       fetch_secret() {
-        aws secretsmanager get-secret-value \
-          --region "$REGION" \
-          --secret-id "$1" \
-          --query SecretString \
-          --output text > "$2"
+        local tmp
+        tmp=$(mktemp)
+        if ! aws secretsmanager get-secret-value \
+              --region "$REGION" \
+              --secret-id "$1" \
+              --query SecretString \
+              --output text > "$tmp"; then
+          rm -f "$tmp"
+          echo "ERROR: failed to fetch secret $1" >&2
+          exit 1
+        fi
+        if [ ! -s "$tmp" ]; then
+          rm -f "$tmp"
+          echo "ERROR: secret $1 is empty (no value uploaded?)" >&2
+          exit 1
+        fi
+        mv "$tmp" "$2"
         echo "Fetched $1 -> $2"
       }
 
@@ -147,10 +160,10 @@ write_files:
       fetch_secret "$PREFIX/ca-cert"     /etc/openvpn/server/ca.crt
       fetch_secret "$PREFIX/server-cert" /etc/openvpn/server/server.crt
       fetch_secret "$PREFIX/server-key"  /etc/openvpn/server/server.key
-      fetch_secret "$PREFIX/ta-key"      /etc/openvpn/server/ta.key
+      fetch_secret "$PREFIX/tls-crypt-key" /etc/openvpn/server/tls-crypt.key
 
       chmod 600 /etc/openvpn/server/server.key
-      chmod 600 /etc/openvpn/server/ta.key
+      chmod 600 /etc/openvpn/server/tls-crypt.key
 
       echo "PKI setup complete."
 
@@ -328,10 +341,10 @@ runcmd:
     mkdir -p /etc/apt/keyrings
     curl -fsSL https://swupdate.openvpn.net/repos/repo-public.gpg \
       | gpg --dearmor > /etc/apt/keyrings/openvpn-repo-public.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/openvpn-repo-public.gpg] https://build.openvpn.net/debian/openvpn/release/2.6 noble main" \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/openvpn-repo-public.gpg] https://build.openvpn.net/debian/openvpn/release/2.7 noble main" \
       > /etc/apt/sources.list.d/openvpn-aptrepo.list
     apt-get update -y
-    apt-get install -y openvpn=${openvpn_version}-noble0
+    apt-get install -y openvpn=${openvpn_version}-noble1
 
   # --- Apply sysctl ---
   - sysctl --system

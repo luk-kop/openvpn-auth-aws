@@ -415,6 +415,45 @@ func TestHandleCallback_Success_DevMode(t *testing.T) {
 	assertNoRejection(t, m)
 }
 
+func TestHandleCallback_ToleratesTrailingApostropheInState(t *testing.T) {
+	cases := []struct {
+		name   string
+		suffix string
+	}{
+		{name: "direct_encoded_apostrophe", suffix: "%27"},
+		{name: "lambda_router_double_encoded_apostrophe", suffix: "%2527"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultCfg()
+			identity := &fakeGroupsChecker{enabled: true, inGroup: true}
+			srv, sessions, sink, m := newTestServerWithSessions(cfg, identity)
+
+			sid := "trailing-apostrophe-sid-" + tc.name
+			sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+			sess.RequiredGroup = "vpn-users"
+
+			oidcJWT := makeUnsignedJWT("user@example.com", "sub123", []string{"vpn-users"}, time.Now().Add(5*time.Minute).Unix())
+			state := validStateParam(t, sid)
+
+			req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state+tc.suffix, nil)
+			req.Header.Set("x-amzn-oidc-data", oidcJWT)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+				t.Fatalf("expected client-auth decision, got %+v", sink.decisions)
+			}
+			assertHTMLResponse(t, w, "Authenticated")
+			assertNoRejection(t, m)
+		})
+	}
+}
+
 func TestHandleCallback_Success_GroupFromClaims(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.CognitoGroupsClaims = true

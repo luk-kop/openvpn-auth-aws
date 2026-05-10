@@ -1,7 +1,8 @@
-.PHONY: test setup build build-release build-lambda clean \
+.PHONY: test setup setup-multisocket build build-release build-lambda clean \
 	stack-up stack-down stack-rebuild \
+	stack-up-multisocket stack-down-multisocket stack-rebuild-multisocket verify-multisocket \
 	run-daemon run-alb-mock run-mgmt-mock \
-	pki-init pki-client pki-upload pki-client-config
+	pki-init pki-tls-crypt pki-client pki-upload pki-client-config
 
 BINARY := openvpn-auth-daemon
 BINDIR := bin
@@ -42,6 +43,9 @@ run-mgmt-mock:
 setup:
 	cd lab && ./setup.sh
 
+setup-multisocket:
+	cd lab && ./setup-multisocket.sh
+
 # Start full stack (Docker)
 stack-up:
 	@if [ ! -f lab/openvpn-data/openvpn.conf ] || [ ! -f lab/client.ovpn ]; then \
@@ -58,9 +62,30 @@ stack-up:
 	@echo "Connect: sudo openvpn --config lab/client.ovpn"
 	@echo "Logs:    docker compose -f lab/docker-compose.yml logs -f daemon"
 
+# Start OpenVPN 2.7 multi-socket lab stack (Docker)
+stack-up-multisocket:
+	@if [ ! -f lab/openvpn-data-multisocket/openvpn.conf ] || [ ! -f lab/client-udp.ovpn ] || [ ! -f lab/client-tcp.ovpn ]; then \
+		echo "==> Multi-socket PKI not found, running setup..."; \
+		cd lab && ./setup-multisocket.sh; \
+	fi
+	docker compose -f lab/docker-compose.multisocket.yml up -d
+	@echo ""
+	@echo "==> Multi-socket stack ready!"
+	@echo "    OpenVPN UDP: udp://localhost:1194"
+	@echo "    OpenVPN TCP: tcp://localhost:1195"
+	@echo "    alb-mock:    http://localhost:8080"
+	@echo "    daemon cb:   http://localhost:8081"
+	@echo ""
+	@echo "Connect UDP: sudo openvpn --config lab/client-udp.ovpn"
+	@echo "Connect TCP: sudo openvpn --config lab/client-tcp.ovpn"
+	@echo "Verify:      VPN_AUTH_MANAGEMENT_RAW_LOG=true RENEG_SEC=30 make stack-rebuild-multisocket verify-multisocket"
+
 # Stop full stack
 stack-down:
 	docker compose -f lab/docker-compose.yml down
+
+stack-down-multisocket:
+	docker compose -f lab/docker-compose.multisocket.yml down
 
 # Rebuild images and restart stack (use after code changes)
 stack-rebuild:
@@ -74,6 +99,22 @@ stack-rebuild:
 	@echo ""
 	@echo "Connect: sudo openvpn --config lab/client.ovpn"
 	@echo "Logs:    docker compose -f lab/docker-compose.yml logs -f daemon"
+
+stack-rebuild-multisocket:
+	cd lab && ./setup-multisocket.sh
+	docker compose -f lab/docker-compose.multisocket.yml build --no-cache
+	docker compose -f lab/docker-compose.multisocket.yml up -d
+	@echo ""
+	@echo "==> Multi-socket stack ready!"
+	@echo "    OpenVPN UDP: udp://localhost:1194"
+	@echo "    OpenVPN TCP: tcp://localhost:1195"
+	@echo "    alb-mock:    http://localhost:8080"
+	@echo "    daemon cb:   http://localhost:8081"
+	@echo ""
+	@echo "Verify: VPN_AUTH_MANAGEMENT_RAW_LOG=true RENEG_SEC=30 make verify-multisocket"
+
+verify-multisocket:
+	./lab/run-multisocket-verification.sh
 
 # Build all binaries
 build:
@@ -123,6 +164,9 @@ PKI_PREFIX ?= openvpn-auth-aws
 
 pki-init:
 	./scripts/pki.sh init
+
+pki-tls-crypt:
+	./scripts/pki.sh tls-crypt $(if $(FORCE),--force,)
 
 pki-client:
 	@test -n "$(CN)" || (echo "Usage: make pki-client CN=user@example.com" && exit 1)

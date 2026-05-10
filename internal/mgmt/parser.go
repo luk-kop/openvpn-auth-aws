@@ -39,7 +39,13 @@ func ParseHeader(line string) (EventType, string, string, error) {
 	}
 }
 
+type RawLogFunc func(line string)
+
 func ReadEvent(scanner *bufio.Scanner, headerLine string) (Event, error) {
+	return ReadEventWithRawLog(scanner, headerLine, nil)
+}
+
+func ReadEventWithRawLog(scanner *bufio.Scanner, headerLine string, rawLog RawLogFunc) (Event, error) {
 	typ, cid, kid, err := ParseHeader(headerLine)
 	if err != nil {
 		return Event{}, err
@@ -56,6 +62,9 @@ func ReadEvent(scanner *bufio.Scanner, headerLine string) (Event, error) {
 	}
 	for scanner.Scan() {
 		line := scanner.Text()
+		if rawLog != nil {
+			rawLog(line)
+		}
 		if line == ">CLIENT:ENV,END" {
 			if event.Type == EventUnknown {
 				event.Type = EventIgnored

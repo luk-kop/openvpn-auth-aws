@@ -9,8 +9,9 @@ services:
       - /dev/net/tun:/dev/net/tun
     ports:
       - "1194:1194/udp"
+      - "1195:1195/tcp"
     volumes:
-      - ./openvpn-data:/etc/openvpn
+      - ./openvpn-data-multisocket:/etc/openvpn
       - openvpn-run:/run/openvpn
     healthcheck:
       test: ["CMD", "test", "-S", "/run/openvpn/management.sock"]
@@ -31,18 +32,18 @@ services:
       - "8081:8081"
     volumes:
       - openvpn-run:/run/openvpn
-      - ./openvpn-data:/etc/openvpn:ro
+      - ./openvpn-data-multisocket:/etc/openvpn:ro
     environment:
       - VPN_AUTH_CN_CROSS_CHECK=false
       - VPN_AUTH_HMAC_SECRET=test-secret-key!!
-      - VPN_AUTH_CALLBACK_URL=http://localhost:8080/callback/01/udp
+      - VPN_AUTH_CALLBACK_URL=http://localhost:8080/callback/01/multisocket
       - VPN_AUTH_COGNITO_SKIP_REAUTH=true
       - VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS=true
       - VPN_AUTH_MANAGEMENT_SOCKET=/run/openvpn/management.sock
       - VPN_AUTH_MANAGEMENT_PASSWORD_FILE=/etc/openvpn/management-pw
       - VPN_AUTH_MANAGEMENT_RAW_LOG=${VPN_AUTH_MANAGEMENT_RAW_LOG:-false}
       - VPN_AUTH_CALLBACK_PORT=8081
-      - VPN_AUTH_SERVER_NAME=lab-dev
+      - VPN_AUTH_SERVER_NAME=lab-multisocket
       # VPN_AUTH_ALB_ARN not set — absent = skip JWT signature validation in dev
     command: /app/openvpn-auth-daemon
 
