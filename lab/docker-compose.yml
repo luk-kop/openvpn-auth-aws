@@ -37,7 +37,8 @@ services:
       - VPN_AUTH_HMAC_SECRET=test-secret-key!!
       - VPN_AUTH_CALLBACK_URL=http://localhost:8080/callback/01/udp
       - VPN_AUTH_COGNITO_SKIP_REAUTH=true
-      - VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS=true
+      - VPN_AUTH_GROUPS_SOURCE=jwt-claim
+      - VPN_AUTH_GROUPS_CLAIM=cognito:groups
       - VPN_AUTH_MANAGEMENT_SOCKET=/run/openvpn/management.sock
       - VPN_AUTH_MANAGEMENT_PASSWORD_FILE=/etc/openvpn/management-pw
       - VPN_AUTH_MANAGEMENT_RAW_LOG=${VPN_AUTH_MANAGEMENT_RAW_LOG:-false}

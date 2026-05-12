@@ -1,6 +1,12 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
+	"flag"
+	"log/slog"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -111,9 +117,9 @@ func TestValidate_EmptyCognitoUserPoolID_WithRequiredGroup_Error(t *testing.T) {
 	cfg.CognitoUserPoolID = ""
 	cfg.ALBARN = ""
 	cfg.RequiredGroup = "vpn-users"
-	cfg.CognitoGroupsClaims = false
+	cfg.GroupsSource = GroupsSourceCognitoAPI
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when required-group is set without cognito-user-pool-id and cognito-groups-from-claims")
+		t.Fatal("expected error when required-group is set with groups-source=cognito-api and no cognito-user-pool-id")
 	}
 }
 
@@ -122,9 +128,10 @@ func TestValidate_EmptyCognitoUserPoolID_WithRequiredGroup_ClaimsMode_NoError(t 
 	cfg.CognitoUserPoolID = ""
 	cfg.ALBARN = ""
 	cfg.RequiredGroup = "vpn-users"
-	cfg.CognitoGroupsClaims = true
+	cfg.GroupsSource = GroupsSourceJWTClaim
+	cfg.GroupsClaim = "cognito:groups"
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected no error when using groups-from-claims without pool ID, got: %v", err)
+		t.Fatalf("expected no error when using groups-source=jwt-claim without pool ID, got: %v", err)
 	}
 }
 
@@ -133,10 +140,11 @@ func TestValidate_EmptyCognitoUserPoolID_WithRequiredGroupClaimsModeAndReauthGro
 	cfg.CognitoUserPoolID = ""
 	cfg.ALBARN = ""
 	cfg.RequiredGroup = "vpn-users"
-	cfg.CognitoGroupsClaims = true
+	cfg.GroupsSource = GroupsSourceJWTClaim
+	cfg.GroupsClaim = "cognito:groups"
 	cfg.CheckRequiredGroupOnReauth = true
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when reauth group checks require Cognito but cognito-user-pool-id is empty")
+		t.Fatal("expected error when groups-source=jwt-claim is combined with check-required-group-on-reauth=true")
 	}
 }
 
@@ -209,4 +217,376 @@ func TestValidate_MaxSessionDurationShorterThanReneg_Warns(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected no error (warning only), got: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// OIDC debug flags (Step 1 of group-claims-debug-plan)
+// ---------------------------------------------------------------------------
+
+func TestValidate_OIDCDebugClaims_Disabled_NoError(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.OIDCDebugClaims = false
+	cfg.OIDCDebugClaimsUnsafe = false
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with OIDC debug flags off, got: %v", err)
+	}
+}
+
+func TestValidate_OIDCDebugClaims_SafeMode_NoError(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.OIDCDebugClaims = true
+	cfg.OIDCDebugClaimsUnsafe = false
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with safe OIDC debug mode, got: %v", err)
+	}
+}
+
+func TestValidate_OIDCDebugClaims_UnsafeMode_NoError(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.OIDCDebugClaims = true
+	cfg.OIDCDebugClaimsUnsafe = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with unsafe OIDC debug mode, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Groups source / groups claim (Step 3 of group-claims-debug-plan)
+// ---------------------------------------------------------------------------
+
+func TestValidate_GroupsSource_DefaultIsCognitoAPI(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.GroupsSource = ""
+	// Validate() defaults an empty GroupsSource to cognito-api. baseValidConfig
+	// provides a pool ID so the Cognito-API path validates cleanly.
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with empty GroupsSource (defaults to cognito-api), got: %v", err)
+	}
+}
+
+func TestValidate_GroupsSource_CognitoAPI_IgnoresGroupsClaim(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.GroupsSource = GroupsSourceCognitoAPI
+	cfg.GroupsClaim = "cognito:groups" // accepted and ignored in cognito-api mode
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error: groups-source=cognito-api should accept groups-claim, got: %v", err)
+	}
+}
+
+func TestValidate_GroupsSource_JWTClaim_RequiresGroupsClaim(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.GroupsSource = GroupsSourceJWTClaim
+	cfg.GroupsClaim = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when groups-source=jwt-claim is set without groups-claim")
+	}
+}
+
+func TestValidate_GroupsSource_JWTClaim_WithGroupsClaim_NoError(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.GroupsSource = GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with groups-source=jwt-claim and groups-claim set, got: %v", err)
+	}
+}
+
+func TestValidate_GroupsSource_JWTClaim_RejectsReauthGroupCheck(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.GroupsSource = GroupsSourceJWTClaim
+	cfg.GroupsClaim = "cognito:groups"
+	cfg.RequiredGroup = "vpn-users"
+	cfg.CheckRequiredGroupOnReauth = true
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error when groups-source=jwt-claim is combined with check-required-group-on-reauth=true")
+	}
+	// Error should be actionable — the plan's prescribed fix is to switch to
+	// cognito-api mode for reauth-time group revocation.
+	if !strings.Contains(err.Error(), "groups-source=cognito-api") {
+		t.Errorf("expected error message to mention the recommended fix, got: %v", err)
+	}
+}
+
+func TestValidate_GroupsSource_UnknownValue_Error(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.GroupsSource = "ldap"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for unknown groups-source value")
+	}
+	// Unknown-value errors must mention the flag and allowed values so operators
+	// can fix their config without reading source.
+	for _, needle := range []string{"groups-source", "cognito-api", "jwt-claim"} {
+		if !strings.Contains(err.Error(), needle) {
+			t.Errorf("expected error to mention %q, got: %v", needle, err)
+		}
+	}
+}
+
+func TestValidate_GroupsSource_JWTClaim_DoesNotRequirePoolID(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.CognitoUserPoolID = ""
+	cfg.ALBARN = ""
+	cfg.CognitoIssuerURL = ""
+	cfg.GroupsSource = GroupsSourceJWTClaim
+	cfg.GroupsClaim = "cognito:groups"
+	cfg.RequiredGroup = "vpn-users"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error: groups-source=jwt-claim should not require cognito-user-pool-id for callback/connect, got: %v", err)
+	}
+}
+
+// Regression guard (Step 3 review fix #1): the pool-ID check for cognito-api
+// must still fire when GroupsSource is left empty by direct struct construction.
+// Validate() defaults an empty GroupsSource to cognito-api BEFORE any dependent
+// rule runs; a defaults-too-late bug would silently accept this combination.
+func TestValidate_EmptyGroupsSource_TriggersPoolIDCheck(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.GroupsSource = ""
+	cfg.CognitoUserPoolID = ""
+	cfg.ALBARN = ""
+	cfg.RequiredGroup = "vpn-users"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error: empty GroupsSource must default to cognito-api before the pool-ID check runs")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Removed environment variables (Step 4 of group-claims-debug-plan)
+// ---------------------------------------------------------------------------
+
+func TestParse_RemovedCognitoGroupsFromClaimsEnv_FailsLoudly(t *testing.T) {
+	t.Setenv("VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS", "true")
+	t.Setenv("VPN_AUTH_CALLBACK_URL", "https://vpn-auth.example.com/callback/01/udp")
+
+	resetCommandLine(t, "openvpn-auth-daemon")
+
+	_, err := Parse()
+	if err == nil {
+		t.Fatal("expected Parse to fail when removed VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS is set")
+	}
+	for _, needle := range []string{
+		"VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS is no longer supported",
+		"VPN_AUTH_GROUPS_SOURCE=jwt-claim",
+		"VPN_AUTH_GROUPS_CLAIM=<verified x-amzn-oidc-data claim>",
+	} {
+		if !strings.Contains(err.Error(), needle) {
+			t.Fatalf("expected error to contain %q, got: %v", needle, err)
+		}
+	}
+}
+
+func TestParse_OIDCDebugClaimsUnsafeEnv_ImpliesSafeDebug(t *testing.T) {
+	t.Setenv("VPN_AUTH_CALLBACK_URL", "https://vpn-auth.example.com/callback/01/udp")
+	t.Setenv("VPN_AUTH_OIDC_DEBUG_CLAIMS_UNSAFE", "true")
+	resetCommandLine(t, "openvpn-auth-daemon")
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.OIDCDebugClaimsUnsafe {
+		t.Fatal("expected OIDCDebugClaimsUnsafe=true")
+	}
+	if !cfg.OIDCDebugClaims {
+		t.Fatal("expected unsafe debug env var to imply OIDCDebugClaims=true")
+	}
+}
+
+func TestParse_OIDCDebugClaimsUnsafeFlag_ImpliesSafeDebug(t *testing.T) {
+	t.Setenv("VPN_AUTH_CALLBACK_URL", "https://vpn-auth.example.com/callback/01/udp")
+	resetCommandLine(t, "openvpn-auth-daemon", "--oidc-debug-claims-unsafe")
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.OIDCDebugClaimsUnsafe {
+		t.Fatal("expected OIDCDebugClaimsUnsafe=true")
+	}
+	if !cfg.OIDCDebugClaims {
+		t.Fatal("expected unsafe debug flag to imply OIDCDebugClaims=true")
+	}
+}
+
+func resetCommandLine(t *testing.T, args ...string) {
+	t.Helper()
+	oldCommandLine := flag.CommandLine
+	oldArgs := os.Args
+	t.Cleanup(func() {
+		flag.CommandLine = oldCommandLine
+		os.Args = oldArgs
+	})
+	flag.CommandLine = flag.NewFlagSet("test", flag.ContinueOnError)
+	os.Args = args
+}
+
+// ---------------------------------------------------------------------------
+// Step 9: startup notices emitted by LogStartupNotices
+// ---------------------------------------------------------------------------
+
+// withCaptureLogger swaps the slog default with a JSON handler writing into
+// buf so tests can assert on structured records. Restores the previous
+// default when fn returns.
+func withCaptureLogger(t *testing.T, fn func()) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+	fn()
+	return &buf
+}
+
+// findNoticeRecord decodes NDJSON log output and returns the first record
+// whose "event" key matches eventKey.
+func findNoticeRecord(t *testing.T, buf *bytes.Buffer, eventKey string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("parse log line %q: %v", line, err)
+		}
+		if rec["event"] == eventKey {
+			return rec
+		}
+	}
+	return nil
+}
+
+func TestLogStartupNotices_UnsafeEmitsStableEventKey(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.OIDCDebugClaims = true
+	cfg.OIDCDebugClaimsUnsafe = true
+
+	buf := withCaptureLogger(t, func() {
+		cfg.LogStartupNotices()
+	})
+
+	rec := findNoticeRecord(t, buf, "oidc_debug_unsafe_enabled")
+	if rec == nil {
+		t.Fatal("expected oidc_debug_unsafe_enabled notice record")
+	}
+	if level, _ := rec["level"].(string); level != "WARN" {
+		t.Errorf("expected WARN level for unsafe mode, got %q", level)
+	}
+
+	// Safe-mode notice must not be emitted when unsafe is on (precedence rule).
+	if findNoticeRecord(t, buf, "oidc_debug_enabled") != nil {
+		t.Error("unsafe mode must not additionally emit oidc_debug_enabled")
+	}
+}
+
+func TestLogStartupNotices_SafeModeEmitsInfoEvent(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.OIDCDebugClaims = true
+	cfg.OIDCDebugClaimsUnsafe = false
+
+	buf := withCaptureLogger(t, func() {
+		cfg.LogStartupNotices()
+	})
+
+	rec := findNoticeRecord(t, buf, "oidc_debug_enabled")
+	if rec == nil {
+		t.Fatal("expected oidc_debug_enabled notice record in safe mode")
+	}
+	if level, _ := rec["level"].(string); level != "INFO" {
+		t.Errorf("expected INFO level for safe mode, got %q", level)
+	}
+	if findNoticeRecord(t, buf, "oidc_debug_unsafe_enabled") != nil {
+		t.Error("safe mode must not emit unsafe-mode event")
+	}
+}
+
+func TestLogStartupNotices_DebugDisabled_NoEvent(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.OIDCDebugClaims = false
+	cfg.OIDCDebugClaimsUnsafe = false
+
+	buf := withCaptureLogger(t, func() {
+		cfg.LogStartupNotices()
+	})
+
+	for _, key := range []string{"oidc_debug_enabled", "oidc_debug_unsafe_enabled"} {
+		if findNoticeRecord(t, buf, key) != nil {
+			t.Errorf("unexpected %q record when OIDC debug is disabled", key)
+		}
+	}
+}
+
+func TestLogStartupNotices_GroupsSourceConfigured_JWTClaim(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.GroupsSource = GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	cfg.CheckRequiredGroupOnReauth = false
+
+	buf := withCaptureLogger(t, func() {
+		cfg.LogStartupNotices()
+	})
+
+	rec := findMessageRecord(t, buf, "groups source configured")
+	if rec == nil {
+		t.Fatal("expected groups source configured startup record")
+	}
+	if rec["source"] != GroupsSourceJWTClaim {
+		t.Fatalf("expected source=%q, got %v", GroupsSourceJWTClaim, rec["source"])
+	}
+	if rec["claim"] != "custom:groups" {
+		t.Fatalf("expected claim=custom:groups, got %v", rec["claim"])
+	}
+	if rec["reauth_group_check"] != false {
+		t.Fatalf("expected reauth_group_check=false, got %v", rec["reauth_group_check"])
+	}
+	if rec["claim_ignored"] != false {
+		t.Fatalf("expected claim_ignored=false for jwt-claim mode, got %v", rec["claim_ignored"])
+	}
+}
+
+func TestLogStartupNotices_GroupsSourceConfigured_CognitoAPIClaimIgnored(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.GroupsSource = GroupsSourceCognitoAPI
+	cfg.GroupsClaim = "custom:groups"
+	cfg.CheckRequiredGroupOnReauth = true
+
+	buf := withCaptureLogger(t, func() {
+		cfg.LogStartupNotices()
+	})
+
+	rec := findMessageRecord(t, buf, "groups source configured")
+	if rec == nil {
+		t.Fatal("expected groups source configured startup record")
+	}
+	if rec["source"] != GroupsSourceCognitoAPI {
+		t.Fatalf("expected source=%q, got %v", GroupsSourceCognitoAPI, rec["source"])
+	}
+	if rec["claim"] != "custom:groups" {
+		t.Fatalf("expected claim=custom:groups, got %v", rec["claim"])
+	}
+	if rec["reauth_group_check"] != true {
+		t.Fatalf("expected reauth_group_check=true, got %v", rec["reauth_group_check"])
+	}
+	if rec["claim_ignored"] != true {
+		t.Fatalf("expected claim_ignored=true when cognito-api mode has a configured claim, got %v", rec["claim_ignored"])
+	}
+}
+
+func findMessageRecord(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("parse log line %q: %v", line, err)
+		}
+		if rec["msg"] == msg {
+			return rec
+		}
+	}
+	return nil
 }

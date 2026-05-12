@@ -1415,3 +1415,168 @@ func TestHandleConnectAllowsNewSessionAfterDisconnect(t *testing.T) {
 		t.Fatalf("expected 2 DecisionPending (one per connect), got %d; decisions: %+v", pending, sink.snapshot())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Step 9: reauth group-check path (docs/group-claims-debug-plan.md)
+// ---------------------------------------------------------------------------
+
+// countingChecker implements IdentityChecker and records every CheckUser call
+// so tests can assert that reauth routes through the Cognito Admin API and
+// does not silently pick up JWT claims.
+type countingChecker struct {
+	mu              sync.Mutex
+	calls           int
+	lastUsername    string
+	lastGroup       string
+	lastCheckGroups bool
+	inGroup         bool
+}
+
+func (c *countingChecker) CheckUser(_ context.Context, username, requiredGroup string, checkGroups bool) (IdentityResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	c.lastUsername = username
+	c.lastGroup = requiredGroup
+	c.lastCheckGroups = checkGroups
+	return IdentityResult{Exists: true, Enabled: true, InGroup: c.inGroup}, nil
+}
+
+// TestReauth_UsesCognitoAPI_EvenWhenGroupsSourceIsJWTClaim documents that the
+// reauth path always calls IdentityChecker.CheckUser regardless of
+// cfg.GroupsSource. Validation forbids combining jwt-claim with
+// --check-required-group-on-reauth=true, so this test sets
+// CheckRequiredGroupOnReauth=false to match the allowed production config.
+// Nonetheless, reauth still hits Cognito for account-status verification —
+// this is what the plan means by "reauth uses Cognito API for group checks".
+func TestReauth_UsesCognitoAPI_EvenWhenGroupsSourceIsJWTClaim(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:                "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:                 "test-secret-key!!",
+		HandWindow:                 5 * time.Second,
+		AuthTimeout:                5 * time.Second,
+		CallbackPort:               8080,
+		ReauthTimeout:              time.Second,
+		GroupsSource:               config.GroupsSourceJWTClaim,
+		GroupsClaim:                "custom:groups",
+		RequiredGroup:              "vpn-users",
+		CheckRequiredGroupOnReauth: false, // enforced by validator; must be false with jwt-claim
+	}
+	checker := &countingChecker{inGroup: true}
+	sessions := NewSessionStore()
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
+	m := metrics.NewEmitter(&strings.Builder{}, "test")
+	handler := NewHandler(cfg, sessions, checker, signer, m)
+	sink := &captureSink{}
+
+	handler.HandleEvent(context.Background(), mgmt.Event{
+		Type: mgmt.EventReauth, CID: "1", KID: "2",
+		Env: map[string]string{"common_name": "user@example.com"},
+	}, sink)
+	handler.WaitReauth()
+
+	if checker.calls != 1 {
+		t.Fatalf("expected reauth to call IdentityChecker.CheckUser exactly once, got %d", checker.calls)
+	}
+	if checker.lastUsername != "user@example.com" {
+		t.Fatalf("expected username=user@example.com, got %q", checker.lastUsername)
+	}
+	if checker.lastCheckGroups {
+		t.Fatal("expected checkGroups=false on reauth (CheckRequiredGroupOnReauth is false)")
+	}
+
+	var allows int
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionAllowNT {
+			allows++
+		}
+	}
+	if allows != 1 {
+		t.Fatalf("expected one AllowNT decision, got decisions=%+v", sink.snapshot())
+	}
+}
+
+func TestReauth_CognitoAPIGroupCheckDeniesWhenUserNotInGroup(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:                "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:                 "test-secret-key!!",
+		HandWindow:                 5 * time.Second,
+		AuthTimeout:                5 * time.Second,
+		CallbackPort:               8080,
+		ReauthTimeout:              time.Second,
+		GroupsSource:               config.GroupsSourceCognitoAPI,
+		RequiredGroup:              "vpn-users",
+		CheckRequiredGroupOnReauth: true,
+	}
+	checker := &countingChecker{inGroup: false}
+	sessions := NewSessionStore()
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
+	m := metrics.NewEmitter(&strings.Builder{}, "test")
+	handler := NewHandler(cfg, sessions, checker, signer, m)
+	sink := &captureSink{}
+
+	handler.HandleEvent(context.Background(), mgmt.Event{
+		Type: mgmt.EventReauth, CID: "1", KID: "2",
+		Env: map[string]string{"common_name": "user@example.com"},
+	}, sink)
+	handler.WaitReauth()
+
+	if checker.calls != 1 {
+		t.Fatalf("expected reauth to call IdentityChecker.CheckUser exactly once, got %d", checker.calls)
+	}
+	if checker.lastUsername != "user@example.com" {
+		t.Fatalf("expected username=user@example.com, got %q", checker.lastUsername)
+	}
+	if checker.lastGroup != "vpn-users" {
+		t.Fatalf("expected required group vpn-users, got %q", checker.lastGroup)
+	}
+	if !checker.lastCheckGroups {
+		t.Fatal("expected checkGroups=true on reauth when CheckRequiredGroupOnReauth=true")
+	}
+
+	decisions := sink.snapshot()
+	if len(decisions) != 1 {
+		t.Fatalf("expected one decision, got %+v", decisions)
+	}
+	if decisions[0].Type != DecisionDeny {
+		t.Fatalf("expected DecisionDeny, got %+v", decisions[0])
+	}
+	if decisions[0].Reason != "not in required group: vpn-users" {
+		t.Fatalf("expected group denial reason, got %q", decisions[0].Reason)
+	}
+}
+
+// TestReauth_DoesNotReadJWTClaims verifies that reauth never inspects the
+// cfg.GroupsClaim. The countingChecker returns InGroup=false for any call,
+// so if reauth somehow short-circuited via a "jwt-claim grants access" code
+// path, the decision would be an Allow without a Cognito call — which we
+// explicitly guard against here.
+func TestReauth_DoesNotReadJWTClaims(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL:   "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:    "test-secret-key!!",
+		HandWindow:    5 * time.Second,
+		AuthTimeout:   5 * time.Second,
+		CallbackPort:  8080,
+		ReauthTimeout: time.Second,
+		GroupsSource:  config.GroupsSourceJWTClaim,
+		GroupsClaim:   "custom:groups",
+		RequiredGroup: "vpn-users",
+	}
+	checker := &countingChecker{inGroup: false}
+	sessions := NewSessionStore()
+	signer, _ := secrets.NewStaticSigner("test-secret-key!!")
+	m := metrics.NewEmitter(&strings.Builder{}, "test")
+	handler := NewHandler(cfg, sessions, checker, signer, m)
+	sink := &captureSink{}
+
+	handler.HandleEvent(context.Background(), mgmt.Event{
+		Type: mgmt.EventReauth, CID: "1", KID: "2",
+		Env: map[string]string{"common_name": "user@example.com"},
+	}, sink)
+	handler.WaitReauth()
+
+	if checker.calls != 1 {
+		t.Fatalf("expected exactly one Cognito call on reauth, got %d", checker.calls)
+	}
+}

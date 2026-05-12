@@ -229,31 +229,31 @@ Group membership resolution is split across three mechanisms in this project. Th
 
 | Mode | Flag | What the daemon does | Works for federated users? |
 |---|---|---|---|
-| Cognito Admin API (default) | *(no flag)* | On callback/connect, `AdminListGroupsForUser` with the Cognito username from claims (`cognito:username` → fallback `username`). On reauth, group membership is checked only when `--check-required-group-on-reauth` is enabled. | **Yes.** Works with any federated IdP as long as ALB forwards a usable Cognito username. Production default. |
-| JWT claim (`cognito:groups`) | `--cognito-groups-from-claims` | On callback/connect, reads `cognito:groups` from `x-amzn-oidc-data` instead of calling `AdminListGroupsForUser`. Reauth cannot use this claim because no new ALB JWT is available on `CLIENT:REAUTH`; if `--check-required-group-on-reauth` is enabled, reauth still needs the Cognito Admin API. | Only if `cognito:groups` is explicitly present in the ALB-forwarded JWT. Not present by default for federated users — requires explicit mapping (see below). |
+| Cognito Admin API (default) | `--groups-source=cognito-api` (default) | On callback/connect, `AdminListGroupsForUser` with the Cognito username from claims (`cognito:username` → fallback `username`). On reauth, group membership is checked only when `--check-required-group-on-reauth` is enabled. | **Yes.** Works with any federated IdP as long as ALB forwards a usable Cognito username. Production default. |
+| JWT claim (operator-chosen) | `--groups-source=jwt-claim --groups-claim=<claim>` | On callback/connect, reads the top-level claim named `<claim>` from `x-amzn-oidc-data` and parses its value (JSON array, CSV, single string, or JSON array encoded as a string — see `docs/configuration.md#group-claim-parser`). Reauth cannot use JWT claims because no new ALB JWT is available on `CLIENT:REAUTH`; this mode cannot be combined with `--check-required-group-on-reauth=true`. | Only if the configured claim is explicitly present in the ALB-forwarded JWT. Native `cognito:groups` is typically absent in `x-amzn-oidc-data` — requires an explicit mapping (see below). |
 
-### How to get `cognito:groups` into the forwarded JWT for federated users
+### How to get group claims into the forwarded JWT for federated users
 
 Two options, neither of which happens automatically:
 
-1. **Attribute mapping from IdP → Cognito `custom:groups`, then transform to `cognito:groups`.** The IdP emits a groups attribute (SAML: e.g. `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/groups`; OIDC: a `groups` claim). Map it to a custom Cognito attribute such as `custom:groups`, and configure the token flow so `cognito:groups` carries the same value. The daemon only reads `cognito:groups` — `custom:groups` alone is not read. See `docs/architecture-design.md` for a Terraform snippet and the 2048-char limit caveat.
+1. **Attribute mapping from IdP → Cognito `custom:groups` exposed via userInfo.** The IdP emits a groups attribute (SAML: e.g. `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/groups`; OIDC: a `groups` claim). Map it to a custom Cognito attribute such as `custom:groups`, make sure the app client's read attributes include it, and the ALB `authenticate-cognito` action will forward it in `x-amzn-oidc-data`. Then set `--groups-source=jwt-claim --groups-claim=custom:groups`. See `docs/architecture-design.md` for a Terraform snippet and the 2048-char custom-attribute limit caveat.
 
-2. **Pre-token generation Lambda trigger.** A Cognito pre-token Lambda can inject `cognito:groups` into the ID token by reading IdP claims or by calling `AdminListGroupsForUser` internally. This requires the Cognito Essentials or Plus feature plan (`user_pool_tier = "ESSENTIALS"`) with event version V2_0 or V3_0; the Lite plan does not support access token customization.
+2. **Pre-token generation Lambda trigger.** A Cognito pre-token Lambda can inject any claim name (including `cognito:groups`) into the ID token by reading IdP claims or by calling `AdminListGroupsForUser` internally. This requires the Cognito Essentials or Plus feature plan (`user_pool_tier = "ESSENTIALS"`) with event version V2_0 or V3_0; the Lite plan does not support access token customization. Verify the resulting claim shape with `--oidc-debug-claims` before depending on it — ALB forwards claims from Cognito's userInfo endpoint, not the ID token.
 
 If neither is configured, claim-based group checks will always fail for federated users — use the default Cognito Admin API path instead.
 
 ### Trade-offs
 
-| Concern | Cognito Admin API | Claim-based (`cognito:groups`) |
+| Concern | Cognito Admin API | Claim-based (`--groups-claim=<claim>`) |
 |---|---|---|
 | Extra AWS API call per connect | Yes (~10–50 ms) | No |
 | IdP outage tolerance | Improved by `--reauth-cache` for reauth | N/A (claims already in token) |
 | IAM permissions required | `cognito-idp:AdminGetUser`, `cognito-idp:AdminListGroupsForUser` | None for callback group checks. Reauth still needs `cognito-idp:AdminGetUser`, and also `cognito-idp:AdminListGroupsForUser` if `--check-required-group-on-reauth` is enabled. |
 | Works out of the box for federated users | Yes | No — requires explicit mapping or Lambda trigger |
 | Reflects group changes in IdP | Next connect; next reauth only when `--check-required-group-on-reauth` is enabled | Next federated login (Cognito refreshes attributes) |
-| Compatible with Cognito native groups | Yes | Only if `cognito:groups` ends up in the JWT |
+| Compatible with Cognito native groups | Yes | Only if native group membership is explicitly exposed through the configured ALB-forwarded claim |
 
-For any new federated deployment, start with the Cognito Admin API path. Move to claim-based checks only after verifying that `cognito:groups` is actually present in the ALB-forwarded JWT for that IdP (see [What Must Be Verified For External IdP](#what-must-be-verified-for-external-idp)).
+For any new federated deployment, start with the Cognito Admin API path. Move to claim-based checks only after verifying that the exact claim configured with `--groups-claim` is actually present in the ALB-forwarded JWT for that IdP (see [What Must Be Verified For External IdP](#what-must-be-verified-for-external-idp)).
 
 ## CN Cross-Check and Federated Users
 
@@ -314,7 +314,7 @@ Recommended validation procedure:
 5. Only then decide whether group checks should use:
    - Cognito Admin API
    - forwarded JWT claims
-   - custom mapped claims transformed into `cognito:groups`
+   - custom mapped claims exposed through the exact claim configured with `--groups-claim`
 
 Until that verification is done, the safe default for external IdP deployments is to assume that group membership may need to be resolved through the Cognito Admin API rather than through ALB-forwarded claims.
 
@@ -328,15 +328,16 @@ The auth daemon supports federated users by storing the Cognito lookup username 
 | Reauth | Uses the Cognito lookup username stored at callback time, not the certificate CN. Reauth checks account existence/enabled status by default; it checks group membership only when `--check-required-group-on-reauth` is enabled. |
 | User status | Accepts both `CONFIRMED` and `EXTERNAL_PROVIDER` users when the account is enabled |
 
-The default Cognito Admin API path is the recommended production mode when the forwarded claims contain a usable Cognito username. Claim-based group checks are available only for the callback/connect decision, and only when `cognito:groups` is present in the ALB-forwarded JWT:
+The default Cognito Admin API path is the recommended production mode when the forwarded claims contain a usable Cognito username. Claim-based group checks are available only for the callback/connect decision, and only when the configured `--groups-claim` is present in the ALB-forwarded JWT:
 
 ```
---cognito-groups-from-claims=true
+--groups-source=jwt-claim
+--groups-claim=<verified claim name>
 ```
 
-Group membership is then read from JWT claims instead of the Cognito API during callback handling. In observed ALB traffic, `cognito:groups` was not present by default, so claim-based group checks require explicit token customization or mapping that produces `cognito:groups`. A custom attribute such as `custom:groups` is not read by the daemon unless it is transformed into `cognito:groups`.
+Group membership is then read from that top-level claim in `x-amzn-oidc-data` instead of the Cognito API during callback handling. In observed ALB traffic, native `cognito:groups` was not present in `x-amzn-oidc-data`, so claim-based group checks require explicit token customization or userInfo-visible attribute mapping (for example, `custom:groups` forwarded through the app client). The exact forwarded claim shape must be verified with `--oidc-debug-claims` before relying on this mode. Claim names are case-sensitive and the parser accepts JSON arrays, CSV strings, single strings, and JSON arrays encoded as strings — see [`docs/configuration.md#group-claim-parser`](configuration.md#group-claim-parser).
 
-This flag does not make reauth claim-based. `CLIENT:REAUTH` is an OpenVPN management event, not a browser callback, so there is no fresh ALB JWT to inspect. If reauth group enforcement is required, set `--check-required-group-on-reauth` and keep Cognito Admin API access configured.
+This mode does not make reauth claim-based. `CLIENT:REAUTH` is an OpenVPN management event, not a browser callback, so there is no fresh ALB JWT to inspect. The daemon enforces this at startup: `--groups-source=jwt-claim` cannot be combined with `--check-required-group-on-reauth=true`. If reauth group enforcement is required, set `--groups-source=cognito-api` (the default) and `--check-required-group-on-reauth`, and keep Cognito Admin API access configured.
 
 ## AWS Documentation References
 
@@ -357,6 +358,6 @@ This flag does not make reauth claim-based. `CLIENT:REAUTH` is an OpenVPN manage
 |---|---|---|
 | Default (no extra flags) | Full support | Full support when ALB forwards a Cognito lookup username |
 | `--required-group` set | Enforced on callback/connect; also enforced on reauth only with `--check-required-group-on-reauth` | Enforced on callback/connect through Cognito Admin API; also enforced on reauth only with `--check-required-group-on-reauth` |
-| `--cognito-groups-from-claims` | Callback/connect only; supported when `cognito:groups` is present | Callback/connect only; supported when `cognito:groups` is present |
+| `--groups-source=jwt-claim --groups-claim=<claim>` | Callback/connect only; supported when the configured claim is present in `x-amzn-oidc-data` | Callback/connect only; supported when the configured claim is present in `x-amzn-oidc-data` |
 | `--cognito-skip-reauth` | Supported, but skips reauth account-status checks | Supported, but skips reauth account-status checks |
-| `--cognito-groups-from-claims` + `--cognito-skip-reauth` | Supported, with both trade-offs above | Supported, with both trade-offs above |
+| `--groups-source=jwt-claim` + `--cognito-skip-reauth` | Supported, with both trade-offs above | Supported, with both trade-offs above |

@@ -180,8 +180,10 @@ resource "aws_lb_listener_rule" "callback" {
       user_pool_arn       = var.cognito_user_pool_arn
       user_pool_client_id = var.cognito_user_pool_client_id
       user_pool_domain    = var.cognito_user_pool_domain
-      scope               = "openid email"
-      session_timeout     = var.auth_session_timeout
+      # See docs/group-authorization.md — `profile` surfaces standard OIDC
+      # profile claims and any mapped custom attributes in x-amzn-oidc-data.
+      scope           = "openid email profile"
+      session_timeout = var.auth_session_timeout
     }
   }
 

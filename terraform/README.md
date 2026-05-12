@@ -33,7 +33,7 @@ Only **split-tunnel** mode is supported by the current Terraform code. Routes ar
 
 ## ALB auth session
 
-The ALB `authenticate-cognito` action stores browser login state in `AWSELBAuthSessionCookie-*` cookies. This repo configures the ALB OAuth scope as `openid email` so the `email` claim is available in the `x-amzn-oidc-data` header forwarded to the daemon.
+The ALB `authenticate-cognito` action stores browser login state in `AWSELBAuthSessionCookie-*` cookies. This repo configures the ALB OAuth scope as `openid email profile` so the `email` claim is available in the `x-amzn-oidc-data` header forwarded to the daemon. `profile` is included so standard OIDC profile claims and any mapped custom attributes also surface in `x-amzn-oidc-data`; it is not a reliable path to native Cognito `cognito:groups` — see [`../docs/group-authorization.md`](../docs/group-authorization.md).
 
 The cookie lifetime is controlled by `alb_auth_session_timeout` (seconds) and defaults to `3600` (1 hour). This is intentionally much shorter than the AWS default (`7` days) so stale callback URLs stop reaching the daemon through an old ALB browser session sooner. This timeout is separate from the daemon's own `state` lifetime, which is controlled by `--auth-timeout`.
 

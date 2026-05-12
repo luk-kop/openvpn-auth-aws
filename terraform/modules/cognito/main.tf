@@ -68,8 +68,12 @@ resource "aws_cognito_user_pool_client" "this" {
 
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
-  allowed_oauth_scopes                 = ["openid", "email"]
-  supported_identity_providers         = ["COGNITO"]
+  # "profile" is added so standard OIDC profile claims and any mapped custom
+  # attributes forwarded through the ALB authenticate-cognito action appear in
+  # x-amzn-oidc-data. This is not a path to native Cognito `cognito:groups`
+  # (see docs/group-authorization.md).
+  allowed_oauth_scopes         = ["openid", "email", "profile"]
+  supported_identity_providers = ["COGNITO"]
 
   # At least one callback URL is required by Cognito
   callback_urls = length(local.all_callback_urls) > 0 ? local.all_callback_urls : ["https://localhost/callback"]

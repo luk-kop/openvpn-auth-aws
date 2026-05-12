@@ -224,7 +224,7 @@ flowchart TD
 | 5 | **ALB public key fetch** — fetches ECDSA public key from `https://public-keys.auth.elb.{region}.amazonaws.com/{kid}`, cached in memory | N/A (infrastructure step) | 503 (retryable) | `public_key_fetch_failed` |
 | 6 | **JWT signature + claims** — verifies ES256 signature with the ALB public key, checks `signer` matches `--alb-arn`, requires valid `exp` | Token forgery, ALB spoofing, expired tokens | 403 + deny | `jwt_validation_failed` / `invalid_jwt_claims` |
 | 7 | **CN cross-check** — compares JWT `email` claim with the client certificate's Common Name (case-insensitive) | User A authenticating with User B's browser session | 403 + deny | `cn_mismatch` |
-| 8 | **Group membership** — checks if the user belongs to the required Cognito group. By default this uses Cognito Admin APIs. With `--cognito-groups-from-claims`, the callback/connect decision reads only the `cognito:groups` JWT claim; reauth group checks still require Cognito Admin API access. | Unauthorized access by authenticated but unprivileged users | 403 + deny | `group_check_error` / `group_denied` |
+| 8 | **Group membership** — checks if the user belongs to the required Cognito group. By default (`--groups-source=cognito-api`) this uses Cognito Admin APIs. With `--groups-source=jwt-claim`, the callback/connect decision reads groups from the top-level claim named by `--groups-claim` in `x-amzn-oidc-data`; reauth group checks always require Cognito Admin API access (`--groups-source=jwt-claim` cannot be combined with `--check-required-group-on-reauth=true`). | Unauthorized access by authenticated but unprivileged users | 403 + deny | `group_check_error` / `group_denied` |
 
 All rejection reasons are emitted as `CallbackRejected` EMF metric with a `Reason` dimension. See [EMF Metrics](configuration.md#emf-metrics) for the full list.
 
@@ -263,7 +263,7 @@ These observations are empirical for the current native-Cognito deployment. Exte
 
 In Terraform this repo configures:
 
-- `scope = "openid email"` so Cognito returns the user's `email` claim and ALB can include it in `x-amzn-oidc-data`
+- `scope = "openid email profile"` so Cognito returns the user's `email` claim and ALB can include it in `x-amzn-oidc-data`; `profile` helps profile/custom mapped claims but is not a reliable path to native Cognito `cognito:groups`
 - `session_timeout` via `alb_auth_session_timeout_hours` (default `1h`) so the ALB browser session does not outlive the short-lived daemon `state` by too much
 
 These ALB cookies are separate from the daemon's `state` parameter. A browser may still have a valid ALB auth session while the callback `state` has already expired; in that case the request reaches the daemon and is correctly rejected as `invalid_state`.

@@ -129,7 +129,7 @@ This prevents a scenario where a user with a valid certificate for one identity 
 
 **Flag:** `--required-group` / `VPN_AUTH_REQUIRED_GROUP`
 
-After a successful callback, the daemon calls Cognito `AdminListGroupsForUser` to verify the authenticated user is a member of the configured group. Users not in the group are denied with `client-deny`.
+After a successful callback, the daemon verifies that the authenticated user is a member of the configured group. By default (`--groups-source=cognito-api`), it calls Cognito `AdminListGroupsForUser`. With `--groups-source=jwt-claim`, it reads group membership from the top-level claim named by `--groups-claim` in the ALB-forwarded `x-amzn-oidc-data` JWT. Users not in the group are denied with `client-deny`.
 
 When empty, group membership is not checked and any authenticated Cognito user can connect.
 
@@ -141,7 +141,7 @@ When empty, group membership is not checked and any authenticated Cognito user c
 
 **Flag:** `--check-required-group-on-reauth` / `VPN_AUTH_CHECK_REQUIRED_GROUP_ON_REAUTH`
 
-By default, the group check only runs at initial authentication. When this flag is enabled, group membership is re-verified on every `CLIENT:REAUTH` (TLS renegotiation). Users removed from the required group are disconnected at the next renegotiation cycle (`reneg-sec`).
+By default, the group check only runs at initial authentication. When this flag is enabled, group membership is re-verified on every `CLIENT:REAUTH` (TLS renegotiation) through the Cognito Admin API. Users removed from the required group are disconnected at the next renegotiation cycle (`reneg-sec`). Claim-based group checks cannot run on reauth because there is no fresh ALB JWT during `CLIENT:REAUTH`; the daemon rejects `--groups-source=jwt-claim` combined with `--check-required-group-on-reauth=true` at startup.
 
 **Default:** `false` (disabled — group is only checked at connect time).
 

@@ -16,7 +16,7 @@ Everything runs locally — no AWS credentials, no real OIDC flow, no domain or 
 - Single-session-per-user eviction logic
 - Management socket protocol (connect, reauth, disconnect, established)
 - Callback server request handling
-- JWT claims parsing and group membership checks (from claims)
+- JWT claims parsing and group membership checks via `--groups-source=jwt-claim`
 - CN cross-check logic (if enabled)
 - Health check endpoint (`/healthz`)
 

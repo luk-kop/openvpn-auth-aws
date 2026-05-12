@@ -133,11 +133,11 @@ Options for resolving group membership:
 
 1. **Cognito API call (default):** Daemon resolves the Cognito lookup username from callback claims, preferring `cognito:username` when present and falling back to `username`, then calls Cognito Admin APIs (`AdminGetUser`, `AdminListGroupsForUser`). In the tested native-Cognito flow, `username` was the working lookup key and `cognito:username` was absent. For federated/SAML users the exact forwarded claims must be verified empirically. This is the default and most reliable approach. Adds ~10-50ms latency per connect (Cognito API call).
 
-2. **Pre-token generation Lambda trigger (future/no API call on connect):** Configure a Cognito [pre-token generation Lambda trigger](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-token-generation.html) to inject `cognito:groups` into token claims. The current daemon's claim-based path reads `cognito:groups` only from the ALB-forwarded `x-amzn-oidc-data` JWT; it does not parse `x-amzn-oidc-accesstoken`. Using access-token customization directly would require daemon support for Cognito access-token parsing and Cognito JWKS validation. Access token customization also requires Cognito Essentials or Plus feature plan (`user_pool_tier = "ESSENTIALS"`) with event version V2_0 or V3_0. The Lite plan does not support access token customization.
+2. **Pre-token generation Lambda trigger (future/no API call on connect):** Configure a Cognito [pre-token generation Lambda trigger](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-token-generation.html) to inject a userInfo-visible group claim, then set `--groups-source=jwt-claim --groups-claim=<claim>`. The daemon's claim-based path reads only the configured top-level claim from the ALB-forwarded `x-amzn-oidc-data` JWT; it does not parse `x-amzn-oidc-accesstoken`. Using access-token customization directly would require daemon support for Cognito access-token parsing and Cognito JWKS validation. Access token customization also requires Cognito Essentials or Plus feature plan (`user_pool_tier = "ESSENTIALS"`) with event version V2_0 or V3_0. The Lite plan does not support access token customization.
 
-3. **SAML federation with claim-based groups (no API call, no Lambda):** The current daemon reads claim-based groups only from the `cognito:groups` claim. If an external IdP emits groups as a different SAML or custom Cognito attribute such as `custom:groups`, map or transform that value so the ALB-forwarded claims contain `cognito:groups`, or use the default Cognito Admin API lookup instead.
+3. **SAML federation with claim-based groups (no API call, no Lambda):** If an external IdP emits groups as a SAML/OIDC attribute, map that value to a Cognito attribute that Cognito userInfo returns, such as `custom:groups`, make sure the ALB app client can read that attribute, and set `--groups-source=jwt-claim --groups-claim=custom:groups`. If no userInfo-visible group claim is available, use the default Cognito Admin API lookup instead.
 
-   Example source-attribute configuration before adding the required transformation to `cognito:groups`:
+   Example source-attribute configuration for a `custom:groups` claim:
 
    ```hcl
    resource "aws_cognito_user_pool" "pool" {
@@ -160,7 +160,7 @@ Options for resolving group membership:
    ```
 
    Constraints:
-   - `custom:groups` is a string, max 2048 chars (Cognito custom string attribute limit) — if used as the source attribute, it still must be transformed or mapped to `cognito:groups` before the daemon can use claim-based group checks
+   - `custom:groups` is a string, max 2048 chars (Cognito custom string attribute limit) and can be used directly with `--groups-claim=custom:groups`
    - Value is set at federation (login) — if groups change in IdP, Cognito updates the attribute on next login (which in this flow is every connect, so effectively real-time)
    - `custom:groups` (SAML-mapped attribute) is different from `cognito:groups` (Cognito native groups) — userInfo returns the former but not the latter
    - If Cognito native groups are needed (e.g. for other AWS services), use option 1 (Cognito Admin API lookup)
@@ -435,7 +435,7 @@ Cognito app client needs only one callback URL: `https://vpn-auth.example.com/oa
 - **Cognito User Pool should be in the same region as the ALB** when using `authenticate-cognito` action. The action takes `user_pool_arn` and `user_pool_domain` but has no parameter for a cross-region endpoint — ALB likely resolves Cognito endpoints based on the ARN region. This is operationally expected but not explicitly confirmed in AWS documentation; verify empirically if cross-region is needed. If a central Cognito in a different region is required, `authenticate-oidc` is the likely direction because it allows explicit endpoint configuration, but that mode is not implemented in this repository today and still needs AWS validation.
 - **Cognito app client must have a client secret** and use the authorization code grant flow (required by ALB Cognito integration).
 - **Cognito domain is required** — ALB `authenticate-cognito` action needs `user_pool_domain` to construct the authorization URL. Either a Cognito-hosted domain (`xxx.auth.<region>.amazoncognito.com`) or a custom domain.
-- **OAuth scope must include `email`** if the daemon needs the user's email from `x-amzn-oidc-data` claims. ALB defaults to `openid` only. Configure `scope = "openid email"` in the `authenticate_cognito` action block. `openid` enables OIDC login, `email` requests the `email` claim from Cognito userInfo so ALB can include it in `x-amzn-oidc-data`. Add `profile` if additional claims are needed.
+- **OAuth scope must include `email`** if the daemon needs the user's email from `x-amzn-oidc-data` claims. This repo configures `scope = "openid email profile"` in the `authenticate_cognito` action block. `openid` enables OIDC login, `email` requests the `email` claim from Cognito userInfo, and `profile` helps standard profile claims and mapped custom attributes appear in `x-amzn-oidc-data`. `profile` is not a reliable path to native Cognito `cognito:groups`; see [Group Authorization and OIDC Claims](group-authorization.md).
 - **ALB auth session timeout should be short-lived** — after successful Cognito login, ALB stores session state in `AWSELBAuthSessionCookie-*` cookies. These cookies are independent of the daemon's short-lived `state` parameter. Keep `session_timeout` modest (default in this repo: `1h`) so old callback URLs stop reaching the daemon through an existing ALB browser session sooner. The timeout is configured in Terraform via `alb_auth_session_timeout_hours`.
 
 ## Session Lifecycle
@@ -463,7 +463,7 @@ The session store is in-memory per daemon. No shared state between daemons or in
 | Terminal | Command | Notes |
 |----------|---------|-------|
 | 1 | `make run-mgmt-mock` | OpenVPN management socket simulator |
-| 2 | `make run-daemon` | `--cognito-groups-from-claims`, `--cognito-skip-reauth`, no `--alb-arn` |
+| 2 | `make run-daemon` | `--groups-source=jwt-claim --groups-claim=cognito:groups`, `--cognito-skip-reauth`, no `--alb-arn` |
 | 3 | `make run-alb-mock` | ALB + Cognito simulator |
 
 **Docker stack:**
@@ -508,7 +508,7 @@ The daemon infers local dev behavior from its configuration — no hidden mode s
 | `--hmac-secret` set | Use local HMAC secret directly |
 | `--hmac-secret-secret-id` set | Fetch the HMAC secret once from AWS Secrets Manager at daemon startup |
 | `--cognito-user-pool-id` omitted | Use static identity checker automatically — no AWS credentials needed |
-| `--cognito-groups-from-claims` | During callback/connect, read groups from the `cognito:groups` claim instead of calling `AdminListGroupsForUser`. Use only when that claim is present in the ALB-forwarded JWT, or in local dev. Reauth group checks still require Cognito Admin API access. |
+| `--groups-source=jwt-claim` + `--groups-claim=<claim>` | During callback/connect, read groups from the top-level `<claim>` in `x-amzn-oidc-data` instead of calling `AdminListGroupsForUser`. Use only when that claim is present in the ALB-forwarded JWT, or in local dev. Reauth always uses the Cognito Admin API (this mode cannot be combined with `--check-required-group-on-reauth=true`). |
 | `--cognito-skip-reauth` | Skip `AdminGetUser` call on reauth — auto-approve renegotiation without verifying user status in Cognito. |
 
 **Always active regardless of config:** state HMAC validation, session lifecycle, CN cross-check (if enabled).
@@ -522,7 +522,8 @@ run-daemon:
         --hmac-secret=test-secret-key!! \
         --callback-url=http://localhost:8080/callback \
         --cognito-skip-reauth \
-        --cognito-groups-from-claims \
+        --groups-source=jwt-claim \
+        --groups-claim=cognito:groups \
         --management-socket=/tmp/openvpn-mgmt.sock \
         --management-password-file=/tmp/mgmt-pw \
         --callback-port=8081 \
@@ -550,7 +551,8 @@ services:
       - VPN_AUTH_HMAC_SECRET=test-secret-key!!
       - VPN_AUTH_CALLBACK_URL=http://localhost:8080/callback/01/udp
       - VPN_AUTH_COGNITO_SKIP_REAUTH=true
-      - VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS=true
+      - VPN_AUTH_GROUPS_SOURCE=jwt-claim
+      - VPN_AUTH_GROUPS_CLAIM=cognito:groups
       - VPN_AUTH_MANAGEMENT_SOCKET=/run/openvpn/management.sock
       - VPN_AUTH_MANAGEMENT_PASSWORD_FILE=/etc/openvpn/management-pw
       - VPN_AUTH_CALLBACK_PORT=8081

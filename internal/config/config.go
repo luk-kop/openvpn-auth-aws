@@ -10,6 +10,59 @@ import (
 	"time"
 )
 
+// Valid values for --groups-source.
+//
+// GroupsSourceCognitoAPI: callback/connect resolves groups via the Cognito
+// Admin APIs (AdminListGroupsForUser). --groups-claim is accepted but ignored
+// during group resolution.
+//
+// GroupsSourceJWTClaim: callback/connect reads group membership from the
+// top-level claim named by --groups-claim in the ALB-forwarded
+// x-amzn-oidc-data header. Reauth cannot use JWT claims (no fresh JWT is
+// available at CLIENT:REAUTH); operators who need reauth-time group checks
+// must use GroupsSourceCognitoAPI and enable --check-required-group-on-reauth.
+const (
+	GroupsSourceCognitoAPI = "cognito-api"
+	GroupsSourceJWTClaim   = "jwt-claim"
+)
+
+// validGroupsSources lists every accepted value for --groups-source in a
+// deterministic order. Used for validation error messages and tests.
+var validGroupsSources = []string{GroupsSourceCognitoAPI, GroupsSourceJWTClaim}
+
+func isValidGroupsSource(s string) bool {
+	for _, v := range validGroupsSources {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+// LogStartupNotices emits one-time slog notices that are driven by Config flags
+// (management raw log, OIDC debug, local dev mode). Kept as a public helper so
+// the warnings can be asserted in tests without driving the full daemon.
+// Ordering matches cmd/openvpn-auth-daemon/main.go for parity.
+func (c Config) LogStartupNotices() {
+	slog.Info("groups source configured",
+		"source", c.GroupsSource,
+		"claim", c.GroupsClaim,
+		"reauth_group_check", c.CheckRequiredGroupOnReauth,
+		"claim_ignored", c.GroupsSource == GroupsSourceCognitoAPI && c.GroupsClaim != "")
+	if c.ManagementRawLog {
+		slog.Warn("management raw logging enabled; lab/debug only, do not enable in production")
+	}
+	if c.OIDCDebugClaimsUnsafe {
+		// Stable event key per docs/group-claims-debug-plan.md so operators
+		// can alert on unsafe mode.
+		slog.Warn("oidc debug unsafe mode enabled; can expose PII and must not be used in production",
+			"event", "oidc_debug_unsafe_enabled")
+	} else if c.OIDCDebugClaims {
+		slog.Info("oidc debug logging enabled (safe mode)",
+			"event", "oidc_debug_enabled")
+	}
+}
+
 type Config struct {
 	ManagementSocket           string
 	ManagementPasswordFile     string
@@ -31,10 +84,13 @@ type Config struct {
 	CallbackPort int
 
 	// ALB fields
-	CallbackURL         string // --callback-url / VPN_AUTH_CALLBACK_URL
-	ALBARN              string // --alb-arn / VPN_AUTH_ALB_ARN
-	CognitoSkipReauth   bool   // --cognito-skip-reauth / VPN_AUTH_COGNITO_SKIP_REAUTH
-	CognitoGroupsClaims bool   // --cognito-groups-from-claims / VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS
+	CallbackURL       string // --callback-url / VPN_AUTH_CALLBACK_URL
+	ALBARN            string // --alb-arn / VPN_AUTH_ALB_ARN
+	CognitoSkipReauth bool   // --cognito-skip-reauth / VPN_AUTH_COGNITO_SKIP_REAUTH
+
+	// Group membership source (see docs/group-claims-debug-plan.md).
+	GroupsSource string // --groups-source / VPN_AUTH_GROUPS_SOURCE (cognito-api|jwt-claim)
+	GroupsClaim  string // --groups-claim / VPN_AUTH_GROUPS_CLAIM (top-level claim name; required when GroupsSource=jwt-claim)
 
 	// Cognito identity
 	CognitoIssuerURL  string
@@ -54,11 +110,19 @@ type Config struct {
 	// HTML templates
 	TemplatesDir string
 	ServerName   string
+
+	// OIDC debug logging
+	OIDCDebugClaims       bool // --oidc-debug-claims / VPN_AUTH_OIDC_DEBUG_CLAIMS
+	OIDCDebugClaimsUnsafe bool // --oidc-debug-claims-unsafe / VPN_AUTH_OIDC_DEBUG_CLAIMS_UNSAFE
 }
 
 func Parse() (Config, error) {
 	cfg := Config{}
 	var envErrors []string
+
+	if _, ok := os.LookupEnv("VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS"); ok {
+		envErrors = append(envErrors, "VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS is no longer supported; use VPN_AUTH_GROUPS_SOURCE=jwt-claim and VPN_AUTH_GROUPS_CLAIM=<verified x-amzn-oidc-data claim>")
+	}
 
 	flag.StringVar(&cfg.ManagementSocket, "management-socket", getenv("VPN_AUTH_MANAGEMENT_SOCKET", "/run/openvpn/management.sock"), "path to the OpenVPN management unix socket")
 	flag.StringVar(&cfg.ManagementPasswordFile, "management-password-file", getenv("VPN_AUTH_MANAGEMENT_PASSWORD_FILE", "/etc/openvpn/management-pw"), "file containing the management password")
@@ -83,7 +147,8 @@ func Parse() (Config, error) {
 	flag.StringVar(&cfg.CallbackURL, "callback-url", getenv("VPN_AUTH_CALLBACK_URL", ""), "full callback URL including path (e.g. https://vpn-auth.example.com/callback/01/udp); daemon appends ?state=...")
 	flag.StringVar(&cfg.ALBARN, "alb-arn", getenv("VPN_AUTH_ALB_ARN", ""), "ALB ARN for validating the signer field in ALB JWTs (omit to skip JWT signature validation in dev/test)")
 	flag.BoolVar(&cfg.CognitoSkipReauth, "cognito-skip-reauth", getBoolOrCollect("VPN_AUTH_COGNITO_SKIP_REAUTH", false, &envErrors), "skip Cognito AdminGetUser call on CLIENT:REAUTH (dev/test only)")
-	flag.BoolVar(&cfg.CognitoGroupsClaims, "cognito-groups-from-claims", getBoolOrCollect("VPN_AUTH_COGNITO_GROUPS_FROM_CLAIMS", false, &envErrors), "read group membership from ALB JWT claims instead of AdminListGroupsForUser")
+	flag.StringVar(&cfg.GroupsSource, "groups-source", getenv("VPN_AUTH_GROUPS_SOURCE", GroupsSourceCognitoAPI), "source of group membership for --required-group: 'cognito-api' (AdminListGroupsForUser) or 'jwt-claim' (read from --groups-claim in x-amzn-oidc-data). jwt-claim applies to callback/connect only; reauth group checks always use the Cognito Admin API.")
+	flag.StringVar(&cfg.GroupsClaim, "groups-claim", getenv("VPN_AUTH_GROUPS_CLAIM", ""), "top-level claim name in x-amzn-oidc-data that holds group membership; required when --groups-source=jwt-claim (e.g. custom:groups). Ignored for group resolution when --groups-source=cognito-api.")
 
 	// Cognito identity
 	flag.StringVar(&cfg.CognitoIssuerURL, "cognito-issuer-url", getenv("VPN_AUTH_COGNITO_ISSUER_URL", ""), "Cognito issuer URL for JWT validation")
@@ -100,10 +165,19 @@ func Parse() (Config, error) {
 	flag.StringVar(&cfg.TemplatesDir, "templates-dir", getenv("VPN_AUTH_TEMPLATES_DIR", ""), "path to custom HTML templates (overrides built-in)")
 	flag.StringVar(&cfg.ServerName, "server-name", getenv("VPN_AUTH_SERVER_NAME", ""), "human-readable server name exposed to HTML templates")
 
+	// OIDC debug logging
+	flag.BoolVar(&cfg.OIDCDebugClaims, "oidc-debug-claims", getBoolOrCollect("VPN_AUTH_OIDC_DEBUG_CLAIMS", false, &envErrors), "log OIDC header and claim diagnostics for each callback (names, JSON types, lengths; full values only for known group-like claims, capped at 2048 bytes)")
+	flag.BoolVar(&cfg.OIDCDebugClaimsUnsafe, "oidc-debug-claims-unsafe", getBoolOrCollect("VPN_AUTH_OIDC_DEBUG_CLAIMS_UNSAFE", false, &envErrors), "lab/debug only: log full decoded OIDC payloads from x-amzn-oidc-data and x-amzn-oidc-accesstoken; implies --oidc-debug-claims and must not be used in production")
+
 	flag.Parse()
 
 	if len(envErrors) > 0 {
 		return Config{}, fmt.Errorf("invalid environment variables: %s", strings.Join(envErrors, "; "))
+	}
+	// --oidc-debug-claims-unsafe implies --oidc-debug-claims per plan; normalize
+	// before validation so downstream code only has to check one flag.
+	if cfg.OIDCDebugClaimsUnsafe {
+		cfg.OIDCDebugClaims = true
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -112,6 +186,14 @@ func Parse() (Config, error) {
 }
 
 func (c Config) Validate() error {
+	// Normalize GroupsSource first: every validation rule below depends on it,
+	// including the cognito-user-pool-id + required-group check. Parse()
+	// populates a default, but direct struct construction (tests, embedders)
+	// may leave it empty — default to cognito-api before any dependent rule.
+	if c.GroupsSource == "" {
+		c.GroupsSource = GroupsSourceCognitoAPI
+	}
+
 	var problems []string
 	if c.ManagementSocket == "" {
 		problems = append(problems, "management-socket is required")
@@ -136,14 +218,28 @@ func (c Config) Validate() error {
 			problems = append(problems, "cognito-issuer-url is required when alb-arn is set (prevents cross-pool JWT acceptance)")
 		}
 	}
-	if c.CognitoUserPoolID == "" && !c.CognitoGroupsClaims && c.RequiredGroup != "" {
-		problems = append(problems, "cognito-user-pool-id is required when required-group is set without cognito-groups-from-claims")
+	if c.CognitoUserPoolID == "" && c.GroupsSource == GroupsSourceCognitoAPI && c.RequiredGroup != "" {
+		problems = append(problems, "cognito-user-pool-id is required when required-group is set with groups-source=cognito-api")
 	}
 	if c.CognitoUserPoolID == "" && c.RequiredGroup != "" && c.CheckRequiredGroupOnReauth {
 		problems = append(problems, "cognito-user-pool-id is required when check-required-group-on-reauth is set with required-group")
 	}
+	// groups-source / groups-claim rules (see docs/group-claims-debug-plan.md).
+	if !isValidGroupsSource(c.GroupsSource) {
+		problems = append(problems, fmt.Sprintf("groups-source must be one of %v, got %q", validGroupsSources, c.GroupsSource))
+	}
+	if c.GroupsSource == GroupsSourceJWTClaim {
+		if c.CheckRequiredGroupOnReauth {
+			problems = append(problems, "groups-source=jwt-claim cannot be combined with check-required-group-on-reauth=true; use groups-source=cognito-api when reauth-time group revocation is required")
+		}
+		if c.GroupsClaim == "" {
+			problems = append(problems, "groups-claim is required when groups-source=jwt-claim")
+		}
+	}
 	if c.CognitoUserPoolID == "" && c.ALBARN == "" {
-		slog.Info("local dev mode: cognito-user-pool-id and alb-arn not set, using static identity checker")
+		slog.Info("local dev mode: cognito-user-pool-id and alb-arn not set, using static identity checker",
+			"groups_source", c.GroupsSource,
+			"reauth_group_check", c.CheckRequiredGroupOnReauth)
 	}
 	if c.HandWindow <= 0 {
 		problems = append(problems, "hand-window must be > 0")
