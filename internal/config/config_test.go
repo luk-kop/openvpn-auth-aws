@@ -220,38 +220,27 @@ func TestValidate_MaxSessionDurationShorterThanReneg_Warns(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// OIDC debug flags (Step 1 of group-claims-debug-plan)
+// OIDC debug flags
 // ---------------------------------------------------------------------------
 
 func TestValidate_OIDCDebugClaims_Disabled_NoError(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.OIDCDebugClaims = false
-	cfg.OIDCDebugClaimsUnsafe = false
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected no error with OIDC debug flags off, got: %v", err)
 	}
 }
 
-func TestValidate_OIDCDebugClaims_SafeMode_NoError(t *testing.T) {
+func TestValidate_OIDCDebugClaims_Enabled_NoError(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.OIDCDebugClaims = true
-	cfg.OIDCDebugClaimsUnsafe = false
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected no error with safe OIDC debug mode, got: %v", err)
-	}
-}
-
-func TestValidate_OIDCDebugClaims_UnsafeMode_NoError(t *testing.T) {
-	cfg := baseValidConfig()
-	cfg.OIDCDebugClaims = true
-	cfg.OIDCDebugClaimsUnsafe = true
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected no error with unsafe OIDC debug mode, got: %v", err)
+		t.Fatalf("expected no error with OIDC debug mode, got: %v", err)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Groups source / groups claim (Step 3 of group-claims-debug-plan)
+// Groups source / groups claim
 // ---------------------------------------------------------------------------
 
 func TestValidate_GroupsSource_DefaultIsCognitoAPI(t *testing.T) {
@@ -353,7 +342,7 @@ func TestValidate_EmptyGroupsSource_TriggersPoolIDCheck(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Removed environment variables (Step 4 of group-claims-debug-plan)
+// Removed environment variables
 // ---------------------------------------------------------------------------
 
 func TestParse_RemovedCognitoGroupsFromClaimsEnv_FailsLoudly(t *testing.T) {
@@ -377,36 +366,30 @@ func TestParse_RemovedCognitoGroupsFromClaimsEnv_FailsLoudly(t *testing.T) {
 	}
 }
 
-func TestParse_OIDCDebugClaimsUnsafeEnv_ImpliesSafeDebug(t *testing.T) {
+func TestParse_OIDCDebugClaimsEnv_EnablesDebug(t *testing.T) {
 	t.Setenv("VPN_AUTH_CALLBACK_URL", "https://vpn-auth.example.com/callback/01/udp")
-	t.Setenv("VPN_AUTH_OIDC_DEBUG_CLAIMS_UNSAFE", "true")
+	t.Setenv("VPN_AUTH_OIDC_DEBUG_CLAIMS", "true")
 	resetCommandLine(t, "openvpn-auth-daemon")
 
 	cfg, err := Parse()
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if !cfg.OIDCDebugClaimsUnsafe {
-		t.Fatal("expected OIDCDebugClaimsUnsafe=true")
-	}
 	if !cfg.OIDCDebugClaims {
-		t.Fatal("expected unsafe debug env var to imply OIDCDebugClaims=true")
+		t.Fatal("expected OIDCDebugClaims=true")
 	}
 }
 
-func TestParse_OIDCDebugClaimsUnsafeFlag_ImpliesSafeDebug(t *testing.T) {
+func TestParse_OIDCDebugClaimsFlag_EnablesDebug(t *testing.T) {
 	t.Setenv("VPN_AUTH_CALLBACK_URL", "https://vpn-auth.example.com/callback/01/udp")
-	resetCommandLine(t, "openvpn-auth-daemon", "--oidc-debug-claims-unsafe")
+	resetCommandLine(t, "openvpn-auth-daemon", "--oidc-debug-claims")
 
 	cfg, err := Parse()
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if !cfg.OIDCDebugClaimsUnsafe {
-		t.Fatal("expected OIDCDebugClaimsUnsafe=true")
-	}
 	if !cfg.OIDCDebugClaims {
-		t.Fatal("expected unsafe debug flag to imply OIDCDebugClaims=true")
+		t.Fatal("expected OIDCDebugClaims=true")
 	}
 }
 
@@ -458,33 +441,9 @@ func findNoticeRecord(t *testing.T, buf *bytes.Buffer, eventKey string) map[stri
 	return nil
 }
 
-func TestLogStartupNotices_UnsafeEmitsStableEventKey(t *testing.T) {
+func TestLogStartupNotices_OIDCDebugEmitsWarnEvent(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.OIDCDebugClaims = true
-	cfg.OIDCDebugClaimsUnsafe = true
-
-	buf := withCaptureLogger(t, func() {
-		cfg.LogStartupNotices()
-	})
-
-	rec := findNoticeRecord(t, buf, "oidc_debug_unsafe_enabled")
-	if rec == nil {
-		t.Fatal("expected oidc_debug_unsafe_enabled notice record")
-	}
-	if level, _ := rec["level"].(string); level != "WARN" {
-		t.Errorf("expected WARN level for unsafe mode, got %q", level)
-	}
-
-	// Safe-mode notice must not be emitted when unsafe is on (precedence rule).
-	if findNoticeRecord(t, buf, "oidc_debug_enabled") != nil {
-		t.Error("unsafe mode must not additionally emit oidc_debug_enabled")
-	}
-}
-
-func TestLogStartupNotices_SafeModeEmitsInfoEvent(t *testing.T) {
-	cfg := baseValidConfig()
-	cfg.OIDCDebugClaims = true
-	cfg.OIDCDebugClaimsUnsafe = false
 
 	buf := withCaptureLogger(t, func() {
 		cfg.LogStartupNotices()
@@ -492,29 +451,23 @@ func TestLogStartupNotices_SafeModeEmitsInfoEvent(t *testing.T) {
 
 	rec := findNoticeRecord(t, buf, "oidc_debug_enabled")
 	if rec == nil {
-		t.Fatal("expected oidc_debug_enabled notice record in safe mode")
+		t.Fatal("expected oidc_debug_enabled notice record")
 	}
-	if level, _ := rec["level"].(string); level != "INFO" {
-		t.Errorf("expected INFO level for safe mode, got %q", level)
-	}
-	if findNoticeRecord(t, buf, "oidc_debug_unsafe_enabled") != nil {
-		t.Error("safe mode must not emit unsafe-mode event")
+	if level, _ := rec["level"].(string); level != "WARN" {
+		t.Errorf("expected WARN level for OIDC debug mode, got %q", level)
 	}
 }
 
 func TestLogStartupNotices_DebugDisabled_NoEvent(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.OIDCDebugClaims = false
-	cfg.OIDCDebugClaimsUnsafe = false
 
 	buf := withCaptureLogger(t, func() {
 		cfg.LogStartupNotices()
 	})
 
-	for _, key := range []string{"oidc_debug_enabled", "oidc_debug_unsafe_enabled"} {
-		if findNoticeRecord(t, buf, key) != nil {
-			t.Errorf("unexpected %q record when OIDC debug is disabled", key)
-		}
+	if findNoticeRecord(t, buf, "oidc_debug_enabled") != nil {
+		t.Error("unexpected oidc_debug_enabled record when OIDC debug is disabled")
 	}
 }
 

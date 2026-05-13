@@ -132,8 +132,12 @@ openvpn-auth-aws/
 - [Overview](docs/overview.md) — high-level solution flow and documentation entry point
 - [Configuration](docs/configuration.md) — all flags, env vars, logging, EMF metrics
 - [Architecture](docs/architecture.md) — auth flow, ALB JWT validation, healthz, EIP association, session lifecycle
+- [Group Authorization and OIDC Claims](docs/group-authorization.md) — group source modes, claim parsing, OIDC debug logging, and ALB/Cognito scope behavior
+- [Cognito Federation](docs/cognito-federation.md) — external IdP setup, claim mapping, and reauth caveats
 - [ALB Authenticate Users](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-authenticate-users.html) — AWS docs on ALB Cognito authenticate action
 - [Architecture Design](docs/architecture-design.md) — detailed design doc with infrastructure diagrams, instance replacement, local dev setup
+- [Direct Entra OIDC](docs/direct-entra-oidc.md) — possible future ALB `authenticate-oidc` mode without Cognito federation
+- [Entra Graph Reauth](docs/entra-graph-reauth.md) — possible future design for reauth-time group checks through Microsoft Graph
 - [PKI](docs/pki.md) — certificate management with `scripts/pki.sh`
 - [OpenVPN Server](docs/openvpn-server.md) — required directives, verb levels, UDP disconnect behavior, client config
 - [OpenVPN 2.7 Migration Notes](docs/openvpn-2.7-migration.md) — multi-socket lab findings and supervisor/runtime migration plan

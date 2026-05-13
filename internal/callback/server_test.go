@@ -578,6 +578,80 @@ func TestHandleCallback_Success_GroupFromClaims_CustomClaimName(t *testing.T) {
 	}
 }
 
+func TestHandleCallback_Success_GroupFromClaims_BracketedEntraCSVString(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	srv, sessions, sink, _ := newTestServerWithSessions(cfg, nil)
+
+	const requiredGroup = "11111111-2222-3333-4444-555555555555"
+	sid := "bracketed-entra-claim-success-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = requiredGroup
+
+	header := map[string]any{"alg": "none", "kid": "test-kid"}
+	claimsMap := map[string]any{
+		"email":         "user@example.com",
+		"sub":           "sub123",
+		"iss":           "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_test",
+		"exp":           time.Now().Add(5 * time.Minute).Unix(),
+		"custom:groups": "[11111111-2222-3333-4444-555555555555, 66666666-7777-8888-9999-000000000000]",
+	}
+	hBytes, _ := json.Marshal(header)
+	cBytes, _ := json.Marshal(claimsMap)
+	oidcJWT := base64.RawURLEncoding.EncodeToString(hBytes) + "." + base64.RawURLEncoding.EncodeToString(cBytes) + "."
+
+	state := validStateParam(t, sid)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for bracketed Entra CSV claim, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected client-auth decision when bracketed Entra CSV claim grants membership, got %+v", sink.decisions)
+	}
+}
+
+func TestHandleCallback_Success_GroupFromClaims_SingleEntraString(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	srv, sessions, sink, _ := newTestServerWithSessions(cfg, nil)
+
+	const requiredGroup = "11111111-2222-3333-4444-555555555555"
+	sid := "single-entra-claim-success-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = requiredGroup
+
+	header := map[string]any{"alg": "none", "kid": "test-kid"}
+	claimsMap := map[string]any{
+		"email":         "user@example.com",
+		"sub":           "sub123",
+		"iss":           "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_test",
+		"exp":           time.Now().Add(5 * time.Minute).Unix(),
+		"custom:groups": requiredGroup,
+	}
+	hBytes, _ := json.Marshal(header)
+	cBytes, _ := json.Marshal(claimsMap)
+	oidcJWT := base64.RawURLEncoding.EncodeToString(hBytes) + "." + base64.RawURLEncoding.EncodeToString(cBytes) + "."
+
+	state := validStateParam(t, sid)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for single Entra group string claim, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected client-auth decision when single Entra string claim grants membership, got %+v", sink.decisions)
+	}
+}
+
 // Regression guard: a JWT that carries cognito:groups but where --groups-claim
 // points at a different, absent claim must not grant access. Proves the
 // callback honors the configured claim name and does not silently fall back.

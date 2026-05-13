@@ -50,17 +50,6 @@ func findRecord(records []map[string]any, name string) map[string]any {
 	return nil
 }
 
-// findAllClaimRecords returns all claim events for the given event prefix.
-func findAllClaimRecords(records []map[string]any, msg string) []map[string]any {
-	var out []map[string]any
-	for _, r := range records {
-		if r["msg"] == msg {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
 // buildJWT produces a minimal base64url-encoded JWT with the given header and
 // payload and a fake signature segment. Tests use this to avoid pulling in the
 // JWT library for pure logging tests.
@@ -107,12 +96,34 @@ func requestWithHeaders(oidcData, accessToken, identity string) *http.Request {
 	return req
 }
 
+func claimInfoMap(t *testing.T, rec map[string]any) map[string]any {
+	t.Helper()
+	raw, ok := rec["claims"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected claims map in record %+v", rec)
+	}
+	return raw
+}
+
+func claimInfo(t *testing.T, claims map[string]any, name string) map[string]any {
+	t.Helper()
+	raw, ok := claims[name]
+	if !ok {
+		t.Fatalf("expected claim %q in claims map %+v", name, claims)
+	}
+	info, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("expected claim %q info map, got %T", name, raw)
+	}
+	return info
+}
+
 // ---------------------------------------------------------------------------
 // newOIDCDebugLogger
 // ---------------------------------------------------------------------------
 
 func TestNewOIDCDebugLogger_Disabled_ReturnsNil(t *testing.T) {
-	l, err := newOIDCDebugLogger(false, false, "")
+	l, err := newOIDCDebugLogger(false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,24 +134,8 @@ func TestNewOIDCDebugLogger_Disabled_ReturnsNil(t *testing.T) {
 	l.Log(requestWithHeaders("", "", ""), "")
 }
 
-// Defense-in-depth: unsafe implies enabled inside newOIDCDebugLogger itself,
-// not only through config.Parse normalization. Callers that build Config
-// directly (tests, embedders) must still get a working unsafe-mode logger.
-func TestNewOIDCDebugLogger_UnsafeImpliesEnabled(t *testing.T) {
-	l, err := newOIDCDebugLogger(false, true, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if l == nil {
-		t.Fatal("expected non-nil logger when unsafe mode is set even with enabled=false")
-	}
-	if !l.unsafeMode {
-		t.Fatal("expected unsafeMode=true")
-	}
-}
-
 func TestNewOIDCDebugLogger_Enabled_SaltIsRandomAnd32Bytes(t *testing.T) {
-	l1, err := newOIDCDebugLogger(true, false, "")
+	l1, err := newOIDCDebugLogger(true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -151,7 +146,7 @@ func TestNewOIDCDebugLogger_Enabled_SaltIsRandomAnd32Bytes(t *testing.T) {
 		t.Fatalf("expected 32-byte salt, got %d", len(l1.salt))
 	}
 
-	l2, err := newOIDCDebugLogger(true, false, "")
+	l2, err := newOIDCDebugLogger(true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,14 +160,14 @@ func TestNewOIDCDebugLogger_Enabled_SaltIsRandomAnd32Bytes(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHashIdentity_EmptyReturnsEmpty(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true, false, "")
+	l, _ := newOIDCDebugLogger(true)
 	if got := l.hashIdentity(""); got != "" {
 		t.Fatalf("expected empty hash for empty identity, got %q", got)
 	}
 }
 
 func TestHashIdentity_16HexChars(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true, false, "")
+	l, _ := newOIDCDebugLogger(true)
 	got := l.hashIdentity("user-identity")
 	if len(got) != 16 {
 		t.Fatalf("expected 16 hex chars, got %d (%q)", len(got), got)
@@ -185,8 +180,8 @@ func TestHashIdentity_16HexChars(t *testing.T) {
 }
 
 func TestHashIdentity_SaltChangesHash(t *testing.T) {
-	l1, _ := newOIDCDebugLogger(true, false, "")
-	l2, _ := newOIDCDebugLogger(true, false, "")
+	l1, _ := newOIDCDebugLogger(true)
+	l2, _ := newOIDCDebugLogger(true)
 	id := "same-identity"
 	if l1.hashIdentity(id) == l2.hashIdentity(id) {
 		t.Fatal("expected different hashes across instances with different salts")
@@ -194,7 +189,7 @@ func TestHashIdentity_SaltChangesHash(t *testing.T) {
 }
 
 func TestHashIdentity_SameSaltSameInputIsStable(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true, false, "")
+	l, _ := newOIDCDebugLogger(true)
 	id := "stable-identity"
 	first := l.hashIdentity(id)
 	second := l.hashIdentity(id)
@@ -208,7 +203,7 @@ func TestHashIdentity_SameSaltSameInputIsStable(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLog_HeadersEvent_ReportsPresenceAndLengths(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true, false, "")
+	l, _ := newOIDCDebugLogger(true)
 	req := requestWithHeaders(
 		buildJWT(t, map[string]any{"alg": "ES256"}, map[string]any{"email": "u@example.com"}),
 		"",
@@ -238,116 +233,99 @@ func TestLog_HeadersEvent_ReportsPresenceAndLengths(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Log: x-amzn-oidc-data value logging rules
-// ---------------------------------------------------------------------------
-
-func TestLog_SafeMode_LogsOnlyAllowlistAndConfiguredClaimValues(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true, false, "custom:groups")
-	payload := map[string]any{
-		"email":          "u@example.com",
-		"sub":            "abc-123",
-		"cognito:groups": []string{"vpn-users"},
-		"groups":         "members",
-		"roles":          []string{"reader"},
-		"custom:groups":  []string{"vpn-admin"},
-		"extra":          "hidden-value",
-	}
+func TestLog_AggregatedRecordCount_WithDataAndAccessToken(t *testing.T) {
+	l, _ := newOIDCDebugLogger(true)
 	req := requestWithHeaders(
-		buildJWT(t, map[string]any{"alg": "ES256", "kid": "k1", "signer": "arn", "typ": "JWT"}, payload),
-		"",
-		"",
+		buildJWT(t, map[string]any{"alg": "ES256"}, map[string]any{"email": "u@example.com"}),
+		buildJWT(t, map[string]any{"alg": "RS256"}, map[string]any{"scope": "openid"}),
+		"identity-value",
 	)
-
 	buf := withLogger(t, func() {
-		l.Log(req, "sid-allow")
+		l.Log(req, "sid-count")
 	})
 	records := parseLogRecords(t, buf)
-	claims := findAllClaimRecords(records, "oidc_debug_data_claim")
-	if len(claims) != len(payload) {
-		t.Fatalf("expected %d claim records, got %d", len(payload), len(claims))
+	if len(records) != 3 {
+		t.Fatalf("expected exactly 3 debug records, got %d: %+v", len(records), records)
 	}
-
-	withValue := map[string]bool{}
-	withoutValue := map[string]bool{}
-	for _, r := range claims {
-		name, _ := r["name"].(string)
-		if _, ok := r["value"]; ok {
-			withValue[name] = true
-		} else {
-			withoutValue[name] = true
-		}
-	}
-
-	for _, name := range []string{"cognito:groups", "groups", "roles", "custom:groups"} {
-		if !withValue[name] {
-			t.Errorf("expected value to be logged for %q", name)
-		}
-	}
-	for _, name := range []string{"email", "sub", "extra"} {
-		if withValue[name] {
-			t.Errorf("safe mode must not log value for %q", name)
-		}
-		if !withoutValue[name] {
-			t.Errorf("expected claim record for %q without value", name)
+	for _, msg := range []string{"oidc_debug_headers", "oidc_debug_data", "oidc_debug_accesstoken"} {
+		if findRecord(records, msg) == nil {
+			t.Fatalf("expected %s record in %+v", msg, records)
 		}
 	}
 }
 
-func TestLog_UnsafeMode_LogsAllClaimValues(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true, true, "")
-	payload := map[string]any{
-		"email": "u@example.com",
-		"sub":   "abc-123",
-	}
+func TestLog_AggregatedRecordCount_WithoutAccessToken(t *testing.T) {
+	l, _ := newOIDCDebugLogger(true)
 	req := requestWithHeaders(
-		buildJWT(t, map[string]any{"alg": "ES256"}, payload),
+		buildJWT(t, map[string]any{"alg": "ES256"}, map[string]any{"email": "u@example.com"}),
 		"",
-		"",
+		"identity-value",
 	)
 	buf := withLogger(t, func() {
-		l.Log(req, "sid-unsafe")
+		l.Log(req, "sid-count")
 	})
-	claims := findAllClaimRecords(parseLogRecords(t, buf), "oidc_debug_data_claim")
-	if len(claims) != len(payload) {
-		t.Fatalf("expected %d claim records, got %d", len(payload), len(claims))
+	records := parseLogRecords(t, buf)
+	if len(records) != 2 {
+		t.Fatalf("expected exactly 2 debug records, got %d: %+v", len(records), records)
 	}
-	for _, r := range claims {
-		if _, ok := r["value"]; !ok {
-			t.Errorf("unsafe mode: expected value for claim %v", r["name"])
-		}
+	if findRecord(records, "oidc_debug_headers") == nil || findRecord(records, "oidc_debug_data") == nil {
+		t.Fatalf("expected headers and data records, got %+v", records)
+	}
+	if findRecord(records, "oidc_debug_accesstoken") != nil {
+		t.Fatalf("did not expect access-token record, got %+v", records)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Log: x-amzn-oidc-accesstoken
+// Log: claim value logging rules
 // ---------------------------------------------------------------------------
 
-func TestLog_SafeMode_AccessTokenValuesNeverLogged_EvenForGroupLikeNames(t *testing.T) {
-	// Configure --groups-claim so the name appears in both allowlists and the
-	// configured-claim union. Access-token path must still suppress values.
-	l, _ := newOIDCDebugLogger(true, false, "groups")
-	payload := map[string]any{
-		"groups":         []string{"vpn-users"},
-		"cognito:groups": []string{"admin"},
-		"roles":          []string{"reader"},
-		"custom:claim":   "value-that-must-not-appear",
+func TestLog_LogsAllClaimValuesForDataAndAccessToken(t *testing.T) {
+	l, _ := newOIDCDebugLogger(true)
+	oidcPayload := map[string]any{
+		"email":         "u@example.com",
+		"sub":           "abc-123",
+		"custom:groups": []string{"vpn-admin"},
+	}
+	accessPayload := map[string]any{
+		"cognito:groups": []string{"vpn-users"},
+		"scope":          "openid profile",
 	}
 	req := requestWithHeaders(
-		"", // no oidc-data
-		buildJWT(t, map[string]any{"alg": "RS256"}, payload),
+		buildJWT(t, map[string]any{"alg": "ES256", "kid": "k1", "signer": "arn", "typ": "JWT"}, oidcPayload),
+		buildJWT(t, map[string]any{"alg": "RS256"}, accessPayload),
 		"",
 	)
+
 	buf := withLogger(t, func() {
-		l.Log(req, "sid-at")
+		l.Log(req, "sid-values")
 	})
-	claims := findAllClaimRecords(parseLogRecords(t, buf), "oidc_debug_accesstoken_claim")
-	if len(claims) == 0 {
-		t.Fatal("expected access-token claim records")
+	records := parseLogRecords(t, buf)
+	dataRec := findRecord(records, "oidc_debug_data")
+	if dataRec == nil {
+		t.Fatal("expected oidc_debug_data record")
 	}
-	for _, r := range claims {
-		if _, ok := r["value"]; ok {
-			t.Errorf("safe mode must not emit access-token values; got value for %v", r["name"])
+	accessRec := findRecord(records, "oidc_debug_accesstoken")
+	if accessRec == nil {
+		t.Fatal("expected oidc_debug_accesstoken record")
+	}
+
+	dataClaims := claimInfoMap(t, dataRec)
+	if len(dataClaims) != len(oidcPayload) {
+		t.Fatalf("expected %d oidc-data claims, got %d", len(oidcPayload), len(dataClaims))
+	}
+	for name := range oidcPayload {
+		if _, ok := claimInfo(t, dataClaims, name)["value"]; !ok {
+			t.Errorf("expected oidc-data value for claim %q", name)
+		}
+	}
+	accessClaims := claimInfoMap(t, accessRec)
+	if len(accessClaims) != len(accessPayload) {
+		t.Fatalf("expected %d access-token claims, got %d", len(accessPayload), len(accessClaims))
+	}
+	for name := range accessPayload {
+		if _, ok := claimInfo(t, accessClaims, name)["value"]; !ok {
+			t.Errorf("expected access-token value for claim %q", name)
 		}
 	}
 }
@@ -356,17 +334,8 @@ func TestLog_SafeMode_AccessTokenValuesNeverLogged_EvenForGroupLikeNames(t *test
 // Log: raw tokens must not be emitted
 // ---------------------------------------------------------------------------
 
-func TestLog_RawTokensNeverLogged_SafeMode(t *testing.T) {
-	assertNoRawTokens(t, false)
-}
-
-func TestLog_RawTokensNeverLogged_UnsafeMode(t *testing.T) {
-	assertNoRawTokens(t, true)
-}
-
-func assertNoRawTokens(t *testing.T, unsafeMode bool) {
-	t.Helper()
-	l, _ := newOIDCDebugLogger(true, unsafeMode, "")
+func TestLog_RawTokensNeverLogged(t *testing.T) {
+	l, _ := newOIDCDebugLogger(true)
 	oidcData := buildJWT(t,
 		map[string]any{"alg": "ES256", "kid": "k1"},
 		map[string]any{"email": "u@example.com", "cognito:groups": []string{"g1", "g2"}},
@@ -396,7 +365,7 @@ func assertNoRawTokens(t *testing.T, unsafeMode bool) {
 // ---------------------------------------------------------------------------
 
 func TestLog_MalformedJWT_DoesNotPanic(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true, false, "")
+	l, _ := newOIDCDebugLogger(true)
 	req := requestWithHeaders("this.is.not-a-valid-jwt", "also.bad", "id")
 	buf := withLogger(t, func() {
 		l.Log(req, "sid-bad")
@@ -408,13 +377,40 @@ func TestLog_MalformedJWT_DoesNotPanic(t *testing.T) {
 }
 
 func TestLog_NoJWTSegments_EmitsMalformedEvent(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true, false, "")
+	l, _ := newOIDCDebugLogger(true)
 	req := requestWithHeaders("one-segment", "", "")
 	buf := withLogger(t, func() {
 		l.Log(req, "sid-short")
 	})
-	if rec := findRecord(parseLogRecords(t, buf), "oidc_debug_data_malformed"); rec == nil {
-		t.Fatal("expected oidc_debug_data_malformed record")
+	rec := findRecord(parseLogRecords(t, buf), "oidc_debug_data")
+	if rec == nil {
+		t.Fatal("expected oidc_debug_data record")
+	}
+	if val, ok := rec["token_error"].(string); !ok || val == "" {
+		t.Fatalf("expected token_error in malformed token record, got %+v", rec)
+	}
+}
+
+func TestLog_MalformedPayload_EmitsSingleDataRecordWithError(t *testing.T) {
+	l, _ := newOIDCDebugLogger(true)
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","kid":"k1"}`))
+	req := requestWithHeaders(header+".not-valid-base64.", "", "")
+	buf := withLogger(t, func() {
+		l.Log(req, "sid-bad-payload")
+	})
+	records := parseLogRecords(t, buf)
+	if len(records) != 2 {
+		t.Fatalf("expected headers + data records, got %d: %+v", len(records), records)
+	}
+	rec := findRecord(records, "oidc_debug_data")
+	if rec == nil {
+		t.Fatal("expected oidc_debug_data record")
+	}
+	if val, ok := rec["payload_error"].(string); !ok || val == "" {
+		t.Fatalf("expected payload_error in data record, got %+v", rec)
+	}
+	if _, ok := rec["header"].(map[string]any); !ok {
+		t.Fatalf("expected decoded header in data record, got %+v", rec)
 	}
 }
 
@@ -468,7 +464,7 @@ func TestTruncationSuffix_Format(t *testing.T) {
 }
 
 func TestLog_LargeGroupValueIsCappedWithSuffix(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true, false, "")
+	l, _ := newOIDCDebugLogger(true)
 	bigGroup := strings.Repeat("g", oidcDebugValueCap+100)
 	payload := map[string]any{"cognito:groups": bigGroup}
 	req := requestWithHeaders(
@@ -480,12 +476,13 @@ func TestLog_LargeGroupValueIsCappedWithSuffix(t *testing.T) {
 		l.Log(req, "sid-big")
 	})
 	records := parseLogRecords(t, buf)
-	claims := findAllClaimRecords(records, "oidc_debug_data_claim")
-	if len(claims) != 1 {
-		t.Fatalf("expected exactly one claim record, got %d", len(claims))
+	rec := findRecord(records, "oidc_debug_data")
+	if rec == nil {
+		t.Fatal("expected oidc_debug_data record")
 	}
-	rec := claims[0]
-	value, _ := rec["value"].(string)
+	claims := claimInfoMap(t, rec)
+	info := claimInfo(t, claims, "cognito:groups")
+	value, _ := info["value"].(string)
 	// Per plan: the cap applies to the original payload bytes and the suffix is
 	// appended inline after truncation, so the emitted string exceeds the cap
 	// by the suffix length.
@@ -497,7 +494,7 @@ func TestLog_LargeGroupValueIsCappedWithSuffix(t *testing.T) {
 		t.Fatalf("expected value length %d (cap %d + suffix %d), got %d",
 			oidcDebugValueCap+len(expectedSuffix), oidcDebugValueCap, len(expectedSuffix), len(value))
 	}
-	if _, ok := rec["truncated_suffix"]; ok {
+	if _, ok := info["truncated_suffix"]; ok {
 		t.Fatalf("expected no separate truncated_suffix field; suffix is appended inline to value")
 	}
 }
@@ -551,10 +548,7 @@ func TestNilReceiver_LogIsNoOp(t *testing.T) {
 
 var _ = context.Background // keep context import stable for future extensions
 
-// Regression guard (Step 3 review fix #2): NewServer must forward cfg.GroupsClaim
-// into the debug logger so safe mode logs the value of the configured custom
-// group claim alongside the hardcoded allowlist.
-func TestNewServer_WiresGroupsClaimIntoDebugLogger(t *testing.T) {
+func TestNewServer_ConstructsOIDCDebugLogger(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.OIDCDebugClaims = true
 	cfg.GroupsSource = config.GroupsSourceJWTClaim
@@ -571,11 +565,7 @@ func TestNewServer_WiresGroupsClaimIntoDebugLogger(t *testing.T) {
 	if srv.oidcDebug == nil {
 		t.Fatal("expected oidc debug logger to be constructed")
 	}
-	if srv.oidcDebug.configuredGroupsClaim != "custom:groups" {
-		t.Fatalf("expected configured groups claim to be wired through, got %q", srv.oidcDebug.configuredGroupsClaim)
-	}
 
-	// And prove it actually logs the value of the configured claim in safe mode.
 	payload := map[string]any{
 		"email":         "u@example.com",
 		"custom:groups": []string{"vpn-users"},
@@ -588,16 +578,14 @@ func TestNewServer_WiresGroupsClaimIntoDebugLogger(t *testing.T) {
 	buf := withLogger(t, func() {
 		srv.oidcDebug.Log(req, "sid-wire")
 	})
-	claims := findAllClaimRecords(parseLogRecords(t, buf), "oidc_debug_data_claim")
-	var sawCustomValue bool
-	for _, r := range claims {
-		if r["name"] == "custom:groups" {
-			if _, ok := r["value"]; ok {
-				sawCustomValue = true
-			}
-		}
+	rec := findRecord(parseLogRecords(t, buf), "oidc_debug_data")
+	if rec == nil {
+		t.Fatal("expected oidc_debug_data record")
 	}
-	if !sawCustomValue {
-		t.Fatal("expected safe mode to log custom:groups value when it is the configured --groups-claim")
+	claims := claimInfoMap(t, rec)
+	for name := range payload {
+		if _, ok := claimInfo(t, claims, name)["value"]; !ok {
+			t.Fatalf("expected value for claim %q", name)
+		}
 	}
 }

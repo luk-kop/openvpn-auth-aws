@@ -18,7 +18,7 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--cognito-user-pool-id` | `VPN_AUTH_COGNITO_USER_POOL_ID` | — | Cognito User Pool ID |
 | `--cognito-issuer-url` | `VPN_AUTH_COGNITO_ISSUER_URL` | — | Cognito issuer URL for JWT `iss` field validation |
 | `--groups-source` | `VPN_AUTH_GROUPS_SOURCE` | `cognito-api` | Source of group membership for `--required-group`. `cognito-api` uses `AdminListGroupsForUser` (production default). `jwt-claim` reads groups from the claim named by `--groups-claim` in `x-amzn-oidc-data` — callback/connect only. Reauth always uses the Cognito Admin API; `jwt-claim` cannot be combined with `--check-required-group-on-reauth=true`. |
-| `--groups-claim` | `VPN_AUTH_GROUPS_CLAIM` | — | Top-level claim name in `x-amzn-oidc-data` that holds group membership. Required when `--groups-source=jwt-claim`. Accepted but ignored in `cognito-api` mode. Claim names are case-sensitive. The parser accepts JSON arrays, comma-separated strings, JSON arrays encoded as strings, and single strings; see [Group Claim Parser](#group-claim-parser). |
+| `--groups-claim` | `VPN_AUTH_GROUPS_CLAIM` | — | Top-level claim name in `x-amzn-oidc-data` that holds group membership. Required when `--groups-source=jwt-claim`. Accepted but ignored in `cognito-api` mode. Claim names are case-sensitive. The parser accepts JSON arrays, comma-separated strings, bracketed CSV strings, JSON arrays encoded as strings, and single strings; see [Group Claim Parser](#group-claim-parser). |
 | `--cognito-skip-reauth` | `VPN_AUTH_COGNITO_SKIP_REAUTH` | `false` | Skip Cognito `AdminGetUser` call on `CLIENT:REAUTH` (dev/test only) |
 | `--required-group` | `VPN_AUTH_REQUIRED_GROUP` | empty | Required Cognito group for VPN access. Empty disables group enforcement in the daemon; Terraform sets this to `vpn-users` by default. |
 | `--hand-window` | `VPN_AUTH_HAND_WINDOW` | `5m` | OpenVPN `hand-window` — time allowed for the full TLS handshake including auth. Must match the OpenVPN server config |
@@ -35,8 +35,7 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--emf-interval` | `VPN_AUTH_EMF_INTERVAL` | `10s` | Interval for EMF heartbeat metrics (`0` to disable heartbeat only) |
 | `--log-format` | `VPN_AUTH_LOG_FORMAT` | `text` | Log output format: `text` or `json` |
 | `--management-raw-log` | `VPN_AUTH_MANAGEMENT_RAW_LOG` | `false` | Lab/debug only. Logs redacted raw OpenVPN management lines at DEBUG level with `MGMT_RAW` prefix. Do not enable in production. |
-| `--oidc-debug-claims` | `VPN_AUTH_OIDC_DEBUG_CLAIMS` | `false` | Lab/debug only. Logs OIDC header presence, JWT header fields, and per-claim name/type/length for each callback at DEBUG level. Full claim values are logged only for the configured `--groups-claim` and the hardcoded group-like allowlist (`cognito:groups`, `groups`, `roles`), capped at 2048 bytes. Never logs raw JWT strings. |
-| `--oidc-debug-claims-unsafe` | `VPN_AUTH_OIDC_DEBUG_CLAIMS_UNSAFE` | `false` | Lab/debug only. Implies `--oidc-debug-claims` and additionally logs full decoded payloads from `x-amzn-oidc-data` and `x-amzn-oidc-accesstoken` (still capped at 2048 bytes per claim). Can expose PII and access-token claims; do not enable in production. Emits a stable startup warning with `event=oidc_debug_unsafe_enabled`. |
+| `--oidc-debug-claims` | `VPN_AUTH_OIDC_DEBUG_CLAIMS` | `false` | Lab/debug only. Logs OIDC header presence plus aggregated `oidc_debug_data` / `oidc_debug_accesstoken` records with JWT header fields, claim metadata, and capped claim values for both `x-amzn-oidc-data` and `x-amzn-oidc-accesstoken`. Can expose PII and access-token claims; do not enable in production. Never logs raw JWT strings. Emits a stable startup warning with `event=oidc_debug_enabled`. |
 | `--templates-dir` | `VPN_AUTH_TEMPLATES_DIR` | — | Path to custom HTML templates directory. Overrides built-in templates. Must contain both `success.html` and `error.html`. |
 | `--server-name` | `VPN_AUTH_SERVER_NAME` | — | Human-readable server name exposed to HTML templates via `{{ .ServerName }}` |
 | `--instance-id` | `VPN_AUTH_INSTANCE_ID` | `local-dev` | Instance identifier used in EMF metrics |
@@ -72,21 +71,20 @@ The flag affects structured logs only. It does not emit EMF metrics and should s
 
 ### OIDC Debug Claim Logging
 
-`--oidc-debug-claims` and `--oidc-debug-claims-unsafe` produce structured diagnostics for the ALB-forwarded OIDC headers on every callback. They are lab/debug tools and must remain disabled in production.
+`--oidc-debug-claims` produces structured diagnostics for the ALB-forwarded OIDC headers on every callback. It is a lab/debug tool and must remain disabled in production.
 
-Safe mode (`--oidc-debug-claims`) logs:
+When enabled, it logs:
 
 - Whether `x-amzn-oidc-data`, `x-amzn-oidc-accesstoken`, and `x-amzn-oidc-identity` are present, plus their lengths.
 - `x-amzn-oidc-identity` as a salted SHA-256 prefix (first 16 hex characters). The salt is random per daemon startup and kept in memory only, so hashes correlate within one process but never across restarts or instances.
 - JWT header fields (`kid`, `alg`, `signer`, `typ`) from `x-amzn-oidc-data`.
-- Per-claim name, JSON type, and value length for every claim in `x-amzn-oidc-data` and, when the access token looks like a JWT, for every claim in `x-amzn-oidc-accesstoken`.
-- Full (capped) claim values only for the configured `--groups-claim` and the hardcoded allowlist `cognito:groups`, `groups`, `roles` in `x-amzn-oidc-data`. Access-token claim values are never logged in safe mode, including for group-like names.
+- Per-claim name, JSON type, value length, and capped value for every claim in `x-amzn-oidc-data` and, when the access token looks like a JWT, for every claim in `x-amzn-oidc-accesstoken`.
 
-Unsafe mode (`--oidc-debug-claims-unsafe`) additionally logs full decoded payloads for every claim in both headers. Setting only `--oidc-debug-claims-unsafe` is sufficient; it implies `--oidc-debug-claims`. A startup warning with key `event=oidc_debug_unsafe_enabled` is emitted so operators can alert on accidental enablement.
+The daemon emits a startup warning with key `event=oidc_debug_enabled` when this mode is enabled so operators can alert on accidental enablement.
 
 Value truncation uses a 2048-byte cap measured against the original payload bytes. When a value is truncated, the suffix `<truncated,total_bytes=X>` is appended inline to the logged value, so the emitted string can exceed 2048 bytes by the suffix length.
 
-Neither mode logs raw JWT strings, raw access-token strings, or the raw `x-amzn-oidc-identity` value.
+This mode never logs raw JWT strings, raw access-token strings, or the raw `x-amzn-oidc-identity` value.
 
 ### Group Claim Parser
 
@@ -94,7 +92,7 @@ When `--groups-source=jwt-claim` is set, the daemon reads the top-level claim na
 
 1. **JSON array of strings** — keep each string element, trim whitespace, drop empty results. Non-string elements are ignored.
 2. **String that parses as a valid JSON array** — parse it and apply the array rules.
-3. **String starting with `[` and ending with `]` that is not a valid JSON array** — reject as no groups; do not fall through to CSV parsing. Operators must fix the IdP/Cognito mapping upstream.
+3. **String starting with `[` and ending with `]` that is not a valid JSON array and contains a comma inside the brackets** — compatibility fallback for observed Cognito/Entra mappings with multiple groups. Remove the outer brackets, split the inner content on `,`, trim each element, and drop empty results. If there is no comma, or if every element is empty after trimming, return no groups.
 4. **String containing commas** — split on `,` and trim each element. If every element is empty after trimming, return no groups.
 5. **Non-empty string** — treat as a single group name.
 6. **Anything else** (missing, null, bool, number, object, empty or whitespace-only string) — no groups.
@@ -107,7 +105,9 @@ Notes:
 - Claim lookup is top-level only. A value like `--groups-claim=realm_access.roles` means a literal top-level claim named `realm_access.roles`; dotted-path lookup is not supported.
 - Group comparison is exact and case-sensitive.
 - If the configured claim is absent while `--required-group` is set, the daemon denies with the reason `group claim not present` and the metric label `group_denied`.
-- If group names can contain commas, the claim value must be a JSON array. CSV cannot distinguish one group named `foo,bar` from two groups named `foo` and `bar`.
+- `--required-group` must be set to the exact value observed in the claim. For Entra groups synchronized from AD DS, Cognito/Entra mappings can emit UUID/object-id-like values instead of group display names. Cloud-only Entra groups may emit display names, but do not assume that; verify with `--oidc-debug-claims`.
+- In observed Cognito/Entra mappings, multiple groups were emitted as a bracketed CSV string such as `"[uuid1, uuid2]"`, while a single group was emitted as a plain string such as `"uuid1"`.
+- If group names can contain commas, the claim value must be a JSON array. CSV and bracketed CSV cannot distinguish one group named `foo,bar` from two groups named `foo` and `bar`.
 
 Before relying on `--groups-source=jwt-claim` in production, enable `--oidc-debug-claims`, complete one real browser callback, and verify the claim name and value shape in `x-amzn-oidc-data`. ALB populates that header from Cognito's userInfo endpoint, not the ID token, so native Cognito `cognito:groups` is typically not present unless a pre-token-generation Lambda or IdP/Cognito mapping explicitly adds a userInfo-visible claim.
 

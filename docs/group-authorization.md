@@ -76,6 +76,15 @@ attribute, verify it appears in `x-amzn-oidc-data`, and then set:
 --groups-claim=custom:groups
 ```
 
+Set `--required-group` to the exact value observed in the configured claim. For
+Entra groups synchronized from AD DS, Cognito/Entra mappings can emit
+UUID/object-id-like values instead of group display names. Cloud-only Entra
+groups may emit display names, but do not configure from the portal display name
+unless `--oidc-debug-claims` confirms that exact value appears in the claim.
+In observed Cognito/Entra mappings, multiple groups were emitted as a bracketed
+CSV string such as `"[uuid1, uuid2]"`, while a single group was emitted as a
+plain string such as `"uuid1"`.
+
 ## Group Claim Parser
 
 When `--groups-source=jwt-claim` is enabled, the configured claim is parsed as a
@@ -85,7 +94,11 @@ list of group names using these rules:
    Non-string elements are ignored.
 2. String that parses as a valid JSON array: parse it and apply the array rules.
 3. String starting with `[` and ending with `]` that is not a valid JSON array:
-   reject as no groups. It does not fall through to CSV parsing.
+   compatibility fallback for observed Cognito/Entra mappings with multiple
+   groups, only when the inner content contains a comma. Remove the outer
+   brackets, split the inner content on `,`, trim each element, and drop empty
+   results. If there is no comma, or if every element is empty after trimming,
+   return no groups.
 4. String containing commas: split on `,`, trim each element, and drop empty
    results. If every element is empty after trimming, return no groups.
 5. Non-empty string: treat as one group name.
@@ -113,27 +126,34 @@ Examples:
 { "groups": "vpn-users" }
 ```
 
-The non-JSON shape `"[vpn-users, admins]"` is rejected. If group names can
-contain commas, the claim must be a JSON array because CSV cannot distinguish
-one group named `foo,bar` from two groups named `foo` and `bar`.
+```json
+{ "groups": "[vpn-users, admins]" }
+```
+
+The bracketed CSV string shape is a compatibility path for multi-group mappings
+observed in the field; a single group should appear as a plain string such as
+`"vpn-users"`, not `"[vpn-users]"`. JSON arrays and JSON-array-as-string values
+are still preferred. If group names can contain commas, the claim must be a JSON
+array because CSV and bracketed CSV cannot distinguish one group named `foo,bar`
+from two groups named `foo` and `bar`.
 
 ## OIDC Debug Claims
 
 `--oidc-debug-claims` is a controlled diagnostic mode for real ALB/Cognito/IdP
-integrations. It logs structured metadata about OIDC headers on every callback.
-Keep it disabled outside investigations.
+integrations. It logs structured metadata and capped claim values from OIDC
+headers on every callback. Keep it disabled outside investigations.
 
-Safe mode logs:
+When enabled, it logs:
 
 - Whether `x-amzn-oidc-data`, `x-amzn-oidc-accesstoken`, and
   `x-amzn-oidc-identity` are present, plus their lengths.
-- `x-amzn-oidc-data` JWT header fields `kid`, `alg`, `signer`, and `typ` when
-  present.
-- Claim names, JSON types, and value lengths.
-- Full capped values only for the configured `--groups-claim` plus the
-  group-like allowlist: `cognito:groups`, `groups`, and `roles`.
-- Access-token claim names and types when the access token looks like a JWT.
-  Safe mode never logs access-token claim values, including group-like values.
+- One `oidc_debug_data` record for `x-amzn-oidc-data`, with JWT header fields
+  `kid`, `alg`, `signer`, and `typ` when present, plus a `claims` map keyed by
+  claim name. Each claim contains JSON `type`, raw value `len`, and capped
+  `value`.
+- One `oidc_debug_accesstoken` record when the access token looks like a JWT,
+  with header metadata and a `claims` map. Each claim contains JSON `type`, raw
+  value `len`, and capped `value`.
 - `x-amzn-oidc-identity` as a salted SHA-256 prefix, not as the raw value. The
   salt is generated once per daemon startup and kept in memory only, so the
   same identity yields a stable hash within one daemon process but a different
@@ -144,13 +164,20 @@ Safe mode logs:
 Values are capped at 2048 bytes. Truncated values get the suffix
 `<truncated,total_bytes=X>` appended inline.
 
-Safe mode never logs raw JWT strings, raw access-token strings, cookies,
-authorization codes, or secrets.
+Normal debug output emits at most three records per callback:
 
-`--oidc-debug-claims-unsafe` implies `--oidc-debug-claims` and logs full decoded
-payload values, still capped and still without raw token strings. It can expose
-PII and must not be enabled in production. The daemon emits a startup warning
-with `event=oidc_debug_unsafe_enabled` when unsafe mode is enabled.
+- `oidc_debug_headers`
+- `oidc_debug_data`
+- `oidc_debug_accesstoken`
+
+Malformed JWTs still use the token-level `oidc_debug_data` or
+`oidc_debug_accesstoken` record with an error field such as `token_error`,
+`header_error`, or `payload_error`.
+
+OIDC debug logging never logs raw JWT strings, raw access-token strings,
+cookies, authorization codes, or secrets. It can expose PII and access-token
+claims, so it must not be enabled in production. The daemon emits a startup
+warning with `event=oidc_debug_enabled` when this mode is enabled.
 
 OIDC debug logging has no rate limit by design.
 

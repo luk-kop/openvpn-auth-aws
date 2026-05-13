@@ -68,8 +68,8 @@ type Server struct {
 	identity GroupsChecker
 	tmpl     *template.Template
 
-	// oidcDebug is non-nil when --oidc-debug-claims or --oidc-debug-claims-unsafe
-	// is enabled. Calls to Log on a nil receiver are no-ops.
+	// oidcDebug is non-nil when --oidc-debug-claims is enabled. Calls to Log
+	// on a nil receiver are no-ops.
 	oidcDebug *oidcDebugLogger
 
 	// ALB validation
@@ -104,7 +104,7 @@ func NewServer(
 	if err != nil {
 		return nil, fmt.Errorf("callback server: %w", err)
 	}
-	debugLogger, err := newOIDCDebugLogger(cfg.OIDCDebugClaims || cfg.OIDCDebugClaimsUnsafe, cfg.OIDCDebugClaimsUnsafe, cfg.GroupsClaim)
+	debugLogger, err := newOIDCDebugLogger(cfg.OIDCDebugClaims)
 	if err != nil {
 		return nil, fmt.Errorf("callback server: %w", err)
 	}
@@ -499,7 +499,7 @@ func parseJWTClaimsUnsafe(tokenStr, groupsClaim string) (auth.ALBClaims, []strin
 }
 
 // extractGroupsFromRaw reads a group list from the claim named by claimName
-// using the flexible parser in parseGroupsClaim (see docs/group-claims-debug-plan.md).
+// using the flexible parser in parseGroupsClaim (see docs/group-authorization.md).
 // Returns nil when claimName is empty or the claim is missing.
 func extractGroupsFromRaw(raw map[string]interface{}, claimName string) ([]string, bool) {
 	if claimName == "" {

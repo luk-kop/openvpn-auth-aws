@@ -20,7 +20,7 @@ func mustUnmarshal(t *testing.T, s string) any {
 
 // TestParseGroupsClaim_AllRules is the primary coverage grid for the parser.
 // Each row captures a claim value as it would appear after JSON decoding and
-// the expected parse result. Rule numbers refer to docs/group-claims-debug-plan.md.
+// the expected parse result. Rule numbers refer to docs/group-authorization.md.
 func TestParseGroupsClaim_AllRules(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -71,31 +71,41 @@ func TestParseGroupsClaim_AllRules(t *testing.T) {
 			want:  []string{"xxx", "yyy"},
 		},
 
-		// Rule 3: bracketed but not valid JSON array → no groups.
+		// Rule 3: bracketed non-JSON compatibility format.
 		{
-			name:  "rule3/bracketed_non_json_no_commas",
+			name:  "rule3/bracketed_non_json_no_commas_returns_nil",
 			value: `[xxx yyy]`,
 			want:  nil,
 		},
 		{
-			name:  "rule3/bracketed_non_json_with_commas",
+			name:  "rule3/bracketed_csv_no_spaces",
 			value: `[a,b]`,
-			want:  nil,
+			want:  []string{"a", "b"},
 		},
 		{
-			name:  "rule3/bracketed_non_json_with_commas_and_spaces",
+			name:  "rule3/bracketed_csv_with_spaces",
 			value: `[a, b]`,
-			want:  nil,
+			want:  []string{"a", "b"},
 		},
 		{
-			name:  "rule3/bracketed_non_json_with_surrounding_whitespace",
+			name:  "rule3/bracketed_csv_with_surrounding_whitespace",
 			value: `  [a,b]  `,
-			want:  nil,
+			want:  []string{"a", "b"},
 		},
 		{
 			name:  "rule3/bracketed_empty_is_empty_array",
 			value: `[]`,
 			want:  nil,
+		},
+		{
+			name:  "rule3/bracketed_csv_only_empty_elements_returns_nil",
+			value: `[,]`,
+			want:  nil,
+		},
+		{
+			name:  "rule3/bracketed_csv_empty_elements_dropped",
+			value: `[a,, b, ]`,
+			want:  []string{"a", "b"},
 		},
 
 		// Rule 4: comma-separated string.
@@ -294,16 +304,16 @@ func TestExtractGroupsFromRaw_JSONArrayAsString(t *testing.T) {
 	}
 }
 
-// TestExtractGroupsFromRaw_BracketedNonJSONRejected documents that the
-// non-standard [a,b] shape is rejected per the plan. Operators see this via
-// OIDC debug logging and must fix the IdP/Cognito mapping upstream.
-func TestExtractGroupsFromRaw_BracketedNonJSONRejected(t *testing.T) {
+// TestExtractGroupsFromRaw_BracketedCSVClaim documents the compatibility
+// format observed in Cognito/Entra mappings.
+func TestExtractGroupsFromRaw_BracketedCSVClaim(t *testing.T) {
 	raw := map[string]any{"custom:groups": "[a,b]"}
 	got, present := extractGroupsFromRaw(raw, "custom:groups")
 	if !present {
 		t.Fatal("expected custom:groups claim to be present")
 	}
-	if got != nil {
-		t.Fatalf("expected nil for [a,b] bracketed non-JSON string, got %#v", got)
+	want := []string{"a", "b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("extractGroupsFromRaw bracketed CSV claim = %#v, want %#v", got, want)
 	}
 }
