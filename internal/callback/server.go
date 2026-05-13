@@ -104,7 +104,7 @@ func NewServer(
 	if err != nil {
 		return nil, fmt.Errorf("callback server: %w", err)
 	}
-	debugLogger, err := newOIDCDebugLogger(cfg.OIDCDebugClaims)
+	debugLogger, err := newOIDCDebugLogger(cfg.OIDCDebugClaims, cfg.LogFormat)
 	if err != nil {
 		return nil, fmt.Errorf("callback server: %w", err)
 	}
@@ -550,12 +550,24 @@ func extractALBClaims(mc *jwt.MapClaims) (auth.ALBClaims, error) {
 func (s *Server) checkGroup(ctx context.Context, sess *auth.PendingSession, claims albJWTClaims) (bool, error) {
 	if s.cfg.GroupsSource == config.GroupsSourceJWTClaim {
 		// Read groups directly from JWT claims.
+		matched := false
 		for _, g := range claims.Groups {
 			if g == sess.RequiredGroup {
-				return true, nil
+				matched = true
+				break
 			}
 		}
-		return false, nil
+		if s.oidcDebug != nil {
+			slog.Debug("callback: jwt claim group check",
+				"sid", sess.SessionID,
+				"groups_source", s.cfg.GroupsSource,
+				"claim", s.cfg.GroupsClaim,
+				"claim_present", claims.GroupsClaimPresent,
+				"groups_count", len(claims.Groups),
+				"required_group_hash", s.oidcDebug.hashValue(sess.RequiredGroup),
+				"matched", matched)
+		}
+		return matched, nil
 	}
 
 	if s.identity == nil {

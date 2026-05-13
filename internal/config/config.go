@@ -106,6 +106,9 @@ type Config struct {
 	TemplatesDir string
 	ServerName   string
 
+	// Process metadata
+	ShowVersion bool // --version
+
 	// OIDC debug logging
 	OIDCDebugClaims bool // --oidc-debug-claims / VPN_AUTH_OIDC_DEBUG_CLAIMS
 }
@@ -158,11 +161,16 @@ func Parse() (Config, error) {
 	flag.DurationVar(&cfg.MaxSessionDuration, "max-session-duration", getDurationOrCollect("VPN_AUTH_MAX_SESSION_DURATION", 0, &envErrors), "maximum VPN session duration; 0 to disable (e.g. 8h, 10h, 12h)")
 	flag.StringVar(&cfg.TemplatesDir, "templates-dir", getenv("VPN_AUTH_TEMPLATES_DIR", ""), "path to custom HTML templates (overrides built-in)")
 	flag.StringVar(&cfg.ServerName, "server-name", getenv("VPN_AUTH_SERVER_NAME", ""), "human-readable server name exposed to HTML templates")
+	flag.BoolVar(&cfg.ShowVersion, "version", false, "print version and exit")
 
 	// OIDC debug logging
 	flag.BoolVar(&cfg.OIDCDebugClaims, "oidc-debug-claims", getBoolOrCollect("VPN_AUTH_OIDC_DEBUG_CLAIMS", false, &envErrors), "lab/debug only: log OIDC header and claim diagnostics for each callback, including capped claim values from x-amzn-oidc-data and x-amzn-oidc-accesstoken; never logs raw JWT strings")
 
 	flag.Parse()
+
+	if cfg.ShowVersion {
+		return cfg, nil
+	}
 
 	if len(envErrors) > 0 {
 		return Config{}, fmt.Errorf("invalid environment variables: %s", strings.Join(envErrors, "; "))

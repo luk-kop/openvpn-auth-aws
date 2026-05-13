@@ -123,7 +123,7 @@ func claimInfo(t *testing.T, claims map[string]any, name string) map[string]any 
 // ---------------------------------------------------------------------------
 
 func TestNewOIDCDebugLogger_Disabled_ReturnsNil(t *testing.T) {
-	l, err := newOIDCDebugLogger(false)
+	l, err := newOIDCDebugLogger(false, "json")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestNewOIDCDebugLogger_Disabled_ReturnsNil(t *testing.T) {
 }
 
 func TestNewOIDCDebugLogger_Enabled_SaltIsRandomAnd32Bytes(t *testing.T) {
-	l1, err := newOIDCDebugLogger(true)
+	l1, err := newOIDCDebugLogger(true, "json")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestNewOIDCDebugLogger_Enabled_SaltIsRandomAnd32Bytes(t *testing.T) {
 		t.Fatalf("expected 32-byte salt, got %d", len(l1.salt))
 	}
 
-	l2, err := newOIDCDebugLogger(true)
+	l2, err := newOIDCDebugLogger(true, "json")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,14 +160,14 @@ func TestNewOIDCDebugLogger_Enabled_SaltIsRandomAnd32Bytes(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHashIdentity_EmptyReturnsEmpty(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	if got := l.hashIdentity(""); got != "" {
 		t.Fatalf("expected empty hash for empty identity, got %q", got)
 	}
 }
 
 func TestHashIdentity_16HexChars(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	got := l.hashIdentity("user-identity")
 	if len(got) != 16 {
 		t.Fatalf("expected 16 hex chars, got %d (%q)", len(got), got)
@@ -180,8 +180,8 @@ func TestHashIdentity_16HexChars(t *testing.T) {
 }
 
 func TestHashIdentity_SaltChangesHash(t *testing.T) {
-	l1, _ := newOIDCDebugLogger(true)
-	l2, _ := newOIDCDebugLogger(true)
+	l1, _ := newOIDCDebugLogger(true, "json")
+	l2, _ := newOIDCDebugLogger(true, "json")
 	id := "same-identity"
 	if l1.hashIdentity(id) == l2.hashIdentity(id) {
 		t.Fatal("expected different hashes across instances with different salts")
@@ -189,7 +189,7 @@ func TestHashIdentity_SaltChangesHash(t *testing.T) {
 }
 
 func TestHashIdentity_SameSaltSameInputIsStable(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	id := "stable-identity"
 	first := l.hashIdentity(id)
 	second := l.hashIdentity(id)
@@ -203,7 +203,7 @@ func TestHashIdentity_SameSaltSameInputIsStable(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLog_HeadersEvent_ReportsPresenceAndLengths(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	req := requestWithHeaders(
 		buildJWT(t, map[string]any{"alg": "ES256"}, map[string]any{"email": "u@example.com"}),
 		"",
@@ -234,7 +234,7 @@ func TestLog_HeadersEvent_ReportsPresenceAndLengths(t *testing.T) {
 }
 
 func TestLog_AggregatedRecordCount_WithDataAndAccessToken(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	req := requestWithHeaders(
 		buildJWT(t, map[string]any{"alg": "ES256"}, map[string]any{"email": "u@example.com"}),
 		buildJWT(t, map[string]any{"alg": "RS256"}, map[string]any{"scope": "openid"}),
@@ -255,7 +255,7 @@ func TestLog_AggregatedRecordCount_WithDataAndAccessToken(t *testing.T) {
 }
 
 func TestLog_AggregatedRecordCount_WithoutAccessToken(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	req := requestWithHeaders(
 		buildJWT(t, map[string]any{"alg": "ES256"}, map[string]any{"email": "u@example.com"}),
 		"",
@@ -281,7 +281,7 @@ func TestLog_AggregatedRecordCount_WithoutAccessToken(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLog_LogsAllClaimValuesForDataAndAccessToken(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	oidcPayload := map[string]any{
 		"email":         "u@example.com",
 		"sub":           "abc-123",
@@ -330,12 +330,64 @@ func TestLog_LogsAllClaimValuesForDataAndAccessToken(t *testing.T) {
 	}
 }
 
+func TestLog_TextFormatEmitsFlatClaimRecords(t *testing.T) {
+	l, _ := newOIDCDebugLogger(true, "text")
+	req := requestWithHeaders(
+		buildJWT(t,
+			map[string]any{"alg": "ES256", "kid": "k1", "signer": "arn", "typ": "JWT"},
+			map[string]any{
+				"email":         "u@example.com",
+				"sub":           "abc-123",
+				"custom:groups": "[g1, g2]",
+			}),
+		"",
+		"",
+	)
+
+	buf := withLogger(t, func() {
+		l.Log(req, "sid-flat")
+	})
+	records := parseLogRecords(t, buf)
+	if findRecord(records, "oidc_debug_data") != nil {
+		t.Fatalf("text format must not emit aggregate claims record: %+v", records)
+	}
+	header := findRecord(records, "oidc_debug_data_header")
+	if header == nil {
+		t.Fatalf("expected flat header record, got %+v", records)
+	}
+	if header["header_alg"] != "ES256" || header["header_kid"] != "k1" || header["header_typ"] != "JWT" {
+		t.Fatalf("unexpected flat header fields: %+v", header)
+	}
+	claim := findClaimRecord(records, "custom:groups")
+	if claim == nil {
+		t.Fatalf("expected flat custom:groups claim record, got %+v", records)
+	}
+	if claim["type"] != "string" || claim["len"] != float64(10) || claim["value"] != "\"[g1, g2]\"" {
+		t.Fatalf("unexpected flat claim fields: %+v", claim)
+	}
+	for _, rec := range records {
+		if _, ok := rec["claims"]; ok {
+			t.Fatalf("text format emitted nested claims field: %+v", rec)
+		}
+	}
+}
+
+func findClaimRecord(records []map[string]any, name string) map[string]any {
+	for _, r := range records {
+		msg, _ := r["msg"].(string)
+		if strings.HasSuffix(msg, "_claim") && r["name"] == name {
+			return r
+		}
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Log: raw tokens must not be emitted
 // ---------------------------------------------------------------------------
 
 func TestLog_RawTokensNeverLogged(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	oidcData := buildJWT(t,
 		map[string]any{"alg": "ES256", "kid": "k1"},
 		map[string]any{"email": "u@example.com", "cognito:groups": []string{"g1", "g2"}},
@@ -365,7 +417,7 @@ func TestLog_RawTokensNeverLogged(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLog_MalformedJWT_DoesNotPanic(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	req := requestWithHeaders("this.is.not-a-valid-jwt", "also.bad", "id")
 	buf := withLogger(t, func() {
 		l.Log(req, "sid-bad")
@@ -377,7 +429,7 @@ func TestLog_MalformedJWT_DoesNotPanic(t *testing.T) {
 }
 
 func TestLog_NoJWTSegments_EmitsMalformedEvent(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	req := requestWithHeaders("one-segment", "", "")
 	buf := withLogger(t, func() {
 		l.Log(req, "sid-short")
@@ -392,7 +444,7 @@ func TestLog_NoJWTSegments_EmitsMalformedEvent(t *testing.T) {
 }
 
 func TestLog_MalformedPayload_EmitsSingleDataRecordWithError(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","kid":"k1"}`))
 	req := requestWithHeaders(header+".not-valid-base64.", "", "")
 	buf := withLogger(t, func() {
@@ -464,7 +516,7 @@ func TestTruncationSuffix_Format(t *testing.T) {
 }
 
 func TestLog_LargeGroupValueIsCappedWithSuffix(t *testing.T) {
-	l, _ := newOIDCDebugLogger(true)
+	l, _ := newOIDCDebugLogger(true, "json")
 	bigGroup := strings.Repeat("g", oidcDebugValueCap+100)
 	payload := map[string]any{"cognito:groups": bigGroup}
 	req := requestWithHeaders(
@@ -551,6 +603,7 @@ var _ = context.Background // keep context import stable for future extensions
 func TestNewServer_ConstructsOIDCDebugLogger(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.OIDCDebugClaims = true
+	cfg.LogFormat = "json"
 	cfg.GroupsSource = config.GroupsSourceJWTClaim
 	cfg.GroupsClaim = "custom:groups"
 

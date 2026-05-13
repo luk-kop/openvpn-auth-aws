@@ -366,6 +366,18 @@ func TestParse_RemovedCognitoGroupsFromClaimsEnv_FailsLoudly(t *testing.T) {
 	}
 }
 
+func TestParse_VersionFlagBypassesRuntimeValidation(t *testing.T) {
+	resetCommandLine(t, "openvpn-auth-daemon", "--version")
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.ShowVersion {
+		t.Fatal("expected ShowVersion=true")
+	}
+}
+
 func TestParse_OIDCDebugClaimsEnv_EnablesDebug(t *testing.T) {
 	t.Setenv("VPN_AUTH_CALLBACK_URL", "https://vpn-auth.example.com/callback/01/udp")
 	t.Setenv("VPN_AUTH_OIDC_DEBUG_CLAIMS", "true")

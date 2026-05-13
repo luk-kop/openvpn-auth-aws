@@ -10,7 +10,12 @@ RELEASE_TMP := $(BINDIR)/release
 GO_BUILD_CACHE := $(CURDIR)/.cache/go-build
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 VERSION_NO_V := $(VERSION:v%=%)
-LDFLAGS := -s -w
+REVISION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+LDFLAGS := -s -w \
+	-X 'main.version=$(VERSION)' \
+	-X 'main.revision=$(REVISION)' \
+	-X 'main.buildDate=$(BUILD_DATE)'
 
 # Unit tests (fast, no AWS)
 test:
@@ -119,7 +124,7 @@ verify-multisocket:
 
 # Build all binaries
 build:
-	go build -o openvpn-auth-daemon ./cmd/openvpn-auth-daemon
+	go build -ldflags "$(LDFLAGS)" -o openvpn-auth-daemon ./cmd/openvpn-auth-daemon
 	go build -o mgmt-mock ./cmd/mgmt-mock
 	go build -o alb-mock ./cmd/alb-mock
 

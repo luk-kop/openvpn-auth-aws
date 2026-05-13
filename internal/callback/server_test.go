@@ -615,6 +615,65 @@ func TestHandleCallback_Success_GroupFromClaims_BracketedEntraCSVString(t *testi
 	}
 }
 
+func TestCheckGroup_JWTClaimEmitsDebugDiagnostic(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	l, err := newOIDCDebugLogger(true, "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		cfg:       cfg,
+		oidcDebug: l,
+	}
+	sess := &auth.PendingSession{
+		SessionID:     "diagnostic-sid",
+		RequiredGroup: "11111111-2222-3333-4444-555555555555",
+	}
+	claims := albJWTClaims{
+		Groups:             []string{"11111111-2222-3333-4444-555555555555", "66666666-7777-8888-9999-000000000000"},
+		GroupsClaimPresent: true,
+	}
+
+	buf := withLogger(t, func() {
+		inGroup, err := srv.checkGroup(context.Background(), sess, claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !inGroup {
+			t.Fatal("expected group match")
+		}
+	})
+
+	rec := findRecord(parseLogRecords(t, buf), "callback: jwt claim group check")
+	if rec == nil {
+		t.Fatal("expected jwt claim group check diagnostic")
+	}
+	if rec["groups_source"] != config.GroupsSourceJWTClaim {
+		t.Fatalf("groups_source = %v, want %q", rec["groups_source"], config.GroupsSourceJWTClaim)
+	}
+	if rec["claim"] != "custom:groups" {
+		t.Fatalf("claim = %v, want custom:groups", rec["claim"])
+	}
+	if rec["claim_present"] != true {
+		t.Fatalf("claim_present = %v, want true", rec["claim_present"])
+	}
+	if rec["groups_count"] != float64(2) {
+		t.Fatalf("groups_count = %v, want 2", rec["groups_count"])
+	}
+	if rec["matched"] != true {
+		t.Fatalf("matched = %v, want true", rec["matched"])
+	}
+	hash, _ := rec["required_group_hash"].(string)
+	if len(hash) != oidcIdentityHashHexLen {
+		t.Fatalf("required_group_hash length = %d, want %d", len(hash), oidcIdentityHashHexLen)
+	}
+	if strings.Contains(buf.String(), sess.RequiredGroup) {
+		t.Fatal("diagnostic log leaked raw required group")
+	}
+}
+
 func TestHandleCallback_Success_GroupFromClaims_SingleEntraString(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.GroupsSource = config.GroupsSourceJWTClaim

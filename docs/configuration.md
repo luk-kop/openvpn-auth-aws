@@ -35,9 +35,10 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--emf-interval` | `VPN_AUTH_EMF_INTERVAL` | `10s` | Interval for EMF heartbeat metrics (`0` to disable heartbeat only) |
 | `--log-format` | `VPN_AUTH_LOG_FORMAT` | `text` | Log output format: `text` or `json` |
 | `--management-raw-log` | `VPN_AUTH_MANAGEMENT_RAW_LOG` | `false` | Lab/debug only. Logs redacted raw OpenVPN management lines at DEBUG level with `MGMT_RAW` prefix. Do not enable in production. |
-| `--oidc-debug-claims` | `VPN_AUTH_OIDC_DEBUG_CLAIMS` | `false` | Lab/debug only. Logs OIDC header presence plus aggregated `oidc_debug_data` / `oidc_debug_accesstoken` records with JWT header fields, claim metadata, and capped claim values for both `x-amzn-oidc-data` and `x-amzn-oidc-accesstoken`. Can expose PII and access-token claims; do not enable in production. Never logs raw JWT strings. Emits a stable startup warning with `event=oidc_debug_enabled`. |
+| `--oidc-debug-claims` | `VPN_AUTH_OIDC_DEBUG_CLAIMS` | `false` | Lab/debug only. Logs OIDC header presence plus JWT header fields, claim metadata, and capped claim values for both `x-amzn-oidc-data` and `x-amzn-oidc-accesstoken`. With `--log-format=json`, claim diagnostics are aggregated in `oidc_debug_data` / `oidc_debug_accesstoken`; with `--log-format=text`, claim diagnostics are emitted as flat `*_header` / `*_claim` records to keep journal output readable. Can expose PII and access-token claims; do not enable in production. Never logs raw JWT strings. Emits a stable startup warning with `event=oidc_debug_enabled`. |
 | `--templates-dir` | `VPN_AUTH_TEMPLATES_DIR` | — | Path to custom HTML templates directory. Overrides built-in templates. Must contain both `success.html` and `error.html`. |
 | `--server-name` | `VPN_AUTH_SERVER_NAME` | — | Human-readable server name exposed to HTML templates via `{{ .ServerName }}` |
+| `--version` | — | `false` | Print build version, git revision, and build date, then exit. Does not require runtime configuration. |
 | `--instance-id` | `VPN_AUTH_INSTANCE_ID` | `local-dev` | Instance identifier used in EMF metrics |
 
 See `--help` for the full list.
@@ -77,8 +78,10 @@ When enabled, it logs:
 
 - Whether `x-amzn-oidc-data`, `x-amzn-oidc-accesstoken`, and `x-amzn-oidc-identity` are present, plus their lengths.
 - `x-amzn-oidc-identity` as a salted SHA-256 prefix (first 16 hex characters). The salt is random per daemon startup and kept in memory only, so hashes correlate within one process but never across restarts or instances.
-- JWT header fields (`kid`, `alg`, `signer`, `typ`) from `x-amzn-oidc-data`.
+- JWT header fields (`kid`, `alg`, `signer`, `typ`) from each JWT-looking header.
 - Per-claim name, JSON type, value length, and capped value for every claim in `x-amzn-oidc-data` and, when the access token looks like a JWT, for every claim in `x-amzn-oidc-accesstoken`.
+
+With `--log-format=json`, JWT diagnostics are emitted as aggregate `oidc_debug_data` and `oidc_debug_accesstoken` records with nested `header` and `claims` objects. With `--log-format=text`, the daemon avoids unreadable `claims="map[...]"` output and emits flat records instead, such as `oidc_debug_data_header`, `oidc_debug_data_claim`, `oidc_debug_accesstoken_header`, and `oidc_debug_accesstoken_claim`.
 
 The daemon emits a startup warning with key `event=oidc_debug_enabled` when this mode is enabled so operators can alert on accidental enablement.
 

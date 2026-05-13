@@ -8,22 +8,25 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 )
 
 // OIDC debug logging implements the claim diagnostics described in
 // docs/group-authorization.md. It decodes ALB-forwarded headers
 // (x-amzn-oidc-data, x-amzn-oidc-accesstoken, x-amzn-oidc-identity) and emits
-// structured slog events for each. It never logs the raw JWT strings. Normal
-// requests emit at most three records: oidc_debug_headers, oidc_debug_data, and
-// oidc_debug_accesstoken.
+// structured slog events for each. It never logs the raw JWT strings. JSON
+// format emits compact aggregate records: oidc_debug_headers, oidc_debug_data,
+// and oidc_debug_accesstoken. Text format emits flat token header and per-claim
+// records to avoid unreadable claims="map[...]" lines.
 //
 // When --oidc-debug-claims is enabled:
 //   - Logs header presence and lengths.
-//   - For x-amzn-oidc-data and x-amzn-oidc-accesstoken: one aggregated record
-//     per token with JWT header fields and a claims map containing JSON type,
-//     value length, and full value capped at 2048 original bytes with an
-//     appended truncation suffix.
+//   - For x-amzn-oidc-data and x-amzn-oidc-accesstoken: JSON logs use one
+//     aggregated record per token with JWT header fields and a claims map.
+//     Text logs use one header record and one flat record per claim. Claim
+//     values are capped at 2048 original bytes with an appended truncation
+//     suffix.
 //   - For x-amzn-oidc-identity: a salted SHA-256 prefix (first 16 hex chars).
 //   - Never logs the raw JWT strings or the raw x-amzn-oidc-identity.
 
@@ -39,12 +42,13 @@ type oidcDebugLogger struct {
 	// salt is generated once per daemon startup via crypto/rand. Keeping it
 	// in-memory only makes identity hashes correlatable within this process
 	// but not across restarts or other instances.
-	salt []byte
+	salt       []byte
+	textFormat bool
 }
 
 // newOIDCDebugLogger constructs a debug logger when enabled is true, otherwise
 // returns nil. The caller should pass nil straight through to the Server.
-func newOIDCDebugLogger(enabled bool) (*oidcDebugLogger, error) {
+func newOIDCDebugLogger(enabled bool, logFormat string) (*oidcDebugLogger, error) {
 	if !enabled {
 		return nil, nil
 	}
@@ -52,7 +56,10 @@ func newOIDCDebugLogger(enabled bool) (*oidcDebugLogger, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return nil, fmt.Errorf("oidc debug: generate salt: %w", err)
 	}
-	return &oidcDebugLogger{salt: salt}, nil
+	return &oidcDebugLogger{
+		salt:       salt,
+		textFormat: logFormat != "json",
+	}, nil
 }
 
 // Log emits all configured debug events for an incoming callback request.
@@ -88,12 +95,17 @@ func (l *oidcDebugLogger) Log(r *http.Request, sessionID string) {
 // hashIdentity returns a salted SHA-256 prefix (first 16 hex characters) of
 // the x-amzn-oidc-identity header value. Returns "" when the identity is empty.
 func (l *oidcDebugLogger) hashIdentity(identity string) string {
-	if identity == "" {
+	return l.hashValue(identity)
+}
+
+// hashValue returns a salted SHA-256 prefix for sensitive diagnostic values.
+func (l *oidcDebugLogger) hashValue(value string) string {
+	if value == "" {
 		return ""
 	}
 	h := sha256.New()
 	h.Write(l.salt)
-	h.Write([]byte(identity))
+	h.Write([]byte(value))
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum)[:oidcIdentityHashHexLen]
 }
@@ -108,6 +120,10 @@ func (l *oidcDebugLogger) logJWT(eventPrefix, token, sessionID string) {
 			"token_error", "not three dot-separated segments",
 			"segments", len(parts),
 		)
+		return
+	}
+	if l.textFormat {
+		l.logJWTFlat(eventPrefix, parts, sessionID)
 		return
 	}
 
@@ -138,6 +154,63 @@ func (l *oidcDebugLogger) logJWT(eventPrefix, token, sessionID string) {
 	}
 	attrs = append(attrs, "claims", claims)
 	slog.Debug(eventPrefix, attrs...)
+}
+
+// logJWTFlat emits text-friendly records without nested map fields. JSON log
+// output keeps the aggregate record from logJWT; text output uses one header
+// record plus one record per claim to avoid unreadable claims="map[...]" lines.
+func (l *oidcDebugLogger) logJWTFlat(eventPrefix string, parts []string, sessionID string) {
+	attrs := []any{"sid", sessionID}
+	headerBytes, err := decodeBase64URL(parts[0])
+	if err != nil {
+		attrs = append(attrs, "header_error", err.Error())
+	} else {
+		header, err := parseOIDCDebugJWTHeader(headerBytes)
+		if err != nil {
+			attrs = append(attrs, "header_error", err.Error())
+		} else {
+			attrs = appendFlatHeaderAttrs(attrs, header)
+		}
+	}
+	slog.Debug(eventPrefix+"_header", attrs...)
+
+	payloadBytes, err := decodeBase64URL(parts[1])
+	if err != nil {
+		slog.Debug(eventPrefix, "sid", sessionID, "payload_error", err.Error())
+		return
+	}
+	claims, err := buildClaimInfoMap(payloadBytes)
+	if err != nil {
+		slog.Debug(eventPrefix, "sid", sessionID, "payload_error", err.Error())
+		return
+	}
+
+	names := make([]string, 0, len(claims))
+	for name := range claims {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		info, ok := claims[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		slog.Debug(eventPrefix+"_claim",
+			"sid", sessionID,
+			"name", name,
+			"type", info["type"],
+			"len", info["len"],
+			"value", info["value"])
+	}
+}
+
+func appendFlatHeaderAttrs(attrs []any, header map[string]any) []any {
+	for _, k := range []string{"alg", "kid", "signer", "typ"} {
+		if v, ok := header[k]; ok {
+			attrs = append(attrs, "header_"+k, v)
+		}
+	}
+	return attrs
 }
 
 // parseOIDCDebugJWTHeader returns the standard ALB JWT header fields. Unknown fields are
