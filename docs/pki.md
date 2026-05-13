@@ -1,5 +1,15 @@
 # PKI Management
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Commands](#commands)
+- [Deployment Workflow](#deployment-workflow)
+- [Security Considerations](#security-considerations)
+- [Lab vs Production](#lab-vs-production)
+
 ## Overview
 
 OpenVPN requires TLS certificates for transport security. This project uses an **offline PKI** model:

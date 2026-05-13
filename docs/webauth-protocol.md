@@ -1,5 +1,22 @@
 # OpenVPN WebAuth Protocol
 
+## Table of Contents
+
+- [Sources Checked](#sources-checked)
+- [Scope](#scope)
+- [Required OpenVPN Server Behavior](#required-openvpn-server-behavior)
+- [Required Client Behavior](#required-client-behavior)
+- [End-To-End Flow](#end-to-end-flow)
+- [Management Messages](#management-messages)
+- [`WEB_AUTH` Extra Format](#web_auth-extra-format)
+- [Client-Side `AUTH_PENDING`](#client-side-auth_pending)
+- [Callback URL And State](#callback-url-and-state)
+- [Timeouts](#timeouts)
+- [URL Length](#url-length)
+- [Reauth](#reauth)
+- [Why We Do Not Use `auth-user-pass username-only`](#why-we-do-not-use-auth-user-pass-username-only)
+- [Known Uncertainties](#known-uncertainties)
+
 This document is the project-local reference for the OpenVPN WebAuth flow used by `openvpn-auth-aws`.
 
 It describes how OpenVPN, the auth daemon, the VPN client, the browser, ALB, and Cognito interact when a client is held in `AUTH_PENDING` and receives a `WEB_AUTH` URL.

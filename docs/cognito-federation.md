@@ -1,5 +1,17 @@
 # Cognito User Types and Federation
 
+## Table of Contents
+
+- [Cognito User Types](#cognito-user-types)
+- [Cognito Internal vs External IdP](#cognito-internal-vs-external-idp)
+- [SAML-Specific Considerations](#saml-specific-considerations)
+- [Attribute Mapping Requirement](#attribute-mapping-requirement)
+- [End-to-End SAML Federation Walkthrough](#end-to-end-saml-federation-walkthrough)
+- [Group Resolution for Federated Users (Consolidated)](#group-resolution-for-federated-users-consolidated)
+- [CN Cross-Check and Federated Users](#cn-cross-check-and-federated-users)
+- [Daemon Configuration for External IdP](#daemon-configuration-for-external-idp)
+- [AWS Documentation References](#aws-documentation-references)
+
 This document explains the difference between native and federated Cognito users, how each type interacts with the auth daemon, and what configuration is required to support external identity providers.
 
 ## Cognito User Types

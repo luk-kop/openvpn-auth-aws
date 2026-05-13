@@ -1,5 +1,22 @@
 # Architecture — ALB + Cognito
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Infrastructure](#infrastructure)
+- [Auth Flow](#auth-flow)
+- [ALB Headers](#alb-headers)
+- [Two Daemons per EC2](#two-daemons-per-ec2)
+- [Health Check](#health-check)
+- [Instance Replacement](#instance-replacement)
+- [EIP Management](#eip-management)
+- [Routing — Why Path-Based](#routing--why-path-based)
+- [Session Lifecycle](#session-lifecycle)
+- [Local Development](#local-development)
+- [Terraform Module Structure](#terraform-module-structure)
+- [Historical Alternative: Per-Server ASGs](#historical-alternative-per-server-asgs)
+- [Historical Alternative: Dynamic ALB Path Rules Without Lambda Router](#historical-alternative-dynamic-alb-path-rules-without-lambda-router)
+
 ## Overview
 
 The daemon runs on EC2 behind an ALB with Cognito authenticate action. ALB handles the entire OIDC flow — the daemon receives pre-authenticated requests with user claims in ALB headers.

@@ -1,5 +1,15 @@
 # Cross-Region Cognito
 
+## Table of Contents
+
+- [Why this is not trivial](#why-this-is-not-trivial)
+- [Architecture](#architecture)
+- [ALB side: `authenticate-oidc` against remote Cognito](#alb-side-authenticate-oidc-against-remote-cognito)
+- [Daemon side: region selection](#daemon-side-region-selection)
+- [Trade-offs vs native `authenticate-cognito`](#trade-offs-vs-native-authenticate-cognito)
+- [Minimum verification checklist](#minimum-verification-checklist)
+- [Related docs](#related-docs)
+
 > ⚠️ **VALIDATION NOTES AND TARGET ARCHITECTURE — NOT IMPLEMENTED**
 >
 > This document captures cross-region Cognito design notes, AWS documentation findings, remaining uncertainties, and target architecture decisions. The Terraform in this repository does not currently implement this mode, and daemon region overrides such as `--cognito-region` and `--secretsmanager-region` are target pre-release work unless implemented elsewhere. Treat `authenticate-oidc` against remote Cognito as a design direction that still requires a real AWS validation run, especially for ALB-forwarded claim shape. Keep primary operational setup guidance in [Configuration](configuration.md), [Architecture](architecture.md), and the Terraform module docs; do not cite this file as complete documentation of current runtime behavior.

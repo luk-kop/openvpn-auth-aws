@@ -8,11 +8,15 @@
 
 Go daemon that authenticates OpenVPN clients via browser-based OIDC (AWS Cognito). Connects to the OpenVPN management socket, receives client events, and drives authentication through an ALB with a Cognito authenticate action. Includes an optional Lambda Router for multi-instance EC2 deployments.
 
-## Inspiration
+## Table of Contents
 
-This project was inspired in part by [`jkroepke/openvpn-auth-oauth2`](https://github.com/jkroepke/openvpn-auth-oauth2), a very good and mature OpenVPN/OIDC project that served as a useful reference while shaping this implementation.
-
-The implementation here uses a different architecture centered around an OpenVPN management-interface daemon, ALB `authenticate-cognito`, and AWS-native infrastructure managed with Terraform.
+- [Features](#features)
+- [Deployment Modes](#deployment-modes)
+- [Quick Start](#quick-start)
+- [Build & Test](#build--test)
+- [Layout](#layout)
+- [Inspiration](#inspiration)
+- [Documentation](#documentation)
 
 ## Features
 
@@ -33,7 +37,7 @@ The default Terraform deployment is **single-instance mode** (`multi_instance_mo
 
 **Multi-instance mode** (`multi_instance_mode = true`) disables EIP association. OpenVPN client traffic goes through an NLB, and browser callback routing is handled by the Lambda Router.
 
-See [Architecture](docs/architecture.md#eip-association), [Architecture Design](docs/architecture-design.md), and [Terraform](terraform/README.md) for details.
+For full docs, see [Architecture](docs/architecture.md#eip-association), [Architecture Design](docs/architecture-design.md), and [Terraform](terraform/README.md).
 
 ## Quick Start
 
@@ -102,6 +106,8 @@ make test           # unit tests (go test -v -short ./...)
 ./openvpn-auth-daemon --version
 ```
 
+For full validation flows, see [Testing](docs/testing.md).
+
 ## Layout
 
 ```text
@@ -127,6 +133,12 @@ openvpn-auth-aws/
 ├── docs/          # Documentation
 └── lab/           # Docker compose stack, PKI setup, test configs
 ```
+
+## Inspiration
+
+This project was inspired in part by [`jkroepke/openvpn-auth-oauth2`](https://github.com/jkroepke/openvpn-auth-oauth2), a very good and mature OpenVPN/OIDC project that served as a useful reference while shaping this implementation.
+
+The implementation here uses a different architecture centered around an OpenVPN management-interface daemon, ALB `authenticate-cognito`, and AWS-native infrastructure managed with Terraform.
 
 ## Documentation
 

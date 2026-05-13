@@ -1,5 +1,14 @@
 # Group Authorization and OIDC Claims
 
+## Table of Contents
+
+- [Group Sources](#group-sources)
+- [Claim-Based Mode](#claim-based-mode)
+- [Group Claim Parser](#group-claim-parser)
+- [OIDC Debug Claims](#oidc-debug-claims)
+- [Terraform and ALB Scope](#terraform-and-alb-scope)
+- [Operational Verification](#operational-verification)
+
 This document describes how the daemon authorizes users with `--required-group`,
 how claim-based group checks work, and how to inspect the real claims forwarded
 by ALB/Cognito.

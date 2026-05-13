@@ -1,5 +1,22 @@
 # Daemon Security Features
 
+## Table of Contents
+
+- [Layered Security Model](#layered-security-model)
+- [1. WebAuth Client Capability Check](#1-webauth-client-capability-check)
+- [2. Certificate CN Presence Check](#2-certificate-cn-presence-check)
+- [3. HMAC-Signed State Blob](#3-hmac-signed-state-blob)
+- [4. State Expiry](#4-state-expiry)
+- [5. ALB JWT Signature Validation (ES256)](#5-alb-jwt-signature-validation-es256)
+- [6. CN Cross-Check](#6-cn-cross-check)
+- [7. Required Group Check](#7-required-group-check)
+- [8. Group Check on Reauth](#8-group-check-on-reauth)
+- [9. Duplicate CN Policy](#9-duplicate-cn-policy)
+- [10. Session TTL and Auth Timeout](#10-session-ttl-and-auth-timeout)
+- [11. Max Session Duration](#11-max-session-duration)
+- [12. Management Socket Authentication](#12-management-socket-authentication)
+- [Summary Table](#summary-table)
+
 Security controls implemented in the auth daemon, grouped by the attack they mitigate.
 
 ## Layered Security Model

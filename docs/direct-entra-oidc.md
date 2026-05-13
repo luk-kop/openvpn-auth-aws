@@ -1,5 +1,18 @@
 # Direct Entra OIDC
 
+## Table of Contents
+
+- [Why Consider This](#why-consider-this)
+- [Target Flow](#target-flow)
+- [Expected Daemon Model](#expected-daemon-model)
+- [ALB Configuration Shape](#alb-configuration-shape)
+- [Claims And Groups](#claims-and-groups)
+- [Reauth Options](#reauth-options)
+- [Comparison With Cognito Federation](#comparison-with-cognito-federation)
+- [Recommended MVP](#recommended-mvp)
+- [Open Questions](#open-questions)
+- [References](#references)
+
 This document describes a possible future deployment mode where ALB authenticates
 directly against Microsoft Entra ID with `authenticate-oidc`, without Cognito in
 the login path. It is not implemented in the current Terraform modules.

@@ -1,5 +1,21 @@
 # Architecture
 
+## Table of Contents
+
+- [Auth Flow](#auth-flow)
+- [Two Daemons per EC2](#two-daemons-per-ec2)
+- [Management Socket Bootstrap](#management-socket-bootstrap)
+- [Callback Verification Chain](#callback-verification-chain)
+- [ALB JWT Validation](#alb-jwt-validation)
+- [WEB_AUTH URL Length Constraints](#web_auth-url-length-constraints)
+- [Health Check Endpoint](#health-check-endpoint)
+- [EIP Association](#eip-association)
+- [Session Lifecycle](#session-lifecycle)
+- [Auth Timeout vs Hand-Window](#auth-timeout-vs-hand-window)
+- [Duplicate CN and Local Cleanup](#duplicate-cn-and-local-cleanup)
+- [Reauth Flow](#reauth-flow)
+- [Docker Compose Stack](#docker-compose-stack)
+
 OpenVPN auth daemon that authenticates OpenVPN clients via browser-based OIDC with AWS Cognito. The daemon connects to OpenVPN's Unix management socket, receives client events, and drives authentication through an ALB with a Cognito authenticate action — no Lambda or API Gateway required.
 
 ## Auth Flow

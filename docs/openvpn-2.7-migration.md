@@ -1,5 +1,18 @@
 # OpenVPN 2.7 Migration Notes
 
+## Table of Contents
+
+- [Why Migrate](#why-migrate)
+- [Current Project Assumptions](#current-project-assumptions)
+- [Target Architecture](#target-architecture)
+- [Compatibility Checks Required](#compatibility-checks-required)
+- [Recommended Migration Path](#recommended-migration-path)
+- [Required Daemon Target State](#required-daemon-target-state)
+- [Strict Design Position](#strict-design-position)
+- [Supervisor Vs Separate Daemons](#supervisor-vs-separate-daemons)
+- [Decision Matrix](#decision-matrix)
+- [Open Questions](#open-questions)
+
 > ⚠️ **VALIDATION NOTES AND TARGET ARCHITECTURE — NOT THE PRIMARY USER GUIDE**
 >
 > This document captures OpenVPN 2.7 migration evidence, lab findings, remaining uncertainties, and target architecture decisions. OpenVPN 2.7.4 daemon compatibility and multi-socket Docker lab behavior are verified only where this document explicitly marks them as verified. Supervisor and multi-runtime items remain target architecture work unless explicitly marked as implemented elsewhere. Keep operational OpenVPN configuration guidance in [OpenVPN Server Configuration](openvpn-server.md), and do not cite this file as complete documentation of current runtime behavior.

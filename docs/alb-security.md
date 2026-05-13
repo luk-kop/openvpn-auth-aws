@@ -1,5 +1,12 @@
 # ALB Security
 
+## Table of Contents
+
+- [ALB-Level Settings](#alb-level-settings)
+- [VPC-Internal Traffic (not encrypted)](#vpc-internal-traffic-not-encrypted)
+- [AWS WAF](#aws-waf)
+- [See Also](#see-also)
+
 Security hardening for the Application Load Balancer that handles the OIDC callback and Cognito authenticate action.
 
 ## ALB-Level Settings
