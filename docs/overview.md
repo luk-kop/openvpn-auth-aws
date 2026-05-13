@@ -60,6 +60,7 @@ OpenVPN 2.7 multi-socket support is verified in the lab and is the target migrat
 - [OpenVPN Server](openvpn-server.md) - required OpenVPN directives, client profile behavior, and reauth.
 - [Configuration](configuration.md) - daemon flags, environment variables, logging, and metrics.
 - [Group Authorization and OIDC Claims](group-authorization.md) - group checks, claim parsing, OIDC debug logging, and ALB/Cognito scope behavior.
+- [Direct Entra OIDC](direct-entra-oidc.md) - possible future ALB `authenticate-oidc` mode without Cognito federation.
 - [PKI](pki.md) - certificate and `tls-crypt` key management.
 - [OpenVPN 2.7 Migration Notes](openvpn-2.7-migration.md) - multi-socket lab results and supervisor/runtime migration plan.
 - [Testing](testing.md) - local, Docker, and AWS validation flows.

@@ -11,6 +11,10 @@ See also:
 - [`cognito-federation.md`](cognito-federation.md) — federated IdP setup,
   including the SAML/OIDC attribute mapping patterns that surface a group
   claim in `x-amzn-oidc-data`.
+- [`direct-entra-oidc.md`](direct-entra-oidc.md) — possible future ALB
+  `authenticate-oidc` mode that uses Entra directly without Cognito federation.
+- [`entra-graph-reauth.md`](entra-graph-reauth.md) — possible future design for
+  reauth-time group checks directly against Microsoft Graph.
 
 ## Group Sources
 
@@ -32,6 +36,13 @@ when a claim is configured but ignored by `cognito-api`.
 `jwt-claim` mode cannot be combined with
 `--check-required-group-on-reauth=true`. If reauth-time group revocation is
 required, use `--groups-source=cognito-api`.
+
+> **External IdP warning:** reauth does not re-query Entra ID, Azure AD, Okta,
+> SAML, or any upstream IdP, and it does not parse fresh IdP group claims. If
+> groups exist only in IdP claims or a mapped claim such as `custom:groups`,
+> changes are reflected only after a new ALB/Cognito login refreshes
+> `x-amzn-oidc-data`. Reauth-time group revocation requires Cognito API mode and
+> group membership represented in Cognito groups.
 
 ## Claim-Based Mode
 

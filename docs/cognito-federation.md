@@ -339,6 +339,16 @@ Group membership is then read from that top-level claim in `x-amzn-oidc-data` in
 
 This mode does not make reauth claim-based. `CLIENT:REAUTH` is an OpenVPN management event, not a browser callback, so there is no fresh ALB JWT to inspect. The daemon enforces this at startup: `--groups-source=jwt-claim` cannot be combined with `--check-required-group-on-reauth=true`. If reauth group enforcement is required, set `--groups-source=cognito-api` (the default) and `--check-required-group-on-reauth`, and keep Cognito Admin API access configured.
 
+> **Warning for Entra ID / external IdP groups:** reauth does not re-query Entra
+> ID, Azure AD, Okta, SAML, or any upstream IdP, and it does not parse fresh IdP
+> group claims. If group membership exists only in IdP claims or in a mapped
+> `custom:groups` claim, changes are reflected only after a new ALB/Cognito
+> login refreshes `x-amzn-oidc-data`. Reauth-time group revocation requires
+> `--groups-source=cognito-api`, `--check-required-group-on-reauth=true`, and
+> group membership represented in Cognito groups. A possible future alternative
+> is a dedicated Microsoft Graph reauth checker; see
+> [Entra Graph Reauth Design](entra-graph-reauth.md).
+
 ## AWS Documentation References
 
 | Topic | URL |
