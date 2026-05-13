@@ -123,7 +123,7 @@ The daemon must validate the `x-amzn-oidc-data` JWT:
 2. Fetch the public key from `https://public-keys.auth.elb.<region>.amazonaws.com/<kid>`
 3. Verify ES256 (ECDSA P-256 + SHA-256) signature
 4. Validate the `signer` field in the JWT header matches the expected ALB ARN (prevents header spoofing if traffic bypasses ALB)
-5. Validate `exp` and `iss` from the JWT header (note: in ALB-signed JWTs, these fields are in the header, not the payload as in standard JWTs)
+5. Validate JWT expiry from the payload `exp` claim and, when configured, validate the payload `iss` claim against `--cognito-issuer-url`
 
 ### Group Membership
 

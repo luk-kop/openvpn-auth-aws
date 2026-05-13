@@ -8,64 +8,48 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 )
 
 // OIDC debug logging implements the claim diagnostics described in
-// docs/group-claims-debug-plan.md. It decodes ALB-forwarded headers
+// docs/group-authorization.md. It decodes ALB-forwarded headers
 // (x-amzn-oidc-data, x-amzn-oidc-accesstoken, x-amzn-oidc-identity) and emits
-// structured slog events for each. It never logs the raw JWT strings.
+// structured slog events for each. It never logs the raw JWT strings. JSON
+// format emits compact aggregate records: oidc_debug_headers, oidc_debug_data,
+// and oidc_debug_accesstoken. Text format emits flat token header and per-claim
+// records to avoid unreadable claims="map[...]" lines.
 //
-// Safe mode (--oidc-debug-claims):
+// When --oidc-debug-claims is enabled:
 //   - Logs header presence and lengths.
-//   - For x-amzn-oidc-data: JWT header fields; per-claim name, JSON type, value
-//     length. Full value (capped at 2048 original bytes, with an appended
-//     truncation suffix) only for the hardcoded allowlist and the configured
-//     --groups-claim.
-//   - For x-amzn-oidc-accesstoken: per-claim name and JSON type when the value
-//     looks like a JWT. No claim values, including group-like values.
+//   - For x-amzn-oidc-data and x-amzn-oidc-accesstoken: JSON logs use one
+//     aggregated record per token with JWT header fields and a claims map.
+//     Text logs use one header record and one flat record per claim. Claim
+//     values are capped at 2048 original bytes with an appended truncation
+//     suffix.
 //   - For x-amzn-oidc-identity: a salted SHA-256 prefix (first 16 hex chars).
-//
-// Unsafe mode (--oidc-debug-claims-unsafe, implies --oidc-debug-claims):
-//   - Logs full decoded claim values for every claim in x-amzn-oidc-data and
-//     x-amzn-oidc-accesstoken (still capped at 2048 original bytes).
-//   - Still never logs the raw JWT strings or the raw x-amzn-oidc-identity.
+//   - Never logs the raw JWT strings or the raw x-amzn-oidc-identity.
 
 const (
 	oidcDebugValueCap      = 2048
 	oidcIdentityHashHexLen = 16
 )
 
-// Hardcoded allowlist of group-like claim names whose full (capped) value is
-// emitted in safe mode, in addition to the operator's configured
-// --groups-claim. Union semantics: both sets flow through the same capped
-// logger.
-var oidcDebugGroupClaimAllowlist = []string{
-	"cognito:groups",
-	"groups",
-	"roles",
-}
-
 // oidcDebugLogger decodes and logs ALB-forwarded OIDC headers at DEBUG level.
 // A nil *oidcDebugLogger is a no-op, so callers can call l.Log(r) without a
 // guard when the feature is disabled.
 type oidcDebugLogger struct {
-	unsafeMode            bool
-	configuredGroupsClaim string
 	// salt is generated once per daemon startup via crypto/rand. Keeping it
 	// in-memory only makes identity hashes correlatable within this process
 	// but not across restarts or other instances.
-	salt []byte
+	salt       []byte
+	textFormat bool
 }
 
 // newOIDCDebugLogger constructs a debug logger when enabled is true, otherwise
 // returns nil. The caller should pass nil straight through to the Server.
-// Unsafe mode implies enabled: if unsafeMode is true, the logger is always
-// constructed even when enabled is false. This makes the constructor robust
-// against callers that build Config directly without going through
-// config.Parse() (which normalizes the two flags).
-func newOIDCDebugLogger(enabled, unsafeMode bool, configuredGroupsClaim string) (*oidcDebugLogger, error) {
-	if !enabled && !unsafeMode {
+func newOIDCDebugLogger(enabled bool, logFormat string) (*oidcDebugLogger, error) {
+	if !enabled {
 		return nil, nil
 	}
 	salt := make([]byte, 32)
@@ -73,9 +57,8 @@ func newOIDCDebugLogger(enabled, unsafeMode bool, configuredGroupsClaim string) 
 		return nil, fmt.Errorf("oidc debug: generate salt: %w", err)
 	}
 	return &oidcDebugLogger{
-		unsafeMode:            unsafeMode,
-		configuredGroupsClaim: configuredGroupsClaim,
-		salt:                  salt,
+		salt:       salt,
+		textFormat: logFormat != "json",
 	}, nil
 }
 
@@ -102,137 +85,192 @@ func (l *oidcDebugLogger) Log(r *http.Request, sessionID string) {
 	)
 
 	if oidcData != "" {
-		l.logJWT("oidc_debug_data", oidcData, sessionID, l.isGroupValueClaim)
+		l.logJWT("oidc_debug_data", oidcData, sessionID)
 	}
 	if accessToken != "" {
-		// Access-token claim values are never logged in safe mode, even for
-		// group-like names. Unsafe mode logs values for all claims.
-		l.logJWT("oidc_debug_accesstoken", accessToken, sessionID, func(string) bool { return false })
+		l.logJWT("oidc_debug_accesstoken", accessToken, sessionID)
 	}
 }
 
 // hashIdentity returns a salted SHA-256 prefix (first 16 hex characters) of
 // the x-amzn-oidc-identity header value. Returns "" when the identity is empty.
 func (l *oidcDebugLogger) hashIdentity(identity string) string {
-	if identity == "" {
+	return l.hashValue(identity)
+}
+
+// hashValue returns a salted SHA-256 prefix for sensitive diagnostic values.
+func (l *oidcDebugLogger) hashValue(value string) string {
+	if value == "" {
 		return ""
 	}
 	h := sha256.New()
 	h.Write(l.salt)
-	h.Write([]byte(identity))
+	h.Write([]byte(value))
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum)[:oidcIdentityHashHexLen]
 }
 
-// isGroupValueClaim reports whether the x-amzn-oidc-data claim name should
-// have its full (capped) value logged in safe mode. In unsafe mode, all claim
-// values are logged regardless.
-func (l *oidcDebugLogger) isGroupValueClaim(name string) bool {
-	if l.configuredGroupsClaim != "" && name == l.configuredGroupsClaim {
-		return true
-	}
-	for _, allowed := range oidcDebugGroupClaimAllowlist {
-		if name == allowed {
-			return true
-		}
-	}
-	return false
-}
-
-// logJWT decodes the header and payload of a JWT-looking string and emits
-// structured events. The raw token string is never logged.
-// valueAllowed is consulted in safe mode to decide whether to log a claim's
-// full (capped) value. In unsafe mode, every claim's value is logged.
-func (l *oidcDebugLogger) logJWT(eventPrefix, token, sessionID string, valueAllowed func(string) bool) {
+// logJWT decodes the header and payload of a JWT-looking string and emits one
+// structured event for that token. The raw token string is never logged.
+func (l *oidcDebugLogger) logJWT(eventPrefix, token, sessionID string) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		slog.Debug(eventPrefix+"_malformed",
+		slog.Debug(eventPrefix,
 			"sid", sessionID,
-			"reason", "not three dot-separated segments",
+			"token_error", "not three dot-separated segments",
 			"segments", len(parts),
 		)
 		return
 	}
+	if l.textFormat {
+		l.logJWTFlat(eventPrefix, parts, sessionID)
+		return
+	}
 
+	attrs := []any{"sid", sessionID}
 	headerBytes, err := decodeBase64URL(parts[0])
 	if err != nil {
-		slog.Debug(eventPrefix+"_header_decode_failed",
-			"sid", sessionID,
-			"error", err.Error(),
-		)
+		attrs = append(attrs, "header_error", err.Error())
 	} else {
-		l.logJWTHeader(eventPrefix, headerBytes, sessionID)
+		header, err := parseOIDCDebugJWTHeader(headerBytes)
+		if err != nil {
+			attrs = append(attrs, "header_error", err.Error())
+		} else {
+			attrs = append(attrs, "header", header)
+		}
 	}
 
 	payloadBytes, err := decodeBase64URL(parts[1])
 	if err != nil {
-		slog.Debug(eventPrefix+"_payload_decode_failed",
-			"sid", sessionID,
-			"error", err.Error(),
-		)
+		attrs = append(attrs, "payload_error", err.Error())
+		slog.Debug(eventPrefix, attrs...)
 		return
 	}
-	l.logJWTPayload(eventPrefix, payloadBytes, sessionID, valueAllowed)
+	claims, err := buildClaimInfoMap(payloadBytes)
+	if err != nil {
+		attrs = append(attrs, "payload_error", err.Error())
+		slog.Debug(eventPrefix, attrs...)
+		return
+	}
+	attrs = append(attrs, "claims", claims)
+	slog.Debug(eventPrefix, attrs...)
 }
 
-// logJWTHeader emits one event with the standard ALB JWT header fields.
-// Unknown fields are ignored; the plan only requires kid, alg, signer, and typ.
-func (l *oidcDebugLogger) logJWTHeader(eventPrefix string, headerBytes []byte, sessionID string) {
-	var header map[string]any
-	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		slog.Debug(eventPrefix+"_header_parse_failed",
-			"sid", sessionID,
-			"error", err.Error(),
-		)
-		return
-	}
+// logJWTFlat emits text-friendly records without nested map fields. JSON log
+// output keeps the aggregate record from logJWT; text output uses one header
+// record plus one record per claim to avoid unreadable claims="map[...]" lines.
+func (l *oidcDebugLogger) logJWTFlat(eventPrefix string, parts []string, sessionID string) {
 	attrs := []any{"sid", sessionID}
-	for _, k := range []string{"kid", "alg", "signer", "typ"} {
-		if v, ok := header[k]; ok {
-			attrs = append(attrs, k, jsonScalarString(v))
+	headerBytes, err := decodeBase64URL(parts[0])
+	if err != nil {
+		attrs = append(attrs, "header_error", err.Error())
+	} else {
+		header, err := parseOIDCDebugJWTHeader(headerBytes)
+		if err != nil {
+			attrs = append(attrs, "header_error", err.Error())
+		} else {
+			attrs = appendFlatHeaderAttrs(attrs, header)
 		}
 	}
 	slog.Debug(eventPrefix+"_header", attrs...)
-}
 
-// logJWTPayload emits one event per claim in the JWT payload.
-// In safe mode, valueAllowed gates which claims include their value.
-// In unsafe mode, every claim's value is logged (still capped at 2048 bytes).
-// Claim values are never sent through any code path that logs raw JWT strings.
-func (l *oidcDebugLogger) logJWTPayload(eventPrefix string, payloadBytes []byte, sessionID string, valueAllowed func(string) bool) {
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		slog.Debug(eventPrefix+"_payload_parse_failed",
-			"sid", sessionID,
-			"error", err.Error(),
-		)
+	payloadBytes, err := decodeBase64URL(parts[1])
+	if err != nil {
+		slog.Debug(eventPrefix, "sid", sessionID, "payload_error", err.Error())
+		return
+	}
+	claims, err := buildClaimInfoMap(payloadBytes)
+	if err != nil {
+		slog.Debug(eventPrefix, "sid", sessionID, "payload_error", err.Error())
 		return
 	}
 
-	for name, raw := range payload {
-		jsonType, valueLen := describeJSONValue(raw)
-		attrs := []any{
+	names := make([]string, 0, len(claims))
+	for name := range claims {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		info, ok := claims[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		slog.Debug(eventPrefix+"_claim",
 			"sid", sessionID,
 			"name", name,
-			"type", jsonType,
-			"len", valueLen,
-		}
-
-		if l.unsafeMode || valueAllowed(name) {
-			emitted, truncated, totalBytes := capPayload(raw, oidcDebugValueCap)
-			value := string(emitted)
-			if truncated {
-				// Per plan: suffix is appended to the truncated value inline,
-				// so the emitted log string can exceed the cap by the suffix
-				// length. Keep this in one field so log consumers see the
-				// complete representation of the claim value.
-				value += truncationSuffix(totalBytes)
-			}
-			attrs = append(attrs, "value", value)
-		}
-
-		slog.Debug(eventPrefix+"_claim", attrs...)
+			"type", info["type"],
+			"value", textClaimValue(info))
 	}
+}
+
+func textClaimValue(info map[string]any) any {
+	value, _ := info["value"].(string)
+	if info["type"] != "string" {
+		return value
+	}
+	var decoded string
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		return value
+	}
+	return decoded
+}
+
+func appendFlatHeaderAttrs(attrs []any, header map[string]any) []any {
+	for _, k := range []string{"alg", "kid", "signer", "typ"} {
+		if v, ok := header[k]; ok {
+			attrs = append(attrs, "header_"+k, v)
+		}
+	}
+	return attrs
+}
+
+// parseOIDCDebugJWTHeader returns the standard ALB JWT header fields. Unknown fields are
+// ignored; operators only need kid, alg, signer, and typ for diagnostics.
+func parseOIDCDebugJWTHeader(headerBytes []byte) (map[string]any, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(headerBytes, &raw); err != nil {
+		return nil, err
+	}
+	header := map[string]any{}
+	for _, k := range []string{"kid", "alg", "signer", "typ"} {
+		if v, ok := raw[k]; ok {
+			header[k] = jsonScalarString(v)
+		}
+	}
+	return header, nil
+}
+
+// buildClaimInfoMap returns a map keyed by claim name. Every claim includes
+// its capped value. Claim values are never sent through any code path that logs
+// raw JWT strings.
+func buildClaimInfoMap(payloadBytes []byte) (map[string]any, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return nil, err
+	}
+
+	claims := make(map[string]any, len(payload))
+	for name, raw := range payload {
+		jsonType, valueLen := describeJSONValue(raw)
+		claim := map[string]any{
+			"type": jsonType,
+			"len":  valueLen,
+		}
+
+		emitted, truncated, totalBytes := capPayload(raw, oidcDebugValueCap)
+		value := string(emitted)
+		if truncated {
+			// The suffix is appended to the truncated value inline, so the
+			// emitted log string can exceed the cap by the suffix length.
+			// Keep this in one field so log consumers see the complete
+			// representation of the claim value.
+			value += truncationSuffix(totalBytes)
+		}
+		claim["value"] = value
+
+		claims[name] = claim
+	}
+	return claims, nil
 }
 
 // jsonScalarString renders a header field as a short string. Non-string values

@@ -7,12 +7,15 @@ import (
 
 // parseGroupsClaim extracts a list of group names from a JWT claim value.
 //
-// The parser implements the rules from docs/group-claims-debug-plan.md:
+// The parser implements the rules from docs/group-authorization.md:
 //
 //  1. JSON array: apply array rules (strings only, trimmed, empty dropped).
 //  2. String that parses as a valid JSON array: parse and apply array rules.
 //  3. String matching `^\[.*\]$` (after trim) that is NOT a valid JSON array:
-//     reject as no groups, do not fall through.
+//     parse as a bracketed CSV compatibility format only when the inner
+//     content contains a comma. Split on ",", trim each element, and drop
+//     empty elements. Bracketed non-JSON strings without commas yield no
+//     groups.
 //  4. String containing commas: split on "," and trim each element. If all
 //     elements are empty after trimming, return no groups (do not fall to 5).
 //  5. Non-empty string: treat as one group.
@@ -61,8 +64,7 @@ func groupsFromArray(items []any) []string {
 }
 
 // parseStringGroupsClaim applies rules 2-5 to a string claim value. The value
-// is trimmed once upfront; rules 2-5 see only the trimmed form so bracketed
-// values like "  [a,b]  " are rejected (rule 3) rather than CSV-split (rule 4).
+// is trimmed once upfront; rules 2-5 see only the trimmed form.
 func parseStringGroupsClaim(raw string) []string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -70,14 +72,15 @@ func parseStringGroupsClaim(raw string) []string {
 	}
 
 	// Rule 2 + 3: bracketed values. Any string that looks like a JSON array
-	// (starts with '[' and ends with ']') is either a valid JSON array
-	// (rule 2, parse it) or invalid (rule 3, reject — do not treat as CSV).
+	// (starts with '[' and ends with ']') is first parsed as JSON array. If
+	// that fails, treat comma-containing inner content as the bracketed CSV
+	// compatibility format observed in Cognito/Entra mappings.
 	if looksLikeJSONArray(s) {
 		var arr []any
 		if err := json.Unmarshal([]byte(s), &arr); err == nil {
 			return groupsFromArray(arr)
 		}
-		return nil
+		return groupsFromBracketedCSV(s)
 	}
 
 	// Rule 4: CSV form.
@@ -112,4 +115,20 @@ func groupsFromCSV(s string) []string {
 		return nil
 	}
 	return out
+}
+
+// groupsFromBracketedCSV parses the compatibility shape "[a, b]" by removing
+// the outer brackets and applying the normal CSV rules to the inner content.
+// A comma is required: observed Cognito/Entra mappings emit a single group as
+// "a", not "[a]", so bracketed non-JSON strings without commas are treated as
+// malformed.
+func groupsFromBracketedCSV(s string) []string {
+	if !looksLikeJSONArray(s) {
+		return nil
+	}
+	inner := s[1 : len(s)-1]
+	if !strings.Contains(inner, ",") {
+		return nil
+	}
+	return groupsFromCSV(inner)
 }

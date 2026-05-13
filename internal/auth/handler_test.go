@@ -1417,7 +1417,7 @@ func TestHandleConnectAllowsNewSessionAfterDisconnect(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 9: reauth group-check path (docs/group-claims-debug-plan.md)
+// Step 9: reauth group-check path (docs/group-authorization.md)
 // ---------------------------------------------------------------------------
 
 // countingChecker implements IdentityChecker and records every CheckUser call

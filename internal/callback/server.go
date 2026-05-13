@@ -68,8 +68,8 @@ type Server struct {
 	identity GroupsChecker
 	tmpl     *template.Template
 
-	// oidcDebug is non-nil when --oidc-debug-claims or --oidc-debug-claims-unsafe
-	// is enabled. Calls to Log on a nil receiver are no-ops.
+	// oidcDebug is non-nil when --oidc-debug-claims is enabled. Calls to Log
+	// on a nil receiver are no-ops.
 	oidcDebug *oidcDebugLogger
 
 	// ALB validation
@@ -104,7 +104,7 @@ func NewServer(
 	if err != nil {
 		return nil, fmt.Errorf("callback server: %w", err)
 	}
-	debugLogger, err := newOIDCDebugLogger(cfg.OIDCDebugClaims || cfg.OIDCDebugClaimsUnsafe, cfg.OIDCDebugClaimsUnsafe, cfg.GroupsClaim)
+	debugLogger, err := newOIDCDebugLogger(cfg.OIDCDebugClaims, cfg.LogFormat)
 	if err != nil {
 		return nil, fmt.Errorf("callback server: %w", err)
 	}
@@ -145,11 +145,6 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	s.metrics.CallbackReceived()
 
-	// OIDC debug logging runs before state validation so that malformed or
-	// unexpected callbacks are still diagnosable. It is a no-op when the
-	// feature flag is disabled (nil receiver).
-	s.oidcDebug.Log(r, "")
-
 	// Step 1: Extract and verify state blob.
 	// OpenVPN 2.x logs WEB_AUTH as ('URL'); some terminals include the
 	// closing apostrophe when linkifying the URL. ALB's OAuth roundtrip can
@@ -159,6 +154,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	stateParam := strings.TrimSuffix(rawState, "%27")
 	stateParam = strings.TrimSuffix(stateParam, "'")
 	if stateParam == "" {
+		// Keep OIDC diagnostics for malformed callbacks. No SID can be trusted
+		// until state has been decoded successfully.
+		s.oidcDebug.Log(r, "")
 		s.metrics.CallbackRejected("missing_state")
 		s.renderError(w, http.StatusBadRequest, "Session Error", "Authentication state is missing or invalid.", "")
 		return
@@ -175,10 +173,17 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			"raw_len", len(rawState),
 			"raw_tail", rawTail,
 			"trimmed", rawState != stateParam)
+		// Keep OIDC diagnostics for invalid-state callbacks, but leave sid
+		// empty because the state payload could not be trusted.
+		s.oidcDebug.Log(r, "")
 		s.metrics.CallbackRejected("invalid_state")
 		s.renderError(w, http.StatusBadRequest, "Session Error", "Authentication state is missing or invalid.", "")
 		return
 	}
+
+	// For normal callbacks, emit OIDC diagnostics after state validation so
+	// every debug record can be correlated with the session.
+	s.oidcDebug.Log(r, payload.SID)
 
 	// Step 2: Transition session from PENDING → PROCESSING.
 	sess, err := s.sessions.TryProcess(payload.SID)
@@ -499,7 +504,7 @@ func parseJWTClaimsUnsafe(tokenStr, groupsClaim string) (auth.ALBClaims, []strin
 }
 
 // extractGroupsFromRaw reads a group list from the claim named by claimName
-// using the flexible parser in parseGroupsClaim (see docs/group-claims-debug-plan.md).
+// using the flexible parser in parseGroupsClaim (see docs/group-authorization.md).
 // Returns nil when claimName is empty or the claim is missing.
 func extractGroupsFromRaw(raw map[string]interface{}, claimName string) ([]string, bool) {
 	if claimName == "" {
@@ -550,12 +555,24 @@ func extractALBClaims(mc *jwt.MapClaims) (auth.ALBClaims, error) {
 func (s *Server) checkGroup(ctx context.Context, sess *auth.PendingSession, claims albJWTClaims) (bool, error) {
 	if s.cfg.GroupsSource == config.GroupsSourceJWTClaim {
 		// Read groups directly from JWT claims.
+		matched := false
 		for _, g := range claims.Groups {
 			if g == sess.RequiredGroup {
-				return true, nil
+				matched = true
+				break
 			}
 		}
-		return false, nil
+		if s.oidcDebug != nil {
+			slog.Debug("callback: jwt claim group check",
+				"sid", sess.SessionID,
+				"groups_source", s.cfg.GroupsSource,
+				"claim", s.cfg.GroupsClaim,
+				"claim_present", claims.GroupsClaimPresent,
+				"groups_count", len(claims.Groups),
+				"required_group_hash", s.oidcDebug.hashValue(sess.RequiredGroup),
+				"matched", matched)
+		}
+		return matched, nil
 	}
 
 	if s.identity == nil {

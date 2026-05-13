@@ -52,13 +52,8 @@ func (c Config) LogStartupNotices() {
 	if c.ManagementRawLog {
 		slog.Warn("management raw logging enabled; lab/debug only, do not enable in production")
 	}
-	if c.OIDCDebugClaimsUnsafe {
-		// Stable event key per docs/group-claims-debug-plan.md so operators
-		// can alert on unsafe mode.
-		slog.Warn("oidc debug unsafe mode enabled; can expose PII and must not be used in production",
-			"event", "oidc_debug_unsafe_enabled")
-	} else if c.OIDCDebugClaims {
-		slog.Info("oidc debug logging enabled (safe mode)",
+	if c.OIDCDebugClaims {
+		slog.Warn("oidc debug claim logging enabled; lab/debug only, do not enable in production",
 			"event", "oidc_debug_enabled")
 	}
 }
@@ -88,7 +83,7 @@ type Config struct {
 	ALBARN            string // --alb-arn / VPN_AUTH_ALB_ARN
 	CognitoSkipReauth bool   // --cognito-skip-reauth / VPN_AUTH_COGNITO_SKIP_REAUTH
 
-	// Group membership source (see docs/group-claims-debug-plan.md).
+	// Group membership source (see docs/group-authorization.md).
 	GroupsSource string // --groups-source / VPN_AUTH_GROUPS_SOURCE (cognito-api|jwt-claim)
 	GroupsClaim  string // --groups-claim / VPN_AUTH_GROUPS_CLAIM (top-level claim name; required when GroupsSource=jwt-claim)
 
@@ -111,9 +106,11 @@ type Config struct {
 	TemplatesDir string
 	ServerName   string
 
+	// Process metadata
+	ShowVersion bool // --version
+
 	// OIDC debug logging
-	OIDCDebugClaims       bool // --oidc-debug-claims / VPN_AUTH_OIDC_DEBUG_CLAIMS
-	OIDCDebugClaimsUnsafe bool // --oidc-debug-claims-unsafe / VPN_AUTH_OIDC_DEBUG_CLAIMS_UNSAFE
+	OIDCDebugClaims bool // --oidc-debug-claims / VPN_AUTH_OIDC_DEBUG_CLAIMS
 }
 
 func Parse() (Config, error) {
@@ -164,20 +161,19 @@ func Parse() (Config, error) {
 	flag.DurationVar(&cfg.MaxSessionDuration, "max-session-duration", getDurationOrCollect("VPN_AUTH_MAX_SESSION_DURATION", 0, &envErrors), "maximum VPN session duration; 0 to disable (e.g. 8h, 10h, 12h)")
 	flag.StringVar(&cfg.TemplatesDir, "templates-dir", getenv("VPN_AUTH_TEMPLATES_DIR", ""), "path to custom HTML templates (overrides built-in)")
 	flag.StringVar(&cfg.ServerName, "server-name", getenv("VPN_AUTH_SERVER_NAME", ""), "human-readable server name exposed to HTML templates")
+	flag.BoolVar(&cfg.ShowVersion, "version", false, "print version and exit")
 
 	// OIDC debug logging
-	flag.BoolVar(&cfg.OIDCDebugClaims, "oidc-debug-claims", getBoolOrCollect("VPN_AUTH_OIDC_DEBUG_CLAIMS", false, &envErrors), "log OIDC header and claim diagnostics for each callback (names, JSON types, lengths; full values only for known group-like claims, capped at 2048 bytes)")
-	flag.BoolVar(&cfg.OIDCDebugClaimsUnsafe, "oidc-debug-claims-unsafe", getBoolOrCollect("VPN_AUTH_OIDC_DEBUG_CLAIMS_UNSAFE", false, &envErrors), "lab/debug only: log full decoded OIDC payloads from x-amzn-oidc-data and x-amzn-oidc-accesstoken; implies --oidc-debug-claims and must not be used in production")
+	flag.BoolVar(&cfg.OIDCDebugClaims, "oidc-debug-claims", getBoolOrCollect("VPN_AUTH_OIDC_DEBUG_CLAIMS", false, &envErrors), "lab/debug only: log OIDC header and claim diagnostics for each callback, including capped claim values from x-amzn-oidc-data and x-amzn-oidc-accesstoken; never logs raw JWT strings")
 
 	flag.Parse()
 
+	if cfg.ShowVersion {
+		return cfg, nil
+	}
+
 	if len(envErrors) > 0 {
 		return Config{}, fmt.Errorf("invalid environment variables: %s", strings.Join(envErrors, "; "))
-	}
-	// --oidc-debug-claims-unsafe implies --oidc-debug-claims per plan; normalize
-	// before validation so downstream code only has to check one flag.
-	if cfg.OIDCDebugClaimsUnsafe {
-		cfg.OIDCDebugClaims = true
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -224,7 +220,7 @@ func (c Config) Validate() error {
 	if c.CognitoUserPoolID == "" && c.RequiredGroup != "" && c.CheckRequiredGroupOnReauth {
 		problems = append(problems, "cognito-user-pool-id is required when check-required-group-on-reauth is set with required-group")
 	}
-	// groups-source / groups-claim rules (see docs/group-claims-debug-plan.md).
+	// groups-source / groups-claim rules (see docs/group-authorization.md).
 	if !isValidGroupsSource(c.GroupsSource) {
 		problems = append(problems, fmt.Sprintf("groups-source must be one of %v, got %q", validGroupsSources, c.GroupsSource))
 	}

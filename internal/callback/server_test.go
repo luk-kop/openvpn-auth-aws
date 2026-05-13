@@ -256,6 +256,35 @@ func TestHandleCallback_InvalidStateHMAC(t *testing.T) {
 	assertRejectedReason(t, m, "invalid_state")
 }
 
+func TestHandleCallback_InvalidStateLogsOIDCDebugWithoutSID(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.OIDCDebugClaims = true
+	cfg.LogFormat = "text"
+	srv, _, _ := newTestServer(cfg, nil)
+	valid := validStateParam(t, "some-sid")
+	parts := strings.SplitN(valid, ".", 2)
+	tampered := parts[0] + ".AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", nil, time.Now().Add(5*time.Minute).Unix())
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+tampered, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	buf := withLogger(t, func() {
+		srv.Handler().ServeHTTP(w, req)
+	})
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	rec := findRecord(parseLogRecords(t, buf), "oidc_debug_data_header")
+	if rec == nil {
+		t.Fatal("expected OIDC debug record for invalid state")
+	}
+	if rec["sid"] != "" {
+		t.Fatalf("expected empty sid for invalid state OIDC debug, got %v", rec["sid"])
+	}
+}
+
 func TestHandleCallback_ExpiredState(t *testing.T) {
 	srv, _, m := newTestServer(defaultCfg(), nil)
 	state := expiredStateParam(t, "some-sid")
@@ -268,6 +297,42 @@ func TestHandleCallback_ExpiredState(t *testing.T) {
 	}
 	assertHTMLResponse(t, w, "Session Error")
 	assertRejectedReason(t, m, "invalid_state")
+}
+
+func TestHandleCallback_ValidStateLogsOIDCDebugWithSID(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.OIDCDebugClaims = true
+	cfg.LogFormat = "text"
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "cognito:groups"
+	srv, sessions, _, _ := newTestServerWithSessions(cfg, nil)
+	l, err := newOIDCDebugLogger(true, cfg.LogFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.oidcDebug = l
+
+	const sid = "oidc-debug-sid"
+	addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", []string{"vpn-users"}, time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	buf := withLogger(t, func() {
+		srv.Handler().ServeHTTP(w, req)
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	rec := findRecord(parseLogRecords(t, buf), "oidc_debug_data_header")
+	if rec == nil {
+		t.Fatal("expected OIDC debug record")
+	}
+	if rec["sid"] != sid {
+		t.Fatalf("expected sid %q in OIDC debug, got %v", sid, rec["sid"])
+	}
 }
 
 func TestHandleCallback_SessionNotFound(t *testing.T) {
@@ -575,6 +640,139 @@ func TestHandleCallback_Success_GroupFromClaims_CustomClaimName(t *testing.T) {
 	}
 	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
 		t.Fatalf("expected client-auth decision when the configured claim grants membership, got %+v", sink.decisions)
+	}
+}
+
+func TestHandleCallback_Success_GroupFromClaims_BracketedEntraCSVString(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	srv, sessions, sink, _ := newTestServerWithSessions(cfg, nil)
+
+	const requiredGroup = "11111111-2222-3333-4444-555555555555"
+	sid := "bracketed-entra-claim-success-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = requiredGroup
+
+	header := map[string]any{"alg": "none", "kid": "test-kid"}
+	claimsMap := map[string]any{
+		"email":         "user@example.com",
+		"sub":           "sub123",
+		"iss":           "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_test",
+		"exp":           time.Now().Add(5 * time.Minute).Unix(),
+		"custom:groups": "[11111111-2222-3333-4444-555555555555, 66666666-7777-8888-9999-000000000000]",
+	}
+	hBytes, _ := json.Marshal(header)
+	cBytes, _ := json.Marshal(claimsMap)
+	oidcJWT := base64.RawURLEncoding.EncodeToString(hBytes) + "." + base64.RawURLEncoding.EncodeToString(cBytes) + "."
+
+	state := validStateParam(t, sid)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for bracketed Entra CSV claim, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected client-auth decision when bracketed Entra CSV claim grants membership, got %+v", sink.decisions)
+	}
+}
+
+func TestCheckGroup_JWTClaimEmitsDebugDiagnostic(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	l, err := newOIDCDebugLogger(true, "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		cfg:       cfg,
+		oidcDebug: l,
+	}
+	sess := &auth.PendingSession{
+		SessionID:     "diagnostic-sid",
+		RequiredGroup: "11111111-2222-3333-4444-555555555555",
+	}
+	claims := albJWTClaims{
+		Groups:             []string{"11111111-2222-3333-4444-555555555555", "66666666-7777-8888-9999-000000000000"},
+		GroupsClaimPresent: true,
+	}
+
+	buf := withLogger(t, func() {
+		inGroup, err := srv.checkGroup(context.Background(), sess, claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !inGroup {
+			t.Fatal("expected group match")
+		}
+	})
+
+	rec := findRecord(parseLogRecords(t, buf), "callback: jwt claim group check")
+	if rec == nil {
+		t.Fatal("expected jwt claim group check diagnostic")
+	}
+	if rec["groups_source"] != config.GroupsSourceJWTClaim {
+		t.Fatalf("groups_source = %v, want %q", rec["groups_source"], config.GroupsSourceJWTClaim)
+	}
+	if rec["claim"] != "custom:groups" {
+		t.Fatalf("claim = %v, want custom:groups", rec["claim"])
+	}
+	if rec["claim_present"] != true {
+		t.Fatalf("claim_present = %v, want true", rec["claim_present"])
+	}
+	if rec["groups_count"] != float64(2) {
+		t.Fatalf("groups_count = %v, want 2", rec["groups_count"])
+	}
+	if rec["matched"] != true {
+		t.Fatalf("matched = %v, want true", rec["matched"])
+	}
+	hash, _ := rec["required_group_hash"].(string)
+	if len(hash) != oidcIdentityHashHexLen {
+		t.Fatalf("required_group_hash length = %d, want %d", len(hash), oidcIdentityHashHexLen)
+	}
+	if strings.Contains(buf.String(), sess.RequiredGroup) {
+		t.Fatal("diagnostic log leaked raw required group")
+	}
+}
+
+func TestHandleCallback_Success_GroupFromClaims_SingleEntraString(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	srv, sessions, sink, _ := newTestServerWithSessions(cfg, nil)
+
+	const requiredGroup = "11111111-2222-3333-4444-555555555555"
+	sid := "single-entra-claim-success-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = requiredGroup
+
+	header := map[string]any{"alg": "none", "kid": "test-kid"}
+	claimsMap := map[string]any{
+		"email":         "user@example.com",
+		"sub":           "sub123",
+		"iss":           "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_test",
+		"exp":           time.Now().Add(5 * time.Minute).Unix(),
+		"custom:groups": requiredGroup,
+	}
+	hBytes, _ := json.Marshal(header)
+	cBytes, _ := json.Marshal(claimsMap)
+	oidcJWT := base64.RawURLEncoding.EncodeToString(hBytes) + "." + base64.RawURLEncoding.EncodeToString(cBytes) + "."
+
+	state := validStateParam(t, sid)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for single Entra group string claim, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected client-auth decision when single Entra string claim grants membership, got %+v", sink.decisions)
 	}
 }
 

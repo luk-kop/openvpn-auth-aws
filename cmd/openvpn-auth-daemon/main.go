@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -22,14 +23,27 @@ import (
 	"openvpn-auth-aws/internal/secrets"
 )
 
+// version, revision, and buildDate are injected by release builds via -ldflags.
+var version = "dev"
+var revision = "unknown"
+var buildDate = "unknown"
+
 func main() {
 	cfg, err := appconfig.Parse()
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	if cfg.ShowVersion {
+		fmt.Println(versionLine())
+		return
+	}
 
 	setupLogging(cfg)
 
+	slog.Info("starting openvpn-auth-daemon",
+		"version", version,
+		"revision", revision,
+		"build_date", buildDate)
 	cfg.LogStartupNotices()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -151,4 +165,8 @@ func setupLogging(cfg appconfig.Config) {
 		handler = slog.NewTextHandler(os.Stderr, opts)
 	}
 	slog.SetDefault(slog.New(handler))
+}
+
+func versionLine() string {
+	return fmt.Sprintf("%s revision=%s build_date=%s", version, revision, buildDate)
 }
