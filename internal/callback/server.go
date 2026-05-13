@@ -35,10 +35,18 @@ type albJWTHeader struct {
 	Signer string `json:"signer"`
 }
 
-// albJWTClaims extends ALBClaims with the raw groups list from JWT claims.
+// albJWTClaims extends ALBClaims with the parsed groups list from the
+// configured groups claim. GroupsClaimPresent reports whether the claim key
+// existed in the JWT payload, independent of its value: true means the IdP
+// emitted the claim (even when its value was null, an empty array, or parsed
+// to no groups), false means the key was absent. handleCallback uses this
+// distinction to pick the deny reason — missing key points at a mapping/config
+// issue ("group claim not present") while a present-but-empty value points at
+// a policy outcome ("not in required group").
 type albJWTClaims struct {
 	auth.ALBClaims
-	Groups []string
+	Groups             []string
+	GroupsClaimPresent bool
 }
 
 // healthzResponse is the JSON body returned by GET /healthz.
@@ -59,6 +67,10 @@ type Server struct {
 	metrics  auth.Metrics
 	identity GroupsChecker
 	tmpl     *template.Template
+
+	// oidcDebug is non-nil when --oidc-debug-claims or --oidc-debug-claims-unsafe
+	// is enabled. Calls to Log on a nil receiver are no-ops.
+	oidcDebug *oidcDebugLogger
 
 	// ALB validation
 	hostname            string
@@ -92,6 +104,10 @@ func NewServer(
 	if err != nil {
 		return nil, fmt.Errorf("callback server: %w", err)
 	}
+	debugLogger, err := newOIDCDebugLogger(cfg.OIDCDebugClaims || cfg.OIDCDebugClaimsUnsafe, cfg.OIDCDebugClaimsUnsafe, cfg.GroupsClaim)
+	if err != nil {
+		return nil, fmt.Errorf("callback server: %w", err)
+	}
 	hostname, _ := os.Hostname()
 	albKeyBaseURL := cfg.ALBPublicKeyBaseURL
 	if albKeyBaseURL == "" {
@@ -106,6 +122,7 @@ func NewServer(
 		metrics:             metrics,
 		identity:            identity,
 		tmpl:                tmpl,
+		oidcDebug:           debugLogger,
 		hostname:            hostname,
 		albARN:              cfg.ALBARN,
 		albPublicKeyBaseURL: albKeyBaseURL,
@@ -127,6 +144,11 @@ func (s *Server) Handler() http.Handler {
 // after Cognito authentication.
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	s.metrics.CallbackReceived()
+
+	// OIDC debug logging runs before state validation so that malformed or
+	// unexpected callbacks are still diagnosable. It is a no-op when the
+	// feature flag is disabled (nil receiver).
+	s.oidcDebug.Log(r, "")
 
 	// Step 1: Extract and verify state blob.
 	// OpenVPN 2.x logs WEB_AUTH as ('URL'); some terminals include the
@@ -208,7 +230,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		baseClaims, groups, err := validateALBJWT(oidcData, pubKey, s.albARN, jwtHeader.Signer, s.cfg.CognitoIssuerURL, s.cfg.CognitoGroupsClaims)
+		baseClaims, groups, groupsClaimPresent, err := validateALBJWT(oidcData, pubKey, s.albARN, jwtHeader.Signer, s.cfg.CognitoIssuerURL, s.cfg.GroupsSource == config.GroupsSourceJWTClaim, s.cfg.GroupsClaim)
 		if err != nil {
 			slog.Warn("callback: ALB JWT validation failed",
 				"sid", sess.SessionID, "error", err)
@@ -219,10 +241,11 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		claims.ALBClaims = baseClaims
 		claims.Groups = groups
+		claims.GroupsClaimPresent = groupsClaimPresent
 	} else {
 		// Dev mode: skip signature validation, just parse claims.
 		slog.Warn("callback: JWT signature validation SKIPPED (no --alb-arn configured)", "sid", sess.SessionID)
-		baseClaims, groups, parseErr := parseJWTClaimsUnsafe(oidcData)
+		baseClaims, groups, groupsClaimPresent, parseErr := parseJWTClaimsUnsafe(oidcData, s.cfg.GroupsClaim)
 		if parseErr != nil {
 			slog.Warn("callback: failed to parse JWT claims (dev mode)",
 				"sid", sess.SessionID, "error", parseErr)
@@ -233,6 +256,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		claims.ALBClaims = baseClaims
 		claims.Groups = groups
+		claims.GroupsClaimPresent = groupsClaimPresent
 	}
 
 	// Step 7: CN cross-check.
@@ -261,11 +285,21 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !inGroup {
-			slog.Warn("callback: user not in required group",
-				"sid", sess.SessionID,
-				"group", sess.RequiredGroup,
-				"email", claims.Email)
-			s.denySession(sess, "not in required group", "group_denied")
+			clientReason := "not in required group"
+			if s.cfg.GroupsSource == config.GroupsSourceJWTClaim && !claims.GroupsClaimPresent {
+				clientReason = "group claim not present"
+				slog.Warn("callback: group claim not present",
+					"sid", sess.SessionID,
+					"claim", s.cfg.GroupsClaim,
+					"group", sess.RequiredGroup,
+					"email", claims.Email)
+			} else {
+				slog.Warn("callback: user not in required group",
+					"sid", sess.SessionID,
+					"group", sess.RequiredGroup,
+					"email", claims.Email)
+			}
+			s.denySession(sess, clientReason, "group_denied")
 			s.metrics.CallbackRejected("group_denied")
 			s.renderError(w, http.StatusForbidden, "Access Denied", "You are not a member of the required group.", sess.SessionID)
 			return
@@ -388,12 +422,14 @@ func parseJWTHeader(tokenStr string) (albJWTHeader, error) {
 }
 
 // validateALBJWT verifies the ALB JWT signature, exp, iss, and signer field.
-// It returns the base claims and, if extractGroups is true, the "cognito:groups"
-// claim from the already-parsed token (avoiding a second decode pass).
-func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signerField, expectedIssuer string, extractGroups bool) (auth.ALBClaims, []string, error) {
+// It returns the base claims and, if extractGroups is true, the groups list
+// read from the configured claim name (groupsClaim) in the already-parsed
+// token (avoiding a second decode pass). When extractGroups is false,
+// groupsClaim is ignored.
+func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signerField, expectedIssuer string, extractGroups bool, groupsClaim string) (auth.ALBClaims, []string, bool, error) {
 	// Verify signer field from header matches expected ALB ARN.
 	if signerField != expectedARN {
-		return auth.ALBClaims{}, nil, fmt.Errorf("signer mismatch: got %q, want %q", signerField, expectedARN)
+		return auth.ALBClaims{}, nil, false, fmt.Errorf("signer mismatch: got %q, want %q", signerField, expectedARN)
 	}
 
 	// Parse and verify the JWT using golang-jwt/jwt/v5.
@@ -405,78 +441,75 @@ func validateALBJWT(tokenStr string, pubKey *ecdsa.PublicKey, expectedARN, signe
 		return pubKey, nil
 	}, jwt.WithExpirationRequired(), jwt.WithPaddingAllowed())
 	if err != nil {
-		return auth.ALBClaims{}, nil, fmt.Errorf("jwt validation: %w", err)
+		return auth.ALBClaims{}, nil, false, fmt.Errorf("jwt validation: %w", err)
 	}
 
 	mapClaims, ok := token.Claims.(*jwt.MapClaims)
 	if !ok || !token.Valid {
-		return auth.ALBClaims{}, nil, fmt.Errorf("invalid jwt claims")
+		return auth.ALBClaims{}, nil, false, fmt.Errorf("invalid jwt claims")
 	}
 
 	claims, err := extractALBClaims(mapClaims)
 	if err != nil {
-		return auth.ALBClaims{}, nil, err
+		return auth.ALBClaims{}, nil, false, err
 	}
 
 	if expectedIssuer != "" && claims.Iss != expectedIssuer {
-		return auth.ALBClaims{}, nil, fmt.Errorf("iss mismatch: got %q, want %q", claims.Iss, expectedIssuer)
+		return auth.ALBClaims{}, nil, false, fmt.Errorf("iss mismatch: got %q, want %q", claims.Iss, expectedIssuer)
 	}
 
 	var groups []string
+	var groupsClaimPresent bool
 	if extractGroups {
-		groups = extractGroupsFromRaw(map[string]interface{}(*mapClaims))
+		groups, groupsClaimPresent = extractGroupsFromRaw(map[string]interface{}(*mapClaims), groupsClaim)
 	}
 
-	return claims, groups, nil
+	return claims, groups, groupsClaimPresent, nil
 }
 
 // parseJWTClaimsUnsafe parses JWT claims without signature verification (dev mode).
 // Expiry (exp) is intentionally not checked — dev/test tokens use alg:none and
 // may carry synthetic or omitted exp values. In production the ALB JWT path
 // (validateALBJWT) enforces expiry via jwt.WithExpirationRequired().
-// Returns the ALBClaims and any groups found in the "cognito:groups" claim.
-func parseJWTClaimsUnsafe(tokenStr string) (auth.ALBClaims, []string, error) {
+// Returns the ALBClaims and any groups found in the configured groupsClaim.
+// When groupsClaim is empty (cognito-api mode), no groups are extracted.
+func parseJWTClaimsUnsafe(tokenStr, groupsClaim string) (auth.ALBClaims, []string, bool, error) {
 	parts := strings.Split(tokenStr, ".")
 	if len(parts) != 3 {
-		return auth.ALBClaims{}, nil, fmt.Errorf("invalid JWT format")
+		return auth.ALBClaims{}, nil, false, fmt.Errorf("invalid JWT format")
 	}
 
 	claimsBytes, err := decodeBase64URL(parts[1])
 	if err != nil {
-		return auth.ALBClaims{}, nil, fmt.Errorf("decode JWT claims: %w", err)
+		return auth.ALBClaims{}, nil, false, fmt.Errorf("decode JWT claims: %w", err)
 	}
 
 	var raw map[string]interface{}
 	if err := json.Unmarshal(claimsBytes, &raw); err != nil {
-		return auth.ALBClaims{}, nil, fmt.Errorf("unmarshal JWT claims: %w", err)
+		return auth.ALBClaims{}, nil, false, fmt.Errorf("unmarshal JWT claims: %w", err)
 	}
 
 	mc := jwt.MapClaims(raw)
 	claims, err := extractALBClaims(&mc)
 	if err != nil {
-		return auth.ALBClaims{}, nil, err
+		return auth.ALBClaims{}, nil, false, err
 	}
-	groups := extractGroupsFromRaw(raw)
-	return claims, groups, nil
+	groups, groupsClaimPresent := extractGroupsFromRaw(raw, groupsClaim)
+	return claims, groups, groupsClaimPresent, nil
 }
 
-// extractGroupsFromRaw reads the "cognito:groups" array from a raw claims map.
-func extractGroupsFromRaw(raw map[string]interface{}) []string {
-	v, ok := raw["cognito:groups"]
+// extractGroupsFromRaw reads a group list from the claim named by claimName
+// using the flexible parser in parseGroupsClaim (see docs/group-claims-debug-plan.md).
+// Returns nil when claimName is empty or the claim is missing.
+func extractGroupsFromRaw(raw map[string]interface{}, claimName string) ([]string, bool) {
+	if claimName == "" {
+		return nil, false
+	}
+	v, ok := raw[claimName]
 	if !ok {
-		return nil
+		return nil, false
 	}
-	arr, ok := v.([]interface{})
-	if !ok {
-		return nil
-	}
-	groups := make([]string, 0, len(arr))
-	for _, item := range arr {
-		if s, ok := item.(string); ok {
-			groups = append(groups, s)
-		}
-	}
-	return groups
+	return parseGroupsClaim(v), true
 }
 
 // extractALBClaims pulls typed fields from a MapClaims.
@@ -515,7 +548,7 @@ func extractALBClaims(mc *jwt.MapClaims) (auth.ALBClaims, error) {
 
 // checkGroup resolves group membership either from JWT claims or via Cognito API.
 func (s *Server) checkGroup(ctx context.Context, sess *auth.PendingSession, claims albJWTClaims) (bool, error) {
-	if s.cfg.CognitoGroupsClaims {
+	if s.cfg.GroupsSource == config.GroupsSourceJWTClaim {
 		// Read groups directly from JWT claims.
 		for _, g := range claims.Groups {
 			if g == sess.RequiredGroup {

@@ -26,7 +26,8 @@ run-daemon:
 		--hmac-secret=test-secret-key!! \
 		--callback-url=http://localhost:8080/callback \
 		--cognito-skip-reauth \
-		--cognito-groups-from-claims \
+		--groups-source=jwt-claim \
+		--groups-claim=cognito:groups \
 		--management-socket=/tmp/openvpn-mgmt.sock \
 		--management-password-file=/tmp/mgmt-pw \
 		--callback-port=8081 \

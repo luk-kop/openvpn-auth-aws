@@ -81,12 +81,18 @@ func (m *fakeMetrics) SessionExpired(string)     {}
 
 // fakeGroupsChecker implements GroupsChecker for tests.
 type fakeGroupsChecker struct {
-	inGroup bool
-	enabled bool
-	err     error
+	inGroup        bool
+	enabled        bool
+	err            error
+	calls          int
+	lastGroup      string
+	lastCheckGroup bool
 }
 
-func (f *fakeGroupsChecker) CheckUser(_ context.Context, _, _ string, _ bool) (auth.IdentityResult, error) {
+func (f *fakeGroupsChecker) CheckUser(_ context.Context, _, group string, checkGroup bool) (auth.IdentityResult, error) {
+	f.calls++
+	f.lastGroup = group
+	f.lastCheckGroup = checkGroup
 	return auth.IdentityResult{Enabled: f.enabled, InGroup: f.inGroup}, f.err
 }
 
@@ -365,9 +371,54 @@ func TestHandleCallback_GroupCheckFailure(t *testing.T) {
 	assertDeniedReason(t, m, "group_denied")
 }
 
+func TestHandleCallback_CognitoAPIIgnoresConfiguredGroupsClaim(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.GroupsSource = config.GroupsSourceCognitoAPI
+	cfg.GroupsClaim = "custom:groups"
+	identity := &fakeGroupsChecker{enabled: true, inGroup: true}
+	srv, sessions, sink, m := newTestServerWithSessions(cfg, identity)
+
+	sid := "cognito-api-ignores-claim-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = "vpn-users"
+
+	header := map[string]any{"alg": "none", "kid": "test-kid"}
+	claimsMap := map[string]any{
+		"email":         "user@example.com",
+		"sub":           "sub123",
+		"iss":           "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_test",
+		"exp":           time.Now().Add(5 * time.Minute).Unix(),
+		"custom:groups": []string{"wrong-group"},
+	}
+	hBytes, _ := json.Marshal(header)
+	cBytes, _ := json.Marshal(claimsMap)
+	oidcJWT := base64.RawURLEncoding.EncodeToString(hBytes) + "." + base64.RawURLEncoding.EncodeToString(cBytes) + "."
+	state := validStateParam(t, sid)
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from Cognito API result despite wrong JWT group claim, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected client-auth decision from Cognito API group check, got %+v", sink.decisions)
+	}
+	if identity.calls != 1 {
+		t.Fatalf("expected one Cognito API group check, got %d", identity.calls)
+	}
+	if identity.lastGroup != "vpn-users" || !identity.lastCheckGroup {
+		t.Fatalf("expected Cognito API check for group vpn-users, got group=%q checkGroup=%v", identity.lastGroup, identity.lastCheckGroup)
+	}
+	assertNoRejection(t, m)
+}
+
 func TestHandleCallback_GroupCheckFromClaims_Failure(t *testing.T) {
 	cfg := defaultCfg()
-	cfg.CognitoGroupsClaims = true
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "cognito:groups"
 	srv, sessions, sink, m := newTestServerWithSessions(cfg, nil)
 
 	sid := "claims-group-fail-sid"
@@ -462,7 +513,8 @@ func TestHandleCallback_ToleratesTrailingApostropheInState(t *testing.T) {
 
 func TestHandleCallback_Success_GroupFromClaims(t *testing.T) {
 	cfg := defaultCfg()
-	cfg.CognitoGroupsClaims = true
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "cognito:groups"
 	srv, sessions, sink, _ := newTestServerWithSessions(cfg, nil)
 
 	sid := "claims-success-sid"
@@ -484,6 +536,82 @@ func TestHandleCallback_Success_GroupFromClaims(t *testing.T) {
 		t.Fatalf("expected client-auth decision, got %+v", sink.decisions)
 	}
 	assertHTMLResponse(t, w, "Authenticated")
+}
+
+// Regression guard (Step 3 review fix #3): --groups-source=jwt-claim must read
+// from the configured --groups-claim, not from the hardcoded cognito:groups.
+func TestHandleCallback_Success_GroupFromClaims_CustomClaimName(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	srv, sessions, sink, _ := newTestServerWithSessions(cfg, nil)
+
+	sid := "custom-claim-success-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = "vpn-users"
+
+	// Build a JWT whose group-like claim lives under "custom:groups". The
+	// default test helper only writes "cognito:groups", so construct inline.
+	header := map[string]any{"alg": "none", "kid": "test-kid"}
+	claimsMap := map[string]any{
+		"email":         "user@example.com",
+		"sub":           "sub123",
+		"iss":           "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_test",
+		"exp":           time.Now().Add(5 * time.Minute).Unix(),
+		"custom:groups": []string{"vpn-users"},
+	}
+	hBytes, _ := json.Marshal(header)
+	cBytes, _ := json.Marshal(claimsMap)
+	oidcJWT := base64.RawURLEncoding.EncodeToString(hBytes) + "." + base64.RawURLEncoding.EncodeToString(cBytes) + "."
+
+	state := validStateParam(t, sid)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionAllow {
+		t.Fatalf("expected client-auth decision when the configured claim grants membership, got %+v", sink.decisions)
+	}
+}
+
+// Regression guard: a JWT that carries cognito:groups but where --groups-claim
+// points at a different, absent claim must not grant access. Proves the
+// callback honors the configured claim name and does not silently fall back.
+func TestHandleCallback_JWTClaim_IgnoresUnconfiguredClaim(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "custom:groups"
+	srv, sessions, sink, m := newTestServerWithSessions(cfg, nil)
+
+	sid := "ignore-cognito-groups-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.RequiredGroup = "vpn-users"
+
+	// cognito:groups is present but that's NOT the configured claim; the
+	// configured "custom:groups" is missing, so access must be denied.
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", []string{"vpn-users"}, time.Now().Add(5*time.Minute).Unix())
+
+	state := validStateParam(t, sid)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when the configured groups-claim is absent, got %d", w.Code)
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
+		t.Fatalf("expected client-deny, got %+v", sink.decisions)
+	}
+	if sink.decisions[0].Reason != "group claim not present" {
+		t.Fatalf("expected deny reason %q, got %q", "group claim not present", sink.decisions[0].Reason)
+	}
+	assertRejectedReason(t, m, "group_denied")
+	assertDeniedReason(t, m, "group_denied")
 }
 
 func TestHandleCallback_Success_WithALBJWT(t *testing.T) {
@@ -912,5 +1040,60 @@ func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Step 9: a JWT whose --groups-claim value is an unsupported shape (object, bool,
+// number) must not panic and must deny when --required-group is set. The
+// flexible parser treats those as "no groups" per plan rule 6.
+func TestHandleCallback_JWTClaim_MalformedValueDeniesWithoutPanic(t *testing.T) {
+	cases := []struct {
+		name  string
+		value any
+	}{
+		{"object", map[string]any{"nested": "value"}},
+		{"bool", true},
+		{"number", 42},
+		{"null", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultCfg()
+			cfg.GroupsSource = config.GroupsSourceJWTClaim
+			cfg.GroupsClaim = "custom:groups"
+			srv, sessions, sink, m := newTestServerWithSessions(cfg, nil)
+
+			sid := "malformed-claim-sid-" + tc.name
+			sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+			sess.RequiredGroup = "vpn-users"
+
+			header := map[string]any{"alg": "none", "kid": "test-kid"}
+			claims := map[string]any{
+				"email":         "user@example.com",
+				"sub":           "sub123",
+				"iss":           "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_test",
+				"exp":           time.Now().Add(5 * time.Minute).Unix(),
+				"custom:groups": tc.value,
+			}
+			hBytes, _ := json.Marshal(header)
+			cBytes, _ := json.Marshal(claims)
+			oidcJWT := base64.RawURLEncoding.EncodeToString(hBytes) + "." + base64.RawURLEncoding.EncodeToString(cBytes) + "."
+
+			state := validStateParam(t, sid)
+			req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+			req.Header.Set("x-amzn-oidc-data", oidcJWT)
+			w := httptest.NewRecorder()
+
+			// Must not panic.
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 for unsupported claim shape %q, got %d", tc.name, w.Code)
+			}
+			if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
+				t.Fatalf("expected client-deny for unsupported claim shape %q, got %+v", tc.name, sink.decisions)
+			}
+			assertDeniedReason(t, m, "group_denied")
+		})
 	}
 }

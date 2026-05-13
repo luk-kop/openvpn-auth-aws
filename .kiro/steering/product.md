@@ -7,7 +7,7 @@ OpenVPN Auth Daemon (`openvpn-auth-aws`) is a Go daemon that authenticates OpenV
 - Browser-based OIDC authentication via OpenVPN's `WEB_AUTH::` URL mechanism
 - ALB + Cognito authenticate action: ALB handles the OAuth2 flow and injects a signed `x-amzn-oidc-data` JWT into the callback request
 - JWT validation: ES256 signature (ALB public key), expiry, issuer, `signer` field (ALB ARN)
-- Group membership check via `AdminListGroupsForUser` or JWT claims (`--cognito-groups-from-claims`)
+- Group membership check via `AdminListGroupsForUser` or a configurable JWT claim (`--groups-source=cognito-api|jwt-claim` + `--groups-claim=<claim>`)
 - TLS renegotiation reauth via Cognito `AdminGetUser` with optional cache for IdP outages (`--reauth-cache`)
 - Reauth can be skipped entirely with `--cognito-skip-reauth`
 - Single-session-per-user enforcement (evicts stale sessions on new connect)

@@ -30,9 +30,7 @@ func main() {
 
 	setupLogging(cfg)
 
-	if cfg.ManagementRawLog {
-		slog.Warn("management raw logging enabled; lab/debug only, do not enable in production")
-	}
+	cfg.LogStartupNotices()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -143,7 +141,7 @@ func main() {
 func setupLogging(cfg appconfig.Config) {
 	var handler slog.Handler
 	opts := &slog.HandlerOptions{}
-	if cfg.ManagementRawLog {
+	if cfg.ManagementRawLog || cfg.OIDCDebugClaims {
 		opts.Level = slog.LevelDebug
 	}
 	switch cfg.LogFormat {

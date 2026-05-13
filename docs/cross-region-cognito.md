@@ -88,7 +88,7 @@ resource "aws_lb_listener_rule" "callback_oidc" {
       client_id                  = var.cognito_client_id
       client_secret              = var.cognito_client_secret
       session_timeout            = 3600
-      scope                      = "openid email"
+      scope                      = "openid email profile"
       on_unauthenticated_request = "authenticate"
     }
   }
@@ -197,8 +197,8 @@ Before running cross-region in production:
 3. **ALB has egress to the remote IdP endpoints.** AWS requires the ALB to reach the token and userInfo endpoints, and ALB IdP communication is IPv4-only. For an internal ALB or a subnet without public IPv4 egress, provide NAT or equivalent routing.
 4. **ALB JWT signer matches.** `--alb-arn` is the ALB in the *daemon's* region, not the Cognito region. The daemon's `alb-public-key-base-url` points at the ALB region.
 5. **`AdminGetUser` works from the daemon.** From an EC2 instance in the daemon's region: `aws cognito-idp admin-get-user --region <home-region> --user-pool-id <home-pool> --username <user>` succeeds. If it fails with a networking error rather than an auth error, the instance has no egress to `cognito-idp.<home-region>.amazonaws.com` — check VPC endpoints or NAT.
-6. **Claims inspection.** Run one real `authenticate-oidc` callback through the stack and log decoded `x-amzn-oidc-data` header and payload. Verify `email`, username lookup field, `iss`, and `cognito:groups` assumptions. If `iss` is present only in the ALB JWT header, daemon validation must use the header value rather than a payload claim.
-7. **Group checks.** If `--cognito-groups-from-claims` is false, verify `AdminListGroupsForUser` with the exact username claim forwarded by ALB. If it is true, verify that the forwarded payload actually contains `cognito:groups`; do not infer this from Cognito group membership alone.
+6. **Claims inspection.** Run one real `authenticate-oidc` callback through the stack and log decoded `x-amzn-oidc-data` header and payload. Verify `email`, username lookup field, `iss`, and any configured group claim assumptions. If `iss` is present only in the ALB JWT header, daemon validation must use the header value rather than a payload claim.
+7. **Group checks.** If `--groups-source=cognito-api` (the default), verify `AdminListGroupsForUser` with the exact username claim forwarded by ALB. If `--groups-source=jwt-claim`, verify that `x-amzn-oidc-data` actually contains the claim named by `--groups-claim` and that its value parses to the expected list (see `docs/configuration.md#group-claim-parser`); do not infer this from Cognito group membership alone.
 8. **Home-region outage drill.** Test both paths separately: block daemon egress to `cognito-idp.<home-region>` for reauth/group checks, and separately simulate failure of ALB access to the remote Cognito hosted/token/userInfo endpoints for new connects.
 
 ## Related docs
