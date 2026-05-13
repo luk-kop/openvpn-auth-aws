@@ -79,9 +79,14 @@ When enabled, it logs:
 - Whether `x-amzn-oidc-data`, `x-amzn-oidc-accesstoken`, and `x-amzn-oidc-identity` are present, plus their lengths.
 - `x-amzn-oidc-identity` as a salted SHA-256 prefix (first 16 hex characters). The salt is random per daemon startup and kept in memory only, so hashes correlate within one process but never across restarts or instances.
 - JWT header fields (`kid`, `alg`, `signer`, `typ`) from each JWT-looking header.
-- Per-claim name, JSON type, value length, and capped value for every claim in `x-amzn-oidc-data` and, when the access token looks like a JWT, for every claim in `x-amzn-oidc-accesstoken`.
+- Per-claim name, JSON type, and capped value for every claim in `x-amzn-oidc-data` and, when the access token looks like a JWT, for every claim in `x-amzn-oidc-accesstoken`. JSON-format logs also include raw value length in the aggregate claims map.
 
 With `--log-format=json`, JWT diagnostics are emitted as aggregate `oidc_debug_data` and `oidc_debug_accesstoken` records with nested `header` and `claims` objects. With `--log-format=text`, the daemon avoids unreadable `claims="map[...]"` output and emits flat records instead, such as `oidc_debug_data_header`, `oidc_debug_data_claim`, `oidc_debug_accesstoken_header`, and `oidc_debug_accesstoken_claim`.
+
+OIDC debug records include `sid=<session-id>` after the callback `state` has
+been successfully verified. If `state` is missing or invalid, these records use
+`sid=""` because the daemon cannot trust or extract a session ID before state
+verification succeeds.
 
 The daemon emits a startup warning with key `event=oidc_debug_enabled` when this mode is enabled so operators can alert on accidental enablement.
 

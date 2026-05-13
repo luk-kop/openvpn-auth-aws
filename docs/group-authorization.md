@@ -147,13 +147,9 @@ When enabled, it logs:
 
 - Whether `x-amzn-oidc-data`, `x-amzn-oidc-accesstoken`, and
   `x-amzn-oidc-identity` are present, plus their lengths.
-- One `oidc_debug_data` record for `x-amzn-oidc-data`, with JWT header fields
-  `kid`, `alg`, `signer`, and `typ` when present, plus a `claims` map keyed by
-  claim name. Each claim contains JSON `type`, raw value `len`, and capped
-  `value`.
-- One `oidc_debug_accesstoken` record when the access token looks like a JWT,
-  with header metadata and a `claims` map. Each claim contains JSON `type`, raw
-  value `len`, and capped `value`.
+- JWT header fields `kid`, `alg`, `signer`, and `typ` when present.
+- Per-claim name, JSON `type`, and capped `value`. JSON-format logs also
+  include raw value `len` in the aggregate claims map.
 - `x-amzn-oidc-identity` as a salted SHA-256 prefix, not as the raw value. The
   salt is generated once per daemon startup and kept in memory only, so the
   same identity yields a stable hash within one daemon process but a different
@@ -164,15 +160,64 @@ When enabled, it logs:
 Values are capped at 2048 bytes. Truncated values get the suffix
 `<truncated,total_bytes=X>` appended inline.
 
-Normal debug output emits at most three records per callback:
+With `--log-format=json`, JWT diagnostics are emitted as aggregate records:
 
 - `oidc_debug_headers`
 - `oidc_debug_data`
 - `oidc_debug_accesstoken`
 
-Malformed JWTs still use the token-level `oidc_debug_data` or
-`oidc_debug_accesstoken` record with an error field such as `token_error`,
-`header_error`, or `payload_error`.
+With `--log-format=text`, JWT diagnostics are emitted as flat records to keep
+`journalctl` output readable:
+
+- `oidc_debug_headers`
+- `oidc_debug_data_header`
+- `oidc_debug_data_claim`
+- `oidc_debug_accesstoken_header`
+- `oidc_debug_accesstoken_claim`
+
+After callback `state` verification succeeds, OIDC debug records include the
+verified `sid`. If `state` is missing or invalid, these records use `sid=""`
+because the daemon cannot trust or extract a session ID.
+
+Example text-format investigation for `--groups-source=jwt-claim`:
+
+```text
+level=INFO msg="groups source configured" source=jwt-claim claim=custom:groups reauth_group_check=false claim_ignored=false
+level=WARN msg="oidc debug claim logging enabled; lab/debug only, do not enable in production" event=oidc_debug_enabled
+level=DEBUG msg=oidc_debug_headers sid=sid_example oidc_data_present=true oidc_data_len=1338 accesstoken_present=true accesstoken_len=1089 identity_present=true identity_len=36 identity_hash=0123456789abcdef
+level=DEBUG msg=oidc_debug_data_header sid=sid_example header_alg=ES256 header_kid=alb-key-id header_signer=arn:aws:elasticloadbalancing:region:account:loadbalancer/app/example/abc123 header_typ=JWT
+level=DEBUG msg=oidc_debug_data_claim sid=sid_example name=custom:groups type=string value="[group-id-1, group-id-2]"
+level=DEBUG msg=oidc_debug_data_claim sid=sid_example name=email type=string value=user@example.com
+level=DEBUG msg=oidc_debug_data_claim sid=sid_example name=username type=string value=IdP_user@example.com
+level=DEBUG msg=oidc_debug_accesstoken_claim sid=sid_example name=cognito:groups type=array value="[\"userpool_IdP\"]"
+```
+
+The configured claim is the top-level `custom:groups` value from
+`x-amzn-oidc-data`. The `cognito:groups` value shown in the access token is
+diagnostic only; it is not used by `--groups-source=jwt-claim`.
+
+If the configured `--required-group` does not exactly match a parsed claim
+value, the group-check diagnostic shows the parsed count but `matched=false`:
+
+```text
+level=DEBUG msg="callback: jwt claim group check" sid=sid_example groups_source=jwt-claim claim=custom:groups claim_present=true groups_count=2 required_group_hash=aaaaaaaaaaaaaaaa matched=false
+level=WARN msg="callback: user not in required group" sid=sid_example group=group-id-1-typo email=user@example.com
+```
+
+After setting `--required-group` to the exact observed value, the same callback
+shape should match and authenticate:
+
+```text
+level=DEBUG msg="callback: jwt claim group check" sid=sid_example groups_source=jwt-claim claim=custom:groups claim_present=true groups_count=2 required_group_hash=bbbbbbbbbbbbbbbb matched=true
+level=INFO msg="callback: auth success" sid=sid_example email=user@example.com
+level=INFO msg=established cid=3
+```
+
+Malformed JWTs still use the token-level prefix with an error field such as
+`token_error`, `header_error`, or `payload_error`. In JSON format that is the
+aggregate `oidc_debug_data` / `oidc_debug_accesstoken` record; in text format
+header errors are logged on `*_header`, while payload errors use the token-level
+record name.
 
 OIDC debug logging never logs raw JWT strings, raw access-token strings,
 cookies, authorization codes, or secrets. It can expose PII and access-token

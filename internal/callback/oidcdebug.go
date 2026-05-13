@@ -199,9 +199,20 @@ func (l *oidcDebugLogger) logJWTFlat(eventPrefix string, parts []string, session
 			"sid", sessionID,
 			"name", name,
 			"type", info["type"],
-			"len", info["len"],
-			"value", info["value"])
+			"value", textClaimValue(info))
 	}
+}
+
+func textClaimValue(info map[string]any) any {
+	value, _ := info["value"].(string)
+	if info["type"] != "string" {
+		return value
+	}
+	var decoded string
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		return value
+	}
+	return decoded
 }
 
 func appendFlatHeaderAttrs(attrs []any, header map[string]any) []any {

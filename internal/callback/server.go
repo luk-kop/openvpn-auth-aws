@@ -145,11 +145,6 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	s.metrics.CallbackReceived()
 
-	// OIDC debug logging runs before state validation so that malformed or
-	// unexpected callbacks are still diagnosable. It is a no-op when the
-	// feature flag is disabled (nil receiver).
-	s.oidcDebug.Log(r, "")
-
 	// Step 1: Extract and verify state blob.
 	// OpenVPN 2.x logs WEB_AUTH as ('URL'); some terminals include the
 	// closing apostrophe when linkifying the URL. ALB's OAuth roundtrip can
@@ -159,6 +154,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	stateParam := strings.TrimSuffix(rawState, "%27")
 	stateParam = strings.TrimSuffix(stateParam, "'")
 	if stateParam == "" {
+		// Keep OIDC diagnostics for malformed callbacks. No SID can be trusted
+		// until state has been decoded successfully.
+		s.oidcDebug.Log(r, "")
 		s.metrics.CallbackRejected("missing_state")
 		s.renderError(w, http.StatusBadRequest, "Session Error", "Authentication state is missing or invalid.", "")
 		return
@@ -175,10 +173,17 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			"raw_len", len(rawState),
 			"raw_tail", rawTail,
 			"trimmed", rawState != stateParam)
+		// Keep OIDC diagnostics for invalid-state callbacks, but leave sid
+		// empty because the state payload could not be trusted.
+		s.oidcDebug.Log(r, "")
 		s.metrics.CallbackRejected("invalid_state")
 		s.renderError(w, http.StatusBadRequest, "Session Error", "Authentication state is missing or invalid.", "")
 		return
 	}
+
+	// For normal callbacks, emit OIDC diagnostics after state validation so
+	// every debug record can be correlated with the session.
+	s.oidcDebug.Log(r, payload.SID)
 
 	// Step 2: Transition session from PENDING → PROCESSING.
 	sess, err := s.sessions.TryProcess(payload.SID)

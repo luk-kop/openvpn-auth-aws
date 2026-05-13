@@ -256,6 +256,35 @@ func TestHandleCallback_InvalidStateHMAC(t *testing.T) {
 	assertRejectedReason(t, m, "invalid_state")
 }
 
+func TestHandleCallback_InvalidStateLogsOIDCDebugWithoutSID(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.OIDCDebugClaims = true
+	cfg.LogFormat = "text"
+	srv, _, _ := newTestServer(cfg, nil)
+	valid := validStateParam(t, "some-sid")
+	parts := strings.SplitN(valid, ".", 2)
+	tampered := parts[0] + ".AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", nil, time.Now().Add(5*time.Minute).Unix())
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+tampered, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	buf := withLogger(t, func() {
+		srv.Handler().ServeHTTP(w, req)
+	})
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	rec := findRecord(parseLogRecords(t, buf), "oidc_debug_data_header")
+	if rec == nil {
+		t.Fatal("expected OIDC debug record for invalid state")
+	}
+	if rec["sid"] != "" {
+		t.Fatalf("expected empty sid for invalid state OIDC debug, got %v", rec["sid"])
+	}
+}
+
 func TestHandleCallback_ExpiredState(t *testing.T) {
 	srv, _, m := newTestServer(defaultCfg(), nil)
 	state := expiredStateParam(t, "some-sid")
@@ -268,6 +297,42 @@ func TestHandleCallback_ExpiredState(t *testing.T) {
 	}
 	assertHTMLResponse(t, w, "Session Error")
 	assertRejectedReason(t, m, "invalid_state")
+}
+
+func TestHandleCallback_ValidStateLogsOIDCDebugWithSID(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.OIDCDebugClaims = true
+	cfg.LogFormat = "text"
+	cfg.GroupsSource = config.GroupsSourceJWTClaim
+	cfg.GroupsClaim = "cognito:groups"
+	srv, sessions, _, _ := newTestServerWithSessions(cfg, nil)
+	l, err := newOIDCDebugLogger(true, cfg.LogFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.oidcDebug = l
+
+	const sid = "oidc-debug-sid"
+	addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	oidcJWT := makeUnsignedJWT("user@example.com", "sub123", []string{"vpn-users"}, time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	buf := withLogger(t, func() {
+		srv.Handler().ServeHTTP(w, req)
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	rec := findRecord(parseLogRecords(t, buf), "oidc_debug_data_header")
+	if rec == nil {
+		t.Fatal("expected OIDC debug record")
+	}
+	if rec["sid"] != sid {
+		t.Fatalf("expected sid %q in OIDC debug, got %v", sid, rec["sid"])
+	}
 }
 
 func TestHandleCallback_SessionNotFound(t *testing.T) {

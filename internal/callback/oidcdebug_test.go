@@ -362,8 +362,11 @@ func TestLog_TextFormatEmitsFlatClaimRecords(t *testing.T) {
 	if claim == nil {
 		t.Fatalf("expected flat custom:groups claim record, got %+v", records)
 	}
-	if claim["type"] != "string" || claim["len"] != float64(10) || claim["value"] != "\"[g1, g2]\"" {
+	if claim["type"] != "string" || claim["value"] != "[g1, g2]" {
 		t.Fatalf("unexpected flat claim fields: %+v", claim)
+	}
+	if _, ok := claim["len"]; ok {
+		t.Fatalf("text claim record should not include len: %+v", claim)
 	}
 	for _, rec := range records {
 		if _, ok := rec["claims"]; ok {
