@@ -1,5 +1,15 @@
 # Global Single-Session Enforcement in Multi-Instance Mode
 
+## Table of Contents
+
+- [Purpose](#purpose)
+- [Current Limitation](#current-limitation)
+- [Options](#options)
+- [Option 3 Design: DynamoDB Shared Session Store](#option-3-design-dynamodb-shared-session-store)
+- [Additional Uses](#additional-uses)
+- [Required Changes (Option 3)](#required-changes-option-3)
+- [Test Requirement: `client-kill` on Zombie UDP Session](#test-requirement-client-kill-on-zombie-udp-session)
+
 > **Status:** This feature is **not currently implemented**. This document describes a planned design for future global single-session enforcement. Current code relies on OpenVPN's default per-process duplicate-CN behavior plus local daemon stale-state cleanup.
 
 ## Purpose

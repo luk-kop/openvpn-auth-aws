@@ -1,5 +1,20 @@
 # Entra Graph Reauth Design
 
+## Table of Contents
+
+- [Goal](#goal)
+- [Proposed Flags](#proposed-flags)
+- [Callback Requirements](#callback-requirements)
+- [Graph Calls](#graph-calls)
+- [Permissions](#permissions)
+- [Caching And Failure Mode](#caching-and-failure-mode)
+- [Latency And Revocation](#latency-and-revocation)
+- [Direct Entra OIDC vs Cognito Federation](#direct-entra-oidc-vs-cognito-federation)
+- [Why Not Put This In `groups-source`](#why-not-put-this-in-groups-source)
+- [Risks](#risks)
+- [Implementation Sketch](#implementation-sketch)
+- [References](#references)
+
 This document sketches a possible future design for reauth-time group checks
 against Microsoft Entra ID through Microsoft Graph. It is not implemented today.
 

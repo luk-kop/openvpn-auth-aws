@@ -1,5 +1,16 @@
 # Testing Strategy
 
+## Table of Contents
+
+- [Development & Testing Modes](#development--testing-modes)
+  - [Mode 1: Full Local (no AWS)](#mode-1-full-local-no-aws)
+  - [Mode 2: Full AWS (Terraform)](#mode-2-full-aws-terraform)
+  - [Terraform Deployment Modes](#terraform-deployment-modes)
+- [Unit Tests](#unit-tests)
+  - [Test Coverage](#test-coverage)
+  - [Adding New Tests](#adding-new-tests)
+- [CI/CD Recommendations](#cicd-recommendations)
+
 ## Development & Testing Modes
 
 There are two supported modes for running and testing the daemon. Each covers a different subset of the auth flow.

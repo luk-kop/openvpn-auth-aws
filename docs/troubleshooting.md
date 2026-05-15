@@ -1,5 +1,29 @@
 # Troubleshooting
 
+## Table of Contents
+
+- [Useful Commands](#useful-commands)
+  - [Cloud-init](#cloud-init)
+  - [OpenVPN](#openvpn)
+  - [OpenVPN Management Interface](#openvpn-management-interface)
+  - [Auth Daemon](#auth-daemon)
+  - [AWS CLI](#aws-cli)
+  - [ALB & Target Groups](#alb--target-groups)
+  - [PKI / Certificates](#pki--certificates)
+  - [Debugging Auth Flow](#debugging-auth-flow)
+  - [NetworkManager OpenVPN GUI Fails Before Browser Opens](#networkmanager-openvpn-gui-fails-before-browser-opens)
+  - [SSM Session Manager](#ssm-session-manager)
+- [Known Issues](#known-issues)
+  - [`aws: command not found`](#aws-command-not-found)
+  - [OpenVPN stuck in `activating (start)` with `management-hold`](#openvpn-stuck-in-activating-start-with-management-hold)
+  - [SSM Agent `unable to acquire credentials`](#ssm-agent-unable-to-acquire-credentials)
+  - [Cloud-init does not pick up new user_data](#cloud-init-does-not-pick-up-new-user_data)
+  - [Daemon crashes with `invalid value "300" for flag -hand-window: parse error`](#daemon-crashes-with-invalid-value-300-for-flag--hand-window-parse-error)
+  - [Callback returns 500 after Cognito login](#callback-returns-500-after-cognito-login)
+  - [Callback returns 403 `invalid jwt header` (base64 padding)](#callback-returns-403-invalid-jwt-header-base64-padding)
+  - [debconf `Failed to open terminal` errors](#debconf-failed-to-open-terminal-errors)
+  - [Client hangs after invalid or tampered state](#client-hangs-after-invalid-or-tampered-state)
+
 ## Useful Commands
 
 ### Cloud-init

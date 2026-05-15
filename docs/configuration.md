@@ -1,5 +1,14 @@
 # Configuration
 
+## Table of Contents
+
+- [Daemon Flags](#daemon-flags)
+- [Lambda Router Environment Variables](#lambda-router-environment-variables)
+- [Dev vs Production Flag Matrix](#dev-vs-production-flag-matrix)
+- [Logging](#logging)
+- [EMF Metrics](#emf-metrics)
+- [HTML Templates](#html-templates)
+
 All flags can be set via environment variables with `VPN_AUTH_` prefix.
 
 ## Daemon Flags

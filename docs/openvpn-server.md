@@ -1,5 +1,21 @@
 # OpenVPN Server Configuration
 
+## Table of Contents
+
+- [Tested Version](#tested-version)
+- [OpenVPN 2.7 Multi-Socket Example](#openvpn-27-multi-socket-example)
+- [Required Directives](#required-directives)
+- [Unsupported Directives](#unsupported-directives)
+- [Recommended Settings](#recommended-settings)
+- [NAT Masquerade (nftables)](#nat-masquerade-nftables)
+- [Pushed Routes](#pushed-routes)
+- [EC2 Security Group Rules for Forwarded Traffic](#ec2-security-group-rules-for-forwarded-traffic)
+- [Client Config](#client-config)
+- [Client Compatibility](#client-compatibility)
+- [OpenVPN3 Linux CLI](#openvpn3-linux-cli)
+- [OpenVPN3 Linux GUI: openvpn3-indicator](#openvpn3-linux-gui-openvpn3-indicator)
+- [Management Interface Protocol](#management-interface-protocol)
+
 ## Tested Version
 
 This project targets **OpenVPN CE 2.7.4** (installed from the [official OpenVPN 2.7 repository](https://build.openvpn.net/debian/openvpn/release/2.7/)). The version is pinned and configurable:
