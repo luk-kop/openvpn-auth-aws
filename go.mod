@@ -3,7 +3,7 @@ module openvpn-auth-aws
 go 1.26.3
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.41.7
+	github.com/aws/aws-sdk-go-v2 v1.41.8
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.60.2
