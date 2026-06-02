@@ -60,6 +60,8 @@ cipher AES-256-GCM
 data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
 tls-version-min 1.2
 verb 3
+status-version 2
+status /var/log/openvpn/status.log
 
 # TLS renegotiation interval — use RENEG_SEC=30 for faster lab REAUTH capture.
 reneg-sec $RENEG_SEC

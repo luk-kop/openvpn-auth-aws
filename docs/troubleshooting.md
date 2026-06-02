@@ -104,11 +104,14 @@ state
 help
 ```
 
+The daemon uses management `status 3` during bootstrap/recovery. Separately, the server config sets `status-version 2` for the operator status file so `cat /var/log/openvpn/status-*.log` uses stable comma-separated `HEADER` / `CLIENT_LIST` / `ROUTING_TABLE` rows.
+
 What to look for in `status 3`:
 
 - `CLIENT_LIST` rows: active client sessions
 - `Client ID`: the CID used by the auth daemon
 - `Common Name`: certificate CN seen by OpenVPN
+- `Username`: OpenVPN `auth-user-pass` username, if the client sent one. `UNDEF` is expected in the default project flow because generated profiles omit `auth-user-pass`.
 - `Connected Since (time_t)`: Unix timestamp used by daemon bootstrap/session rebuild
 - `END`: if missing, the daemon bootstrap will not complete
 
@@ -118,6 +121,19 @@ This is especially useful for:
 - checking the exact `status 3` format returned by your OpenVPN build
 - confirming whether a disconnect has already been recognized by OpenVPN
 - understanding what the daemon sees during management bootstrap
+
+If `CLIENT_LIST.Common Name` is `UNDEF` while daemon raw management logs show `>CLIENT:ENV,common_name=<user>`, check the OpenVPN server config for `username-as-common-name`. That directive is unsupported for this project because clients do not send a required OpenVPN username; it can replace the certificate CN with `UNDEF` in status output. Remove `username-as-common-name`, restart OpenVPN, and reconnect the client.
+
+A healthy default-flow session looks like this. The same certificate CN appears in both `CLIENT_LIST` and `ROUTING_TABLE`, while `Username` is `UNDEF` because the generated client profile does not use `auth-user-pass`:
+
+```text
+HEADER,CLIENT_LIST,Common Name,Real Address,Virtual Address,Virtual IPv6 Address,Bytes Received,Bytes Sent,Connected Since,Connected Since (time_t),Username,Client ID,Peer ID,Data Channel Cipher
+CLIENT_LIST,user@example.com,udp4:203.0.113.10:57685,10.11.8.2,,14634922,11795596,2026-05-15 09:33:19,1778837599,UNDEF,2,0,AES-128-GCM
+HEADER,ROUTING_TABLE,Virtual Address,Common Name,Real Address,Last Ref,Last Ref (time_t)
+ROUTING_TABLE,10.11.8.2,user@example.com,udp4:203.0.113.10:57685,2026-05-15 11:27:21,1778844441
+GLOBAL_STATS,dco_enabled,0
+END
+```
 
 Be careful: the management interface is not read-only. Some commands can disconnect clients or alter server behavior. Use diagnostic commands only unless you intentionally want to modify live state.
 

@@ -261,9 +261,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		_ = client.Close()
 		if err != nil {
 			slog.Warn("management connection lost", "error", err)
+			slog.Info("management reconnecting")
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
+		slog.Info("management connection closed")
+		slog.Info("management reconnecting")
 	}
 }
 

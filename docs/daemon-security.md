@@ -43,6 +43,7 @@ Key properties:
 - **Client profile possession is required.** The generated client profile includes a TLS client certificate and private key. The server expects a certificate-derived `common_name`; certificate-less connects are denied by the daemon.
 - **`tls-crypt` protects the OpenVPN control channel.** It encrypts and authenticates the TLS control channel with a shared static key, reducing unauthenticated exposure before the TLS/auth flow.
 - **No static VPN password is required.** The server uses `auth-user-pass-optional` so clients do not need `auth-user-pass`; identity comes from the certificate CN and authorization comes from OIDC.
+- **Certificate CN must not be replaced by username.** Do not enable OpenVPN `username-as-common-name`. This project does not require an OpenVPN username, so replacing CN with username can produce `UNDEF` Common Names and break session recovery/diagnostics.
 - **OpenVPN cannot complete auth without the daemon.** `management-client-auth` puts the client into pending authentication, and the daemon must send `client-auth <cid> <kid>` before the tunnel is established.
 - **The WebAuth callback is bound to daemon state.** The `state` parameter in the `WEB_AUTH::` URL is HMAC-signed and expires after the configured handshake window.
 - **The callback must be authenticated by ALB/Cognito.** The daemon verifies the ALB-signed OIDC JWT before accepting a callback.
