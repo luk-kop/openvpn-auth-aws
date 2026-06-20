@@ -12,7 +12,7 @@ COPY . .
 # Build
 RUN CGO_ENABLED=0 GOOS=linux go build -o openvpn-auth-daemon ./cmd/openvpn-auth-daemon
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 RUN apk --no-cache add ca-certificates
 
