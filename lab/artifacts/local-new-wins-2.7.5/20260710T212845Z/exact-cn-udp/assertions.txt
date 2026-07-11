@@ -1,0 +1,5 @@
+old_alive_during_pending=true
+old_alive_after_abandoned_replacement=true
+replacement_established=true
+old_server_cid=0
+old_server_disconnect_after_replacement=true

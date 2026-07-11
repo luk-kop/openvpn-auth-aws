@@ -31,7 +31,7 @@ All flags can be set via environment variables with `VPN_AUTH_` prefix.
 | `--cognito-skip-reauth` | `VPN_AUTH_COGNITO_SKIP_REAUTH` | `false` | Skip Cognito `AdminGetUser` call on `CLIENT:REAUTH` (dev/test only) |
 | `--required-group` | `VPN_AUTH_REQUIRED_GROUP` | empty | Required Cognito group for VPN access. Empty disables group enforcement in the daemon; Terraform sets this to `vpn-users` by default. |
 | `--hand-window` | `VPN_AUTH_HAND_WINDOW` | `5m` | OpenVPN `hand-window` — time allowed for the full TLS handshake including auth. Must match the OpenVPN server config |
-| `--auth-timeout` | `VPN_AUTH_AUTH_TIMEOUT` | `4m30s` | How long the daemon waits for the browser auth callback. Must be less than `--hand-window` so `AUTH_FAILED` reaches the client before it self-restarts |
+| `--auth-timeout` | `VPN_AUTH_AUTH_TIMEOUT` | `4m30s` | How long the daemon waits for the browser auth callback. Startup requires `0 < auth-timeout < hand-window`; this leaves OpenVPN time to deliver `AUTH_FAILED` before its handshake deadline |
 | `--reneg-interval` | `VPN_AUTH_RENEG_INTERVAL` | `1h` | OpenVPN `reneg-sec` value. Used to compute reauth cache TTL (`reneg-interval + 10m`) |
 | `--reconnect-max-interval` | `VPN_AUTH_RECONNECT_MAX_INTERVAL` | `5s` | Max backoff between management socket reconnect attempts |
 | `--shutdown-grace-period` | `VPN_AUTH_SHUTDOWN_GRACE_PERIOD` | `5m` | Grace period for in-flight session draining during graceful shutdown |
@@ -215,6 +215,7 @@ The Lambda Router (used in multi-instance mode) is configured via environment va
 | `VPC_CIDR` | yes | — | CIDR VPC for IP validation (e.g. `10.0.0.0/16`) |
 | `DAEMON_PORT_UDP` | no | `8080` | Daemon port for UDP listeners |
 | `DAEMON_PORT_TCP` | no | `8081` | Daemon port for TCP listeners |
+| `UPSTREAM_CONNECT_TIMEOUT` | no | `3s` | TCP connection timeout to the target daemon; must be shorter than `UPSTREAM_TIMEOUT` (`time.ParseDuration` format) |
 | `UPSTREAM_TIMEOUT` | no | `10s` | HTTP timeout to upstream daemon (`time.ParseDuration` format) |
 | `OIDC_HEADERS` | no | `["x-amzn-oidc-data","x-amzn-oidc-accesstoken","x-amzn-oidc-identity"]` | JSON array of OIDC header names to forward to daemon |
 | `LOG_LEVEL` | no | `info` | Log level: `debug`, `info`, `warn`, `error` |
@@ -290,8 +291,8 @@ All metrics are emitted under the `VPNAuth` namespace with `InstanceId` as the p
 | `SocketConnected` | gauge | — | Management socket connectivity (0/1), emitted on heartbeat interval |
 | `StoredSessions` | gauge | — | Number of in-memory sessions, emitted on heartbeat interval |
 | `AuthAttempt` | counter | — | `CLIENT:CONNECT` received and session created |
-| `AuthSuccess` | counter | — | Callback verification passed, `client-auth` sent |
-| `AuthDenied` | counter | `timeout`, `no_webauth`, `missing_common_name`, `url_too_long`, `internal_error`, `missing_oidc_header`, `invalid_jwt_header`, `jwt_validation_failed`, `invalid_jwt_claims`, `cn_mismatch`, `group_check_error`, `group_denied` | Auth denied via `client-deny` |
+| `AuthSuccess` | counter | — | Callback verification passed and OpenVPN acknowledged `client-auth` |
+| `AuthDenied` | counter | `timeout`, `no_webauth`, `missing_common_name`, `invalid_identity`, `url_too_long`, `internal_error`, `missing_oidc_header`, `invalid_jwt_header`, `jwt_validation_failed`, `invalid_jwt_claims`, `cn_mismatch`, `group_check_error`, `group_denied` | Auth denied via `client-deny` |
 | `CallbackRejected` | counter | see below | HTTP callback rejected (all error paths in `handleCallback`) |
 | `ReauthSuccess` | counter | — | `CLIENT:REAUTH` allowed |
 | `ReauthDenied` | counter | `missing_common_name`, `user_not_found`, `user_disabled`, `group_denied`, `cognito_error`, `session_untracked` | Reauth denied |
@@ -315,6 +316,7 @@ All metrics are emitted under the `VPNAuth` namespace with `InstanceId` as the p
 | `public_key_fetch_failed` | 503 | Could not fetch ALB public key (retryable) |
 | `jwt_validation_failed` | 403 | ES256 signature, signer ARN, or expiry check failed |
 | `invalid_jwt_claims` | 403 | JWT claims parse error (dev mode) |
+| `invalid_identity` | 403 | CN or OIDC email is empty, invalid UTF-8, or has surrounding whitespace |
 | `cn_mismatch` | 403 | JWT email does not match certificate CN |
 | `group_check_error` | 403 | Cognito API error during group lookup |
 | `group_denied` | 403 | User not in required group |

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,13 +37,18 @@ type sessionExpiry struct {
 // (e.g. clearing cancel/sid in clearInFlight while keeping cn/kid for
 // a later DISCONNECT) are possible without re-inserting into the map.
 type cidState struct {
-	cancel          context.CancelFunc // non-nil while pending auth (in-flight)
-	sid             string             // session ID while in-flight
-	cn              string             // common_name
-	kid             string             // KID (for client-deny on eviction)
-	expiry          *sessionExpiry     // non-nil when established with max-session-duration
-	promoted        bool               // passed callback but not yet ESTABLISHED
-	cognitoUsername string             // for federated reauth
+	cancel            context.CancelFunc // non-nil while pending auth (in-flight)
+	sid               string             // session ID while in-flight
+	cn                string             // common_name
+	identity          string             // normalized ownership identity
+	kid               string             // KID (for client-deny on eviction)
+	connectAt         time.Time          // original CLIENT:CONNECT time
+	expiry            *sessionExpiry     // non-nil when established with max-session-duration
+	promoted          bool               // passed callback but not yet ESTABLISHED
+	promotedCancel    context.CancelFunc // establishment deadline/re-check cancellation
+	established       bool               // confirmed by event or status
+	evictionRequested bool               // replacement kill sent; retain until confirmed gone
+	cognitoUsername   string             // for federated reauth
 }
 
 type Handler struct {
@@ -60,12 +66,19 @@ type Handler struct {
 	timeoutSink  DecisionSink
 	lifecycleCtx context.Context
 
-	mu            sync.Mutex
-	cids          map[string]*cidState // CID → per-connection state
-	cnToActiveCID map[string]string    // common_name → CID (local stale-state cleanup)
-	liveSink      DecisionSink
+	mu                   sync.Mutex
+	cids                 map[string]*cidState // CID → per-connection state
+	identityToActiveCID  map[string]string    // normalized identity → established active CID
+	identityToAttemptCID map[string]string    // normalized identity → pending/processing/promoted CID
+	liveSink             DecisionSink
+	statusProvider       StatusProvider
+	promotedRecheckDelay time.Duration
 
 	reauthWG sync.WaitGroup
+}
+
+type StatusProvider interface {
+	Status(context.Context) (mgmt.StatusSnapshot, error)
 }
 
 func NewHandler(cfg config.Config, sessions *SessionStore, identity IdentityChecker, signer StateSigner, metrics Metrics) *Handler {
@@ -75,14 +88,16 @@ func NewHandler(cfg config.Config, sessions *SessionStore, identity IdentityChec
 	}
 
 	return &Handler{
-		cfg:           cfg,
-		sessions:      sessions,
-		identity:      identity,
-		signer:        signer,
-		metrics:       metrics,
-		cache:         cache,
-		cids:          make(map[string]*cidState),
-		cnToActiveCID: make(map[string]string),
+		cfg:                  cfg,
+		sessions:             sessions,
+		identity:             identity,
+		signer:               signer,
+		metrics:              metrics,
+		cache:                cache,
+		cids:                 make(map[string]*cidState),
+		identityToActiveCID:  make(map[string]string),
+		identityToAttemptCID: make(map[string]string),
+		promotedRecheckDelay: 5 * time.Second,
 	}
 }
 
@@ -110,6 +125,18 @@ func (h *Handler) ClearLiveSink() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.liveSink = nil
+}
+
+func (h *Handler) SetStatusProvider(provider StatusProvider) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.statusProvider = provider
+}
+
+func (h *Handler) ClearStatusProvider() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.statusProvider = nil
 }
 
 func (h *Handler) InFlight() int {
@@ -161,6 +188,13 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "missing common name"})
 		return
 	}
+	identity, err := NormalizeIdentity(event.CommonName())
+	if err != nil {
+		slog.Warn("connect denied", "cid", event.CID, "cn", event.CommonName(), "reason", "invalid identity", "error", err)
+		h.metrics.AuthDenied("invalid_identity")
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "invalid identity"})
+		return
+	}
 
 	guiVer := event.Env["IV_GUI_VER"]
 	if guiVer == "" {
@@ -176,23 +210,6 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 		"gui_ver", guiVer,
 		"ssl", event.Env["IV_SSL"],
 	)
-
-	// Local stale-state cleanup: OpenVPN rejects duplicate CNs by default within
-	// a single server process. If daemon state still contains an older CID for
-	// this CN, clean it up so timeout/session tracking cannot linger.
-	h.mu.Lock()
-	existingCID, active := h.cnToActiveCID[event.CommonName()]
-	h.mu.Unlock()
-	if active && existingCID != event.CID {
-		if d, evicted := h.evictSession(existingCID); evicted {
-			action := "client-deny"
-			if d.Type == DecisionKill {
-				action = "client-kill"
-			}
-			slog.Info("evict stale local session", "cn", event.CommonName(), "old_cid", existingCID, "new_cid", event.CID, "action", action)
-			sendOrLog(sink, d)
-		}
-	}
 
 	sessionID, err := generateRandomToken(16)
 	if err != nil {
@@ -239,7 +256,79 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 		return
 	}
 
+	timeoutCtx, cancel := context.WithCancel(ctx)
+	var superseded *cidState
+	var oldAttemptCID string
+	var supersededCancel context.CancelFunc
+	h.mu.Lock()
+	if existingCID := h.identityToAttemptCID[identity]; existingCID != "" {
+		if existingCID == event.CID {
+			h.mu.Unlock()
+			cancel()
+			slog.Info("duplicate connect ignored", "cid", event.CID, "identity", identity)
+			return
+		}
+		existing := h.cids[existingCID]
+		switch {
+		case existing == nil:
+			delete(h.identityToAttemptCID, identity)
+		case existing.promoted:
+			provider := h.statusProvider
+			h.mu.Unlock()
+			cancel()
+			if provider != nil {
+				snapshot, statusErr := provider.Status(ctx)
+				if statusErr == nil {
+					client, present := snapshot.ClientByCID(existingCID)
+					if !present {
+						h.cleanupPromoted(existingCID)
+						h.handleConnect(ctx, event, sink)
+						return
+					}
+					if client.Established {
+						h.establishCID(existingCID, client.ConnectedAt, true)
+					}
+				} else {
+					slog.Warn("promoted conflict status failed", "cid", existingCID, "error", statusErr)
+				}
+			}
+			h.metrics.AuthDenied("auth_in_progress")
+			sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "authentication already in progress; retry connection"})
+			return
+		case existing.cancel != nil:
+			if _, supersedeErr := h.sessions.SupersedePending(existing.sid); supersedeErr != nil {
+				h.mu.Unlock()
+				cancel()
+				h.metrics.AuthDenied("auth_in_progress")
+				sendOrLog(sink, Decision{Type: DecisionDeny, CID: event.CID, KID: event.KID, Reason: "authentication already in progress; retry connection"})
+				return
+			}
+			superseded = existing
+			oldAttemptCID = existingCID
+			supersededCancel = existing.cancel
+			existing.cancel = nil
+			existing.sid = ""
+		default:
+			delete(h.identityToAttemptCID, identity)
+		}
+	}
 	h.sessions.Put(session)
+	h.cids[event.CID] = &cidState{
+		cancel:    cancel,
+		sid:       sessionID,
+		cn:        event.CommonName(),
+		identity:  identity,
+		kid:       event.KID,
+		connectAt: now,
+	}
+	h.identityToAttemptCID[identity] = event.CID
+	h.mu.Unlock()
+
+	if superseded != nil {
+		supersededCancel()
+		slog.Info("pending attempt superseded", "identity", identity, "old_cid", oldAttemptCID, "new_cid", event.CID)
+		sendOrLog(sink, Decision{Type: DecisionDeny, CID: oldAttemptCID, KID: superseded.kid, Reason: "replaced by new connection"})
+	}
 
 	slog.Info("connect pending auth", "cid", event.CID, "cn", event.CommonName(), "timeout", h.cfg.AuthTimeout)
 	h.metrics.AuthAttempt("")
@@ -258,8 +347,6 @@ func (h *Handler) handleConnect(ctx context.Context, event mgmt.Event, sink Deci
 	if tSink == nil {
 		tSink = sink // fallback for tests
 	}
-	timeoutCtx, cancel := context.WithCancel(ctx)
-	h.setInFlight(event.CID, sessionID, event.CommonName(), event.KID, cancel)
 	go h.authTimeout(timeoutCtx, session, tSink)
 }
 
@@ -400,8 +487,11 @@ func (h *Handler) evictSession(cid string) (Decision, bool) {
 	h.mu.Lock()
 	st := h.cids[cid]
 	delete(h.cids, cid)
-	if st != nil && st.cn != "" && h.cnToActiveCID[st.cn] == cid {
-		delete(h.cnToActiveCID, st.cn)
+	if st != nil && h.identityToActiveCID[st.identity] == cid {
+		delete(h.identityToActiveCID, st.identity)
+	}
+	if st != nil && h.identityToAttemptCID[st.identity] == cid {
+		delete(h.identityToAttemptCID, st.identity)
 	}
 	h.mu.Unlock()
 
@@ -415,6 +505,9 @@ func (h *Handler) evictSession(cid string) (Decision, bool) {
 	}
 	if st.expiry != nil {
 		st.expiry.cancel()
+	}
+	if st.promotedCancel != nil {
+		st.promotedCancel()
 	}
 	if st.sid != "" {
 		h.sessions.Delete(st.sid)
@@ -437,8 +530,11 @@ func (h *Handler) handleDisconnect(event mgmt.Event) {
 	h.mu.Lock()
 	st := h.cids[event.CID]
 	delete(h.cids, event.CID)
-	if st != nil && st.cn != "" && h.cnToActiveCID[st.cn] == event.CID {
-		delete(h.cnToActiveCID, st.cn)
+	if st != nil && h.identityToActiveCID[st.identity] == event.CID {
+		delete(h.identityToActiveCID, st.identity)
+	}
+	if st != nil && h.identityToAttemptCID[st.identity] == event.CID {
+		delete(h.identityToAttemptCID, st.identity)
 	}
 	h.mu.Unlock()
 	if st == nil {
@@ -449,6 +545,9 @@ func (h *Handler) handleDisconnect(event mgmt.Event) {
 	}
 	if st.expiry != nil {
 		st.expiry.cancel()
+	}
+	if st.promotedCancel != nil {
+		st.promotedCancel()
 	}
 	if st.sid != "" {
 		h.sessions.Delete(st.sid)
@@ -477,16 +576,27 @@ func (h *Handler) promoteSession(cid string) {
 	}
 	cancel := st.cancel
 	sid := st.sid
+	connectAt := st.connectAt
+	if connectAt.IsZero() {
+		connectAt = time.Now().UTC()
+		st.connectAt = connectAt
+	}
+	baseCtx := h.lifecycleCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	promotedCtx, promotedCancel := context.WithCancel(baseCtx)
 	st.cancel = nil // no longer in-flight
 	st.sid = ""
 	st.promoted = true // track until ESTABLISHED arrives
-	// Keep cn and cnToActiveCID — session is established, not gone.
+	st.promotedCancel = promotedCancel
 	h.mu.Unlock()
 
 	cancel()
 	if sid != "" {
 		h.sessions.Delete(sid)
 	}
+	go h.waitForPromotedDeadline(promotedCtx, cid, connectAt.Add(h.cfg.HandWindow))
 }
 
 // onEstablished is called when CLIENT:ESTABLISHED arrives. It clears the
@@ -498,21 +608,178 @@ func (h *Handler) promoteSession(cid string) {
 // already have a snapshot-anchored timer — a duplicate ESTABLISHED must not
 // reset it, as that would extend --max-session-duration.
 func (h *Handler) onEstablished(cid string) {
+	h.establishCID(cid, time.Now(), false)
+}
+
+func (h *Handler) establishCID(cid string, connectedAt time.Time, authoritativeSnapshot bool) {
 	h.mu.Lock()
 	st := h.cids[cid]
 	wasPromoted := st != nil && st.promoted
-	if wasPromoted {
-		st.promoted = false
+	if st == nil {
+		h.mu.Unlock()
+		return
 	}
+	wasEstablished := st.established
+	st.promoted = false
+	st.established = true
+	if st.promotedCancel != nil {
+		st.promotedCancel()
+		st.promotedCancel = nil
+	}
+	if h.identityToAttemptCID[st.identity] == cid {
+		delete(h.identityToAttemptCID, st.identity)
+	}
+	oldCID := h.identityToActiveCID[st.identity]
+	h.identityToActiveCID[st.identity] = cid
+	if oldCID != "" && oldCID != cid {
+		if oldState := h.cids[oldCID]; oldState != nil {
+			oldState.evictionRequested = true
+			if oldState.expiry != nil {
+				oldState.expiry.cancel()
+				oldState.expiry = nil
+			}
+		}
+	}
+	sink := h.liveSink
 	h.mu.Unlock()
 
-	if !wasPromoted {
+	if h.cfg.MaxSessionDuration > 0 && (wasPromoted || authoritativeSnapshot) && !wasEstablished {
+		h.startExpiryTimer(cid, connectedAt)
+	}
+
+	if oldCID != "" && oldCID != cid {
+		if sink == nil {
+			slog.Warn("active replacement established while management sink unavailable", "identity", st.identity, "old_cid", oldCID, "new_cid", cid)
+			return
+		}
+		slog.Info("active eviction requested", "identity", st.identity, "old_cid", oldCID, "new_cid", cid)
+		h.killReplacedActive(oldCID, cid, st.identity, sink)
+	}
+}
+
+func (h *Handler) killReplacedActive(oldCID, newCID, identity string, sink DecisionSink) {
+	decision := Decision{Type: DecisionKill, CID: oldCID, KillMode: "HALT"}
+	var err error
+	if ackSink, ok := sink.(AckDecisionSink); ok {
+		err = ackSink.SendAck(decision)
+	} else {
+		err = sink.Send(decision)
+	}
+	if err == nil {
 		return
 	}
 
-	if h.cfg.MaxSessionDuration > 0 {
-		h.startExpiryTimer(cid, time.Now())
+	slog.Warn("active eviction command failed", "identity", identity, "old_cid", oldCID, "new_cid", newCID, "error", err)
+	h.mu.Lock()
+	provider := h.statusProvider
+	h.mu.Unlock()
+	if provider == nil {
+		return
 	}
+	snapshot, statusErr := provider.Status(context.Background())
+	if statusErr != nil {
+		slog.Warn("active eviction reconciliation failed", "identity", identity, "old_cid", oldCID, "error", statusErr)
+		return
+	}
+	if _, present := snapshot.ClientByCID(oldCID); !present {
+		h.handleDisconnect(mgmt.Event{Type: mgmt.EventDisconnect, CID: oldCID})
+	}
+}
+
+func (h *Handler) waitForPromotedDeadline(ctx context.Context, cid string, deadline time.Time) {
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+
+	client, outcome := h.reconcilePromoted(ctx, cid)
+	if outcome != "pending" {
+		return
+	}
+
+	grace := time.NewTimer(h.promotedRecheckDelay)
+	defer grace.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-grace.C:
+	}
+
+	client, outcome = h.reconcilePromoted(ctx, cid)
+	if outcome != "pending" {
+		return
+	}
+	h.killStalledPromoted(ctx, cid, client.CommonName)
+}
+
+func (h *Handler) reconcilePromoted(ctx context.Context, cid string) (mgmt.StatusClient, string) {
+	h.mu.Lock()
+	provider := h.statusProvider
+	h.mu.Unlock()
+	if provider == nil {
+		return mgmt.StatusClient{}, "unavailable"
+	}
+	snapshot, err := provider.Status(ctx)
+	if err != nil {
+		slog.Warn("promoted reconciliation failed", "cid", cid, "error", err)
+		return mgmt.StatusClient{}, "unavailable"
+	}
+	client, present := snapshot.ClientByCID(cid)
+	if !present {
+		h.cleanupPromoted(cid)
+		slog.Info("promoted reconciled absent", "cid", cid)
+		return mgmt.StatusClient{}, "absent"
+	}
+	if client.Established {
+		h.establishCID(cid, client.ConnectedAt, true)
+		slog.Info("promoted reconciled established", "cid", cid)
+		return client, "established"
+	}
+	return client, "pending"
+}
+
+func (h *Handler) cleanupPromoted(cid string) {
+	h.mu.Lock()
+	st := h.cids[cid]
+	if st == nil || !st.promoted {
+		h.mu.Unlock()
+		return
+	}
+	delete(h.cids, cid)
+	if h.identityToAttemptCID[st.identity] == cid {
+		delete(h.identityToAttemptCID, st.identity)
+	}
+	if st.promotedCancel != nil {
+		st.promotedCancel()
+	}
+	h.mu.Unlock()
+}
+
+func (h *Handler) killStalledPromoted(ctx context.Context, cid, cn string) {
+	h.mu.Lock()
+	st := h.cids[cid]
+	sink := h.liveSink
+	stillPromoted := st != nil && st.promoted
+	h.mu.Unlock()
+	if !stillPromoted || sink == nil {
+		return
+	}
+	decision := Decision{Type: DecisionKill, CID: cid, KillMode: "HALT"}
+	var err error
+	if ackSink, ok := sink.(AckDecisionSink); ok {
+		err = ackSink.SendAck(decision)
+	} else {
+		err = sink.Send(decision)
+	}
+	if err == nil {
+		slog.Warn("stalled promoted kill accepted", "cid", cid, "cn", cn)
+		return
+	}
+	slog.Warn("stalled promoted kill failed", "cid", cid, "cn", cn, "error", err)
+	_, _ = h.reconcilePromoted(ctx, cid)
 }
 
 // MarkAuthenticated is called after callback success writes client-auth to the
@@ -530,20 +797,15 @@ func (h *Handler) MarkAuthenticated(cid, cognitoUsername string) {
 	h.promoteSession(cid)
 }
 
-func (h *Handler) setInFlight(cid, sid, cn, kid string, cancel context.CancelFunc) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cids[cid] = &cidState{cancel: cancel, sid: sid, cn: cn, kid: kid}
-	h.cnToActiveCID[cn] = cid
-}
-
 func (h *Handler) clearInFlight(cid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if st := h.cids[cid]; st != nil {
 		st.cancel = nil
 		st.sid = ""
-		// Leave cn, kid — DISCONNECT will clean those up.
+		if !st.promoted && h.identityToAttemptCID[st.identity] == cid {
+			delete(h.identityToAttemptCID, st.identity)
+		}
 	}
 }
 
@@ -583,8 +845,6 @@ func (h *Handler) replaceExpiryState(cid string, connectedAt time.Time) context.
 	return expiryCtx
 }
 
-// RebuildSessionTrackingFromStatus rebuilds active-session tracking from a fresh
-// management status snapshot after reconnect or restart.
 // RebuildSessionTrackingFromStatus reconciles in-memory session tracking against
 // the current management socket status snapshot. It is called on every
 // management socket reconnect (reconnect-bootstrap sweep).
@@ -593,63 +853,134 @@ func (h *Handler) replaceExpiryState(cid string, connectedAt time.Time) context.
 // during a management socket reconnect, the corresponding cidState entry would
 // otherwise persist indefinitely. This sweep provides bounded cleanup: any CID
 // that is not in the live status snapshot AND is not currently in-flight AND has
-// not been promoted is removed from cids and cnToActiveCID. Because the daemon
+// not been promoted is removed from the CID and active-identity indexes. Because the daemon
 // reconnects to the management socket whenever the connection drops — the same
 // event that can cause a DISCONNECT to be lost — this sweep fires at exactly the
 // right moment to reclaim stale entries. No additional periodic reaper is required.
 func (h *Handler) RebuildSessionTrackingFromStatus(sessions []mgmt.EstablishedSession) {
-	snapshot := make(map[string]mgmt.EstablishedSession, len(sessions))
-	for _, sess := range sessions {
-		snapshot[sess.CID] = sess
+	snapshot := mgmt.StatusSnapshot{Established: sessions}
+	for _, session := range sessions {
+		snapshot.Clients = append(snapshot.Clients, mgmt.StatusClient{
+			CID: session.CID, CommonName: session.CommonName,
+			ConnectedAt: session.ConnectedAt, Established: true,
+		})
+	}
+	_ = h.RebuildSessionTrackingFromSnapshot(snapshot)
+}
+
+// RebuildSessionTrackingFromSnapshot applies an authoritative status snapshot
+// and returns duplicate/expired evictions for the caller to send after buffered
+// events have been replayed.
+func (h *Handler) RebuildSessionTrackingFromSnapshot(snapshot mgmt.StatusSnapshot) []Decision {
+	present := make(map[string]mgmt.StatusClient, len(snapshot.Clients))
+	for _, client := range snapshot.Clients {
+		present[client.CID] = client
 	}
 
 	h.mu.Lock()
-	// Single pass over cids: cancel expiry timers for stale CIDs, clean up
-	// reverse index, and delete stale entries. Deleting from a map during range
-	// is safe in Go (spec-guaranteed).
 	for cid, st := range h.cids {
-		if _, inSnapshot := snapshot[cid]; inSnapshot {
-			// CID is live: clear promoted marker — it is fully established now
-			// and will get fresh expiry timers in the loop below.
-			st.promoted = false
+		if _, ok := present[cid]; ok {
 			continue
 		}
-		// Not in snapshot: skip CIDs that are still in-flight or promoted —
-		// they haven't been seen by OpenVPN yet and are not stale.
-		if st.cancel != nil || st.promoted {
-			continue
+		if st.cancel != nil {
+			st.cancel()
 		}
-		// Stale entry: cancel its expiry timer and remove all tracking.
 		if st.expiry != nil {
 			st.expiry.cancel()
 		}
-		if st.cn != "" && h.cnToActiveCID[st.cn] == cid {
-			delete(h.cnToActiveCID, st.cn)
+		if st.promotedCancel != nil {
+			st.promotedCancel()
+		}
+		if st.sid != "" {
+			h.sessions.Delete(st.sid)
+		}
+		if h.identityToActiveCID[st.identity] == cid {
+			delete(h.identityToActiveCID, st.identity)
+		}
+		if h.identityToAttemptCID[st.identity] == cid {
+			delete(h.identityToAttemptCID, st.identity)
 		}
 		delete(h.cids, cid)
 	}
-	h.mu.Unlock()
 
-	for _, sess := range sessions {
-		h.mu.Lock()
-		st := h.cids[sess.CID]
+	winners := make(map[string]mgmt.EstablishedSession)
+	var evictions []Decision
+	for _, session := range snapshot.Established {
+		identity, err := NormalizeIdentity(session.CommonName)
+		if err != nil {
+			slog.Warn("status session has invalid identity", "cid", session.CID, "cn", session.CommonName, "error", err)
+			continue
+		}
+		st := h.cids[session.CID]
 		if st == nil {
 			st = &cidState{}
-			h.cids[sess.CID] = st
+			h.cids[session.CID] = st
 		}
-		st.cn = sess.CommonName
-		h.cnToActiveCID[sess.CommonName] = sess.CID
-		h.mu.Unlock()
+		st.cn = session.CommonName
+		st.identity = identity
+		st.promoted = false
+		st.established = true
+		if h.identityToAttemptCID[identity] == session.CID {
+			delete(h.identityToAttemptCID, identity)
+		}
 
-		if h.cfg.MaxSessionDuration > 0 {
-			if time.Since(sess.ConnectedAt) >= h.cfg.MaxSessionDuration {
-				h.replaceExpiryState(sess.CID, sess.ConnectedAt)
-				h.killExpiredSession(sess.CID, sess.CommonName, sess.ConnectedAt)
-				continue
+		winner, exists := winners[identity]
+		if !exists || newerStatusSession(session, winner) {
+			if exists {
+				if oldState := h.cids[winner.CID]; oldState != nil {
+					oldState.evictionRequested = true
+				}
+				evictions = append(evictions, Decision{Type: DecisionKill, CID: winner.CID, KillMode: "HALT"})
 			}
-			h.startExpiryTimer(sess.CID, sess.ConnectedAt)
+			winners[identity] = session
+		} else {
+			st.evictionRequested = true
+			evictions = append(evictions, Decision{Type: DecisionKill, CID: session.CID, KillMode: "HALT"})
 		}
 	}
+	for identity, winner := range winners {
+		h.identityToActiveCID[identity] = winner.CID
+	}
+	h.mu.Unlock()
+
+	for _, session := range snapshot.Established {
+		if h.cfg.MaxSessionDuration <= 0 {
+			continue
+		}
+		if time.Since(session.ConnectedAt) >= h.cfg.MaxSessionDuration {
+			h.replaceExpiryState(session.CID, session.ConnectedAt)
+			h.mu.Lock()
+			if st := h.cids[session.CID]; st != nil {
+				st.evictionRequested = true
+			}
+			h.mu.Unlock()
+			evictions = append(evictions, Decision{Type: DecisionKill, CID: session.CID, KillMode: "HALT"})
+			continue
+		}
+		h.startExpiryTimer(session.CID, session.ConnectedAt)
+	}
+	return evictions
+}
+
+// ReconciledEvictionNeeded revalidates a snapshot-derived eviction after
+// buffered management events have been replayed.
+func (h *Handler) ReconciledEvictionNeeded(cid string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	st := h.cids[cid]
+	return st != nil && st.evictionRequested
+}
+
+func newerStatusSession(candidate, current mgmt.EstablishedSession) bool {
+	if !candidate.ConnectedAt.Equal(current.ConnectedAt) {
+		return candidate.ConnectedAt.After(current.ConnectedAt)
+	}
+	candidateCID, candidateErr := strconv.ParseUint(candidate.CID, 10, 64)
+	currentCID, currentErr := strconv.ParseUint(current.CID, 10, 64)
+	if candidateErr == nil && currentErr == nil {
+		return candidateCID > currentCID
+	}
+	return candidate.CID > current.CID
 }
 
 func (h *Handler) sessionExpiryTimer(ctx context.Context, cid string, remaining time.Duration) {

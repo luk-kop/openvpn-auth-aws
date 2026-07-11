@@ -21,9 +21,20 @@ func baseValidConfig() Config {
 		CognitoUserPoolID:      "eu-west-1_TestPool",
 		CognitoIssuerURL:       "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_TestPool",
 		HandWindow:             300 * time.Second,
+		AuthTimeout:            270 * time.Second,
 		ReconnectMaxInterval:   5 * time.Second,
 		LogFormat:              "text",
 		CallbackPort:           8080,
+	}
+}
+
+func TestValidateAuthTimeoutBounds(t *testing.T) {
+	for _, authTimeout := range []time.Duration{0, -time.Second, 300 * time.Second, 301 * time.Second} {
+		cfg := baseValidConfig()
+		cfg.AuthTimeout = authTimeout
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("AuthTimeout=%s: expected validation error", authTimeout)
+		}
 	}
 }
 

@@ -91,8 +91,8 @@ type DecisionSink interface {
 	Send(Decision) error
 }
 
-// AckDecisionSink sends a decision and returns only after the underlying
-// transport confirms that the command was written or failed.
+// AckDecisionSink sends a decision and returns only after OpenVPN accepts or
+// rejects the management command, or the management connection fails.
 type AckDecisionSink interface {
 	DecisionSink
 	SendAck(Decision) error

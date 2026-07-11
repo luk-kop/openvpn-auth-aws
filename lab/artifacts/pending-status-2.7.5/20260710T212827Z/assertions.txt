@@ -1,0 +1,7 @@
+2026-07-10T21:28:34.533992312Z PROBE_ASSERT pre_auth_pending_present cid=0
+2026-07-10T21:28:34.534043127Z PROBE_ASSERT client_auth_ack cid=0
+2026-07-10T21:28:34.534172189Z PROBE_ASSERT post_ack_present cid=0 virtual_address=""
+2026-07-10T21:28:39.534862456Z PROBE_ASSERT post_grace_present cid=0 established=true virtual_address="10.8.0.2"
+2026-07-10T21:28:39.5350289Z PROBE_ASSERT client_kill_ack cid=0
+2026-07-10T21:28:44.579203173Z PROBE_ASSERT post_disconnect_absent cid=0
+2026-07-10T21:28:44.579204908Z PROBE_COMPLETE

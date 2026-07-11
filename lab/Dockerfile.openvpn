@@ -1,7 +1,7 @@
 #trivy:ignore:AVD-DS-0002 -- OpenVPN needs root at startup to configure /dev/net/tun and networking (OpenVPN requires root privileges for NET_ADMIN and access to the tun interface)
 FROM debian:bookworm-slim
 
-ARG OPENVPN_VERSION=2.7.4
+ARG OPENVPN_VERSION=2.7.5
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

@@ -7,90 +7,38 @@ import (
 	"time"
 )
 
-// BootstrapStatus releases the management hold, requests `status 3`, and
-// returns the currently established sessions plus any async CLIENT events that
-// arrived while reading the snapshot.
-func BootstrapStatus(client *Client) ([]EstablishedSession, []Event, error) {
-	return BootstrapStatusWithRawLog(client, nil)
-}
-
-func BootstrapStatusWithRawLog(client *Client, rawLog RawLogFunc) ([]EstablishedSession, []Event, error) {
-	if err := client.WriteLine("hold release"); err != nil {
-		return nil, nil, fmt.Errorf("write hold release: %w", err)
-	}
-	if err := client.WriteLine("status 3"); err != nil {
-		return nil, nil, fmt.Errorf("write status 3: %w", err)
-	}
-
-	var (
-		parser    statusParser
-		gotStatus bool
-		events    []Event
-	)
-
-	scanner := client.Scanner()
-	for scanner.Scan() {
-		line := scanner.Text()
-		if rawLog != nil {
-			rawLog(line)
+// ParseStatusLines parses one complete status 3 response, including END.
+func ParseStatusLines(lines []string) (StatusSnapshot, error) {
+	var parser statusParser
+	for _, line := range lines {
+		done, err := parser.consume(line)
+		if err != nil {
+			return StatusSnapshot{}, err
 		}
-		switch {
-		case isStatusLine(line):
-			gotStatus = true
-			done, err := parser.consume(line)
-			if err != nil {
-				return nil, nil, err
-			}
-			if done {
-				return parser.sessions, events, nil
-			}
-		case strings.HasPrefix(line, ">CLIENT:"):
-			event, err := ReadEventWithRawLog(scanner, line, rawLog)
-			if err != nil {
-				return nil, nil, err
-			}
-			events = append(events, event)
-		case strings.HasPrefix(line, ">HOLD:"):
-			// We already sent hold release above. Ignore duplicate HOLD lines.
-		default:
-			if gotStatus {
-				// Ignore unknown non-CLIENT lines inside status output to stay
-				// resilient across OpenVPN versions.
-				continue
-			}
+		if done {
+			return parser.snapshot, nil
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, nil, err
-	}
-	return nil, nil, fmt.Errorf("unexpected EOF waiting for status 3 response")
-}
-
-func isStatusLine(line string) bool {
-	if line == "END" {
-		return true
-	}
-	record, _, _ := strings.Cut(line, ",")
-	record = strings.TrimSpace(record)
-	if strings.Contains(record, "\t") {
-		record, _, _ = strings.Cut(line, "\t")
-		record = strings.TrimSpace(record)
-	}
-	switch record {
-	case "TITLE", "TIME", "HEADER", "CLIENT_LIST", "GLOBAL_STATS", "ROUTING_TABLE":
-		return true
-	default:
-		return false
-	}
+	return StatusSnapshot{}, fmt.Errorf("status response missing END")
 }
 
 type statusParser struct {
 	clientHeader map[string]int
-	sessions     []EstablishedSession
+	routeHeader  map[string]int
+	clients      []StatusClient
+	routes       []statusRoute
+	snapshot     StatusSnapshot
+	finalized    bool
+}
+
+type statusRoute struct {
+	CommonName  string
+	RealAddress string
 }
 
 func (p *statusParser) consume(line string) (bool, error) {
 	if line == "END" {
+		p.finalize()
 		return true, nil
 	}
 
@@ -100,50 +48,99 @@ func (p *statusParser) consume(line string) (bool, error) {
 	}
 	switch fields[0] {
 	case "HEADER":
-		if len(fields) >= 3 && fields[1] == "CLIENT_LIST" {
-			p.clientHeader = make(map[string]int, len(fields)-2)
-			for i, name := range fields[2:] {
-				p.clientHeader[normalizeHeader(name)] = i + 1 // client_list data starts after record type
-			}
+		if len(fields) < 3 {
+			break
+		}
+		header := make(map[string]int, len(fields)-2)
+		for i, name := range fields[2:] {
+			header[normalizeHeader(name)] = i + 1 // data starts after record type
+		}
+		switch fields[1] {
+		case "CLIENT_LIST":
+			p.clientHeader = header
+		case "ROUTING_TABLE":
+			p.routeHeader = header
 		}
 	case "CLIENT_LIST":
-		sess, ok, err := p.parseClient(fields)
+		client, ok, err := p.parseClient(fields)
 		if err != nil {
 			return false, err
 		}
 		if ok {
-			p.sessions = append(p.sessions, sess)
+			p.clients = append(p.clients, client)
+		}
+	case "ROUTING_TABLE":
+		route, ok := p.parseRoute(fields)
+		if ok {
+			p.routes = append(p.routes, route)
 		}
 	}
 	return false, nil
 }
 
-func (p *statusParser) parseClient(fields []string) (EstablishedSession, bool, error) {
-	get := func(names ...string) string {
-		for _, name := range names {
-			if idx, ok := p.clientHeader[normalizeHeader(name)]; ok && idx < len(fields) {
-				return fields[idx]
-			}
-		}
-		return ""
-	}
-
-	cid := get("Client ID", "ClientID")
-	cn := get("Common Name", "CommonName")
-	connected := get("Connected Since (time_t)", "Connected Since", "ConnectedSince")
+func (p *statusParser) parseClient(fields []string) (StatusClient, bool, error) {
+	cid := statusValue(fields, p.clientHeader, "Client ID", "ClientID")
+	cn := statusValue(fields, p.clientHeader, "Common Name", "CommonName")
+	connected := statusValue(fields, p.clientHeader, "Connected Since (time_t)", "Connected Since", "ConnectedSince")
 	if cid == "" || cn == "" || connected == "" {
-		return EstablishedSession{}, false, nil
+		return StatusClient{}, false, nil
 	}
 
 	sec, err := strconv.ParseInt(connected, 10, 64)
 	if err != nil {
-		return EstablishedSession{}, false, fmt.Errorf("parse connected since %q: %w", connected, err)
+		return StatusClient{}, false, fmt.Errorf("parse connected since %q: %w", connected, err)
 	}
-	return EstablishedSession{
-		CID:         cid,
-		CommonName:  cn,
-		ConnectedAt: time.Unix(sec, 0),
+	return StatusClient{
+		CID:            cid,
+		CommonName:     cn,
+		RealAddress:    statusValue(fields, p.clientHeader, "Real Address", "RealAddress"),
+		VirtualAddress: statusValue(fields, p.clientHeader, "Virtual Address", "VirtualAddress"),
+		ConnectedAt:    time.Unix(sec, 0),
 	}, true, nil
+}
+
+func (p *statusParser) parseRoute(fields []string) (statusRoute, bool) {
+	cn := statusValue(fields, p.routeHeader, "Common Name", "CommonName")
+	realAddress := statusValue(fields, p.routeHeader, "Real Address", "RealAddress")
+	if cn == "" || realAddress == "" {
+		return statusRoute{}, false
+	}
+	return statusRoute{CommonName: cn, RealAddress: realAddress}, true
+}
+
+func (p *statusParser) finalize() {
+	if p.finalized {
+		return
+	}
+	p.finalized = true
+
+	routes := make(map[string]struct{}, len(p.routes))
+	for _, route := range p.routes {
+		routes[route.CommonName+"\x00"+route.RealAddress] = struct{}{}
+	}
+
+	p.snapshot.Clients = make([]StatusClient, 0, len(p.clients))
+	for _, client := range p.clients {
+		_, client.RoutingConfirmed = routes[client.CommonName+"\x00"+client.RealAddress]
+		client.Established = client.VirtualAddress != ""
+		p.snapshot.Clients = append(p.snapshot.Clients, client)
+		if client.Established {
+			p.snapshot.Established = append(p.snapshot.Established, EstablishedSession{
+				CID:         client.CID,
+				CommonName:  client.CommonName,
+				ConnectedAt: client.ConnectedAt,
+			})
+		}
+	}
+}
+
+func statusValue(fields []string, header map[string]int, names ...string) string {
+	for _, name := range names {
+		if idx, ok := header[normalizeHeader(name)]; ok && idx < len(fields) {
+			return fields[idx]
+		}
+	}
+	return ""
 }
 
 func normalizeHeader(s string) string {

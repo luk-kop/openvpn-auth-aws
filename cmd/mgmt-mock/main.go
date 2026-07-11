@@ -32,8 +32,8 @@ import (
 const (
 	socketPath        = "/tmp/openvpn-mgmt.sock"
 	passwordFile      = "/tmp/mgmt-pw"
-	mockClientVersion = "2.7.4"
-	mockServerTitle   = "OpenVPN 2.7.4 mock"
+	mockClientVersion = "2.7.5"
+	mockServerTitle   = "OpenVPN 2.7.5 mock"
 )
 
 // nextKID auto-increments per CID to simulate TLS renegotiation.

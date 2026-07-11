@@ -20,6 +20,8 @@ OpenVPN Community Edition can delegate connection decisions to the management in
 - OpenVPN WebAuth (`WEB_AUTH::`) to send the user to a browser login.
 - ALB `authenticate-cognito` to run the OIDC flow and forward signed identity headers.
 - A Go daemon that verifies the callback, checks certificate CN vs identity, and accepts or rejects the OpenVPN client.
+- Local availability-first single-session enforcement keyed by a case-insensitive
+  normalized certificate CN.
 - Terraform modules for the AWS infrastructure around ALB, Cognito, EC2, NLB, and optional Lambda Router callback routing.
 
 The intended deployment target is Linux on EC2, with local Docker and mock-based labs for development and validation.
@@ -62,10 +64,19 @@ sequenceDiagram
     D->>D: Verify state, session, JWT, CN/email, groups
     alt accepted
         D->>O: client-auth CID KID
+        O-->>D: SUCCESS: client-auth
         O->>C: Tunnel established
+        O->>D: >CLIENT:ESTABLISHED CID
+        D->>D: Select new active CID
+        opt Case-only previous CN
+            D->>O: client-kill old-CID HALT
+            O-->>D: SUCCESS: kill accepted
+            O->>D: >CLIENT:DISCONNECT old-CID
+        end
     else rejected
         D->>O: client-deny CID KID reason
         O->>C: AUTH_FAILED
+        Note over C,O: Previous active session remains connected
     end
 ```
 
@@ -96,6 +107,10 @@ The daemon treats the browser callback as valid only after several independent c
 - The certificate CN can be cross-checked against the OIDC email claim.
 - Required group membership can be checked from ALB/Cognito claims or Cognito lookup, depending on configuration.
 - Duplicate CN handling, session TTLs, auth timeouts, and reauth checks limit stale or reused sessions.
+- Within one OpenVPN process, active ownership is keyed by normalized CN:
+  `Alice@example.com` and `alice@example.com` are one identity. Replacement is
+  new-wins only after successful authentication and establishment; a temporary
+  overlap is allowed while the old CID is being removed.
 
 For the full security model, see [Daemon Security Features](daemon-security.md), [Architecture](architecture.md), and [Group Authorization and OIDC Claims](group-authorization.md).
 
@@ -109,6 +124,5 @@ For the full security model, see [Daemon Security Features](daemon-security.md),
 - [Daemon Security Features](daemon-security.md) - layered daemon-side validation and rejection controls.
 - [Direct Entra OIDC](direct-entra-oidc.md) - possible future ALB `authenticate-oidc` mode without Cognito federation.
 - [PKI](pki.md) - certificate and `tls-crypt` key management.
-- [OpenVPN 2.7 Migration Notes](openvpn-2.7-migration.md) - multi-socket lab results and supervisor/runtime migration plan.
 - [Testing](testing.md) - local, Docker, and AWS validation flows.
 - [Troubleshooting](troubleshooting.md) - known failure modes and useful diagnostic commands.

@@ -1,7 +1,7 @@
 # OpenVPN Auth Daemon for AWS
 
-![Go](https://img.shields.io/badge/Go-1.26.3-00ADD8?logo=go&logoColor=white)
-![OpenVPN](https://img.shields.io/badge/OpenVPN_CE-2.7.4-EA7E20?logo=openvpn&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.26.5-00ADD8?logo=go&logoColor=white)
+![OpenVPN](https://img.shields.io/badge/OpenVPN_CE-2.7.5-EA7E20?logo=openvpn&logoColor=white)
 ![AWS](https://img.shields.io/badge/AWS-Cognito-FF9900?logo=amazonaws&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey?logo=linux)
@@ -23,10 +23,15 @@ Go daemon that authenticates OpenVPN clients via browser-based OIDC (AWS Cognito
 - Browser-based OIDC authentication via WebAuth (`WEB_AUTH::` URL)
 - ALB JWT validation (ES256) — ALB handles the full OIDC flow and forwards signed `x-amzn-oidc-*` headers
 - Two independent daemons per EC2 (UDP + TCP), each with its own callback port and session store
-- OpenVPN CE 2.7.4 target with a verified multi-socket lab path: one OpenVPN process can listen on UDP and TCP while using one management socket
+- OpenVPN CE 2.7.5 target with a verified multi-socket lab path: one OpenVPN
+  process listens on UDP and TCP through one management socket; local new-wins
+  acceptance covers UDP-to-UDP and UDP-to-TCP replacement
 - `/healthz` endpoint for ALB target group health checks and EIP association gating
 - Reauth on TLS renegotiation with Cognito user lookup (+ optional cache for IdP outages)
 - CN cross-check: certificate CN must match OIDC email claim (`--cn-cross-check`)
+- Availability-first local single-session enforcement: CN identity is
+  case-insensitive, the established session survives replacement OIDC, and
+  new-wins is applied only after the replacement is established
 - Structured logging via `log/slog` with text/JSON output (`--log-format`)
 - Optional CloudWatch EMF metrics (`--emf-metrics`)
 - Graceful shutdown with in-flight session draining
@@ -76,7 +81,7 @@ REAUTH_WAIT=35 make verify-multisocket
 make stack-down-multisocket
 ```
 
-This verifies the current daemon flow against OpenVPN 2.7.4 multi-socket management events. Listener/protocol data from OpenVPN is diagnostic only; daemon routing and auth decisions use signed state plus `cid/kid`.
+This verifies the current daemon flow against OpenVPN 2.7.5 multi-socket management events. Listener/protocol data from OpenVPN is diagnostic only; daemon routing and auth decisions use signed state plus `cid/kid`.
 
 ### Manual Testing with mgmt-mock
 
@@ -103,6 +108,7 @@ Expected result: the daemon emits a `WEB_AUTH` URL, the browser callback is proc
 make build          # build all binaries (daemon, mgmt-mock, alb-mock)
 make build-lambda   # build Lambda Router package (outputs lambda-router/lambda-arm64.zip + lambda-amd64.zip)
 make test           # unit tests (go test -v -short ./...)
+make verify-local-new-wins # OpenVPN 2.7.5 exact-CN and case-only acceptance
 ./openvpn-auth-daemon --version
 ```
 
@@ -136,9 +142,22 @@ openvpn-auth-aws/
 
 ## Inspiration
 
-This project was inspired in part by [`jkroepke/openvpn-auth-oauth2`](https://github.com/jkroepke/openvpn-auth-oauth2), a very good and mature OpenVPN/OIDC project that served as a useful reference while shaping this implementation.
+This project is inspired by
+[`jkroepke/openvpn-auth-oauth2`](https://github.com/jkroepke/openvpn-auth-oauth2),
+a mature OpenVPN/OIDC implementation that served as an important reference.
 
-The implementation here uses a different architecture centered around an OpenVPN management-interface daemon, ALB `authenticate-cognito`, and AWS-native infrastructure managed with Terraform.
+`openvpn-auth-aws` is an AWS-native reference architecture for offloading the
+browser OAuth2/OIDC flow to ALB `authenticate-cognito` and Cognito. Instead of
+owning the complete OIDC flow, the daemon validates the ALB-signed
+`x-amzn-oidc-*` identity headers (ES256), applies the project authorization and
+session rules, and sends the resulting decision through the OpenVPN management
+interface. This reduces the OAuth2/OIDC protocol surface implemented by the
+daemon while using the native ALB+Cognito integration.
+
+For multi-instance EC2 deployments, the included Lambda Router preserves
+callback affinity by routing the authenticated browser callback to the daemon
+that owns the original pending OpenVPN session. Terraform provides the
+supporting AWS infrastructure as a reproducible reference deployment.
 
 ## Documentation
 
@@ -153,7 +172,6 @@ The implementation here uses a different architecture centered around an OpenVPN
 - [Entra Graph Reauth](docs/entra-graph-reauth.md) — possible future design for reauth-time group checks through Microsoft Graph
 - [PKI](docs/pki.md) — certificate management with `scripts/pki.sh`
 - [OpenVPN Server](docs/openvpn-server.md) — required directives, verb levels, UDP disconnect behavior, client config
-- [OpenVPN 2.7 Migration Notes](docs/openvpn-2.7-migration.md) — multi-socket lab findings and supervisor/runtime migration plan
 - [Testing](docs/testing.md) — test strategy, local and AWS modes, CI/CD
 - [Troubleshooting](docs/troubleshooting.md) — useful commands, known issues, debugging auth flow
 - [Lambda Router](docs/lambda-router-proxy.md) — Go Lambda proxy for multi-instance EC2 deployments: path-based IP routing, VPC CIDR validation, security model

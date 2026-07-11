@@ -34,8 +34,7 @@ pki/
 lab/openvpn-data/
 lab/openvpn-data-multisocket/
 lab/client.ovpn
-lab/client-udp.ovpn
-lab/client-tcp.ovpn
+lab/client-*.ovpn
 lab/aws.env
 
 # Editor/IDE

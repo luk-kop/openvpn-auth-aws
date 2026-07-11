@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,32 @@ import (
 type captureSink struct {
 	mu        sync.Mutex
 	decisions []Decision
+}
+
+type ackErrorSink struct {
+	captureSink
+	err error
+}
+
+func (s *ackErrorSink) SendAck(d Decision) error {
+	_ = s.Send(d)
+	return s.err
+}
+
+type sequenceStatusProvider struct {
+	mu        sync.Mutex
+	snapshots []mgmt.StatusSnapshot
+}
+
+func (p *sequenceStatusProvider) Status(context.Context) (mgmt.StatusSnapshot, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.snapshots) == 0 {
+		return mgmt.StatusSnapshot{}, nil
+	}
+	snapshot := p.snapshots[0]
+	p.snapshots = p.snapshots[1:]
+	return snapshot, nil
 }
 
 func (c *captureSink) Send(d Decision) error {
@@ -79,6 +106,7 @@ func TestHandleConnectAcceptsOpenURL(t *testing.T) {
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
+	handler.SetLiveSink(sink)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -559,7 +587,7 @@ func TestHandleConnectEvictsInFlightSessionOnReconnect(t *testing.T) {
 	}
 }
 
-func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
+func TestHandleConnectKeepsActiveUntilCaseVariantEstablishes(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:  "https://vpn-auth.example.com/callback/01/udp",
 		HMACSecret:   "test-secret-key!!",
@@ -569,6 +597,7 @@ func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 	}
 	handler := newTestHandler(cfg)
 	sink := &captureSink{}
+	handler.SetLiveSink(sink)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -590,16 +619,26 @@ func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 		t.Fatalf("expected 0 in-flight after established, got %d", handler.InFlight())
 	}
 
-	// Second CONNECT for alice, CID=2 — established CID=1 must be evicted with client-kill.
+	// A case-only replacement starts auth without touching the active CID.
 	handler.HandleEvent(ctx, mgmt.Event{
 		Type: mgmt.EventConnect, CID: "2", KID: "1",
-		Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"},
+		Env: map[string]string{"IV_SSO": "webauth", "common_name": "Alice@example.com"},
 	}, sink)
 	time.Sleep(5 * time.Millisecond)
 
 	if handler.InFlight() != 1 {
 		t.Fatalf("expected 1 in-flight for new session, got %d", handler.InFlight())
 	}
+
+	for _, d := range sink.snapshot() {
+		if d.Type == DecisionKill && d.CID == "1" {
+			t.Fatalf("active CID killed before replacement established: %+v", d)
+		}
+	}
+
+	handler.MarkAuthenticated("2", "")
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventEstablished, CID: "2"}, sink)
+	time.Sleep(5 * time.Millisecond)
 
 	var kill int
 	for _, d := range sink.snapshot() {
@@ -611,7 +650,170 @@ func TestHandleConnectEvictsEstablishedSessionOnReconnect(t *testing.T) {
 		}
 	}
 	if kill != 1 {
-		t.Fatalf("expected 1 DecisionKill for established CID=1, got %d; decisions: %+v", kill, sink.snapshot())
+		t.Fatalf("expected 1 DecisionKill after replacement establishment, got %d; decisions: %+v", kill, sink.snapshot())
+	}
+}
+
+func TestReplacementKillErrorReconcilesAbsentOldCID(t *testing.T) {
+	cfg := config.Config{
+		CallbackURL: "https://vpn-auth.example.com/callback/01/udp",
+		HMACSecret:  "test-secret-key!!",
+		HandWindow:  5 * time.Second,
+		AuthTimeout: 5 * time.Second,
+	}
+	handler := newTestHandler(cfg)
+	sink := &ackErrorSink{err: errors.New("client-kill rejected")}
+	handler.SetLiveSink(sink)
+	handler.SetStatusProvider(&sequenceStatusProvider{snapshots: []mgmt.StatusSnapshot{{
+		Clients: []mgmt.StatusClient{{CID: "2", CommonName: "Alice@example.com", Established: true}},
+	}}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventConnect, CID: "1", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"}}, sink)
+	handler.MarkAuthenticated("1", "")
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventEstablished, CID: "1"}, sink)
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventConnect, CID: "2", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": "Alice@example.com"}}, sink)
+	handler.MarkAuthenticated("2", "")
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventEstablished, CID: "2"}, sink)
+
+	handler.mu.Lock()
+	_, oldTracked := handler.cids["1"]
+	active := handler.identityToActiveCID["alice@example.com"]
+	handler.mu.Unlock()
+	if oldTracked || active != "2" {
+		t.Fatalf("oldTracked=%t active=%q, want old removed and CID 2 active", oldTracked, active)
+	}
+}
+
+func TestHandleConnectRejectsReplacementWhileCallbackProcessing(t *testing.T) {
+	cfg := config.Config{CallbackURL: "https://vpn-auth.example.com/callback", HandWindow: time.Second, AuthTimeout: 500 * time.Millisecond}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventConnect, CID: "1", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": "Alice@example.com"}}, sink)
+	handler.mu.Lock()
+	sid := handler.cids["1"].sid
+	handler.mu.Unlock()
+	if _, err := handler.sessions.TryProcess(sid); err != nil {
+		t.Fatalf("TryProcess: %v", err)
+	}
+
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventConnect, CID: "2", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"}}, sink)
+
+	decisions := sink.snapshot()
+	last := decisions[len(decisions)-1]
+	if last.Type != DecisionDeny || last.CID != "2" || last.Reason != "authentication already in progress; retry connection" {
+		t.Fatalf("replacement decision = %+v", last)
+	}
+}
+
+func TestPromotedConflictReconcilesAbsentAndAdmitsReplacement(t *testing.T) {
+	cfg := config.Config{CallbackURL: "https://vpn-auth.example.com/callback", HandWindow: time.Second, AuthTimeout: 500 * time.Millisecond}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetStatusProvider(&sequenceStatusProvider{snapshots: []mgmt.StatusSnapshot{{}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventConnect, CID: "1", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": "Alice@example.com"}}, sink)
+	handler.MarkAuthenticated("1", "")
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventConnect, CID: "2", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"}}, sink)
+
+	handler.mu.Lock()
+	attempt := handler.identityToAttemptCID["alice@example.com"]
+	_, oldTracked := handler.cids["1"]
+	handler.mu.Unlock()
+	if attempt != "2" || oldTracked {
+		t.Fatalf("attempt=%q oldTracked=%t, want replacement admitted", attempt, oldTracked)
+	}
+}
+
+func TestPromotedConflictPresentRejectsReplacement(t *testing.T) {
+	cfg := config.Config{CallbackURL: "https://vpn-auth.example.com/callback", HandWindow: time.Second, AuthTimeout: 500 * time.Millisecond}
+	handler := newTestHandler(cfg)
+	sink := &captureSink{}
+	handler.SetStatusProvider(&sequenceStatusProvider{snapshots: []mgmt.StatusSnapshot{{Clients: []mgmt.StatusClient{{CID: "1", CommonName: "Alice@example.com"}}}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventConnect, CID: "1", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": "Alice@example.com"}}, sink)
+	handler.MarkAuthenticated("1", "")
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventConnect, CID: "2", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"}}, sink)
+
+	last := sink.snapshot()[len(sink.snapshot())-1]
+	if last.Type != DecisionDeny || last.CID != "2" {
+		t.Fatalf("replacement decision = %+v, want deny", last)
+	}
+}
+
+func TestPromotedDeadlineKillsStillPendingCIDAndRetainsTracking(t *testing.T) {
+	cfg := config.Config{CallbackURL: "https://vpn-auth.example.com/callback", HandWindow: 10 * time.Millisecond, AuthTimeout: 5 * time.Millisecond}
+	handler := newTestHandler(cfg)
+	handler.promotedRecheckDelay = 5 * time.Millisecond
+	sink := &captureSink{}
+	handler.SetLiveSink(sink)
+	pending := mgmt.StatusSnapshot{Clients: []mgmt.StatusClient{{CID: "1", CommonName: "alice@example.com"}}}
+	handler.SetStatusProvider(&sequenceStatusProvider{snapshots: []mgmt.StatusSnapshot{pending, pending}})
+
+	handler.HandleEvent(context.Background(), mgmt.Event{Type: mgmt.EventConnect, CID: "1", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"}}, sink)
+	handler.MarkAuthenticated("1", "")
+	time.Sleep(40 * time.Millisecond)
+
+	var killed bool
+	for _, decision := range sink.snapshot() {
+		if decision.Type == DecisionKill && decision.CID == "1" && decision.KillMode == "HALT" {
+			killed = true
+		}
+	}
+	handler.mu.Lock()
+	_, tracked := handler.cids["1"]
+	handler.mu.Unlock()
+	if !killed || !tracked {
+		t.Fatalf("killed=%t tracked=%t, want kill request with retained tracking", killed, tracked)
+	}
+}
+
+func TestSnapshotDuplicateWinnerUsesNormalizedIdentity(t *testing.T) {
+	handler := newTestHandler(config.Config{})
+	snapshot := mgmt.StatusSnapshot{
+		Clients: []mgmt.StatusClient{
+			{CID: "7", CommonName: "Alice@example.com", Established: true},
+			{CID: "8", CommonName: "alice@example.com", Established: true},
+		},
+		Established: []mgmt.EstablishedSession{
+			{CID: "7", CommonName: "Alice@example.com", ConnectedAt: time.Unix(100, 0)},
+			{CID: "8", CommonName: "alice@example.com", ConnectedAt: time.Unix(101, 0)},
+		},
+	}
+	evictions := handler.RebuildSessionTrackingFromSnapshot(snapshot)
+	if len(evictions) != 1 || evictions[0].CID != "7" {
+		t.Fatalf("evictions = %+v, want older CID 7", evictions)
+	}
+	handler.mu.Lock()
+	active := handler.identityToActiveCID["alice@example.com"]
+	handler.mu.Unlock()
+	if active != "8" {
+		t.Fatalf("active = %q, want 8", active)
+	}
+	if !handler.ReconciledEvictionNeeded("7") {
+		t.Fatal("older duplicate should remain an eviction candidate")
+	}
+	handler.HandleEvent(context.Background(), mgmt.Event{Type: mgmt.EventDisconnect, CID: "7"}, &captureSink{})
+	if handler.ReconciledEvictionNeeded("7") {
+		t.Fatal("disconnected duplicate must not remain an eviction candidate")
+	}
+}
+
+func TestHandleConnectRejectsInvalidIdentity(t *testing.T) {
+	handler := newTestHandler(config.Config{})
+	sink := &captureSink{}
+	handler.HandleEvent(context.Background(), mgmt.Event{Type: mgmt.EventConnect, CID: "1", KID: "1", Env: map[string]string{"IV_SSO": "webauth", "common_name": " alice@example.com"}}, sink)
+	decision := sink.snapshot()[0]
+	if decision.Type != DecisionDeny || decision.Reason != "invalid identity" {
+		t.Fatalf("decision = %+v", decision)
 	}
 }
 
@@ -801,12 +1003,14 @@ func TestEvictionCancelsExpiryTimer(t *testing.T) {
 	}, sink)
 	time.Sleep(5 * time.Millisecond)
 
-	// New connect for same CN evicts CID=1
+	// A replacement CONNECT alone does not evict CID=1.
 	handler.HandleEvent(ctx, mgmt.Event{
 		Type: mgmt.EventConnect, CID: "2", KID: "1",
 		Env: map[string]string{"IV_SSO": "webauth", "common_name": "alice@example.com"},
 	}, sink)
 	time.Sleep(5 * time.Millisecond)
+	handler.MarkAuthenticated("2", "")
+	handler.HandleEvent(ctx, mgmt.Event{Type: mgmt.EventEstablished, CID: "2"}, sink)
 
 	// Count kills — should be exactly 1 from eviction, not 2 (no timer fire)
 	time.Sleep(150 * time.Millisecond)
@@ -1167,10 +1371,7 @@ func TestMarkAuthenticatedPromotesButDefersExpiry(t *testing.T) {
 	}
 }
 
-// TestPromotedCIDSurvivesReconnectBootstrap verifies that a CID promoted via
-// MarkAuthenticated (callback success) but not yet ESTABLISHED is preserved
-// across a management socket reconnect (RebuildSessionTrackingFromStatus).
-func TestPromotedCIDSurvivesReconnectBootstrap(t *testing.T) {
+func TestPromotedCIDAbsentFromReconnectSnapshotIsCleaned(t *testing.T) {
 	cfg := config.Config{
 		CallbackURL:        "https://vpn-auth.example.com/callback/01/udp",
 		HMACSecret:         "test-secret-key!!",
@@ -1194,47 +1395,16 @@ func TestPromotedCIDSurvivesReconnectBootstrap(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	handler.MarkAuthenticated("1", "")
 
-	// Simulate management socket reconnect with an empty snapshot
-	// (the CID isn't in status 3 yet because ESTABLISHED hasn't fired).
+	// A post-ACK authoritative snapshot does not contain the CID, so it is gone.
 	handler.RebuildSessionTrackingFromStatus(nil)
 
 	handler.mu.Lock()
-	var cn string
-	isPromoted := false
-	if st := handler.cids["1"]; st != nil {
-		cn = st.cn
-		isPromoted = st.promoted
-	}
-	activeCID := handler.cnToActiveCID["alice@example.com"]
+	_, tracked := handler.cids["1"]
+	attemptCID := handler.identityToAttemptCID["alice@example.com"]
 	handler.mu.Unlock()
 
-	if cn != "alice@example.com" {
-		t.Fatalf("expected cn preserved for promoted CID, got %q", cn)
-	}
-	if activeCID != "1" {
-		t.Fatalf("expected cnToActiveCID preserved for promoted CID, got %q", activeCID)
-	}
-	if !isPromoted {
-		t.Fatal("expected promoted marker to survive reconnect bootstrap")
-	}
-
-	// Now ESTABLISHED arrives — should start expiry timer normally.
-	handler.HandleEvent(ctx, mgmt.Event{
-		Type: mgmt.EventEstablished, CID: "1",
-	}, sink)
-	time.Sleep(5 * time.Millisecond)
-
-	handler.mu.Lock()
-	st1p := handler.cids["1"]
-	hasExpiry := st1p != nil && st1p.expiry != nil
-	stillPromoted := st1p != nil && st1p.promoted
-	handler.mu.Unlock()
-
-	if !hasExpiry {
-		t.Fatal("expected expiry timer after ESTABLISHED post-reconnect")
-	}
-	if stillPromoted {
-		t.Fatal("expected promoted marker cleared after ESTABLISHED")
+	if tracked || attemptCID != "" {
+		t.Fatalf("absent promoted CID retained: tracked=%t attempt=%q", tracked, attemptCID)
 	}
 }
 
@@ -1265,7 +1435,7 @@ func TestRebuildSessionTrackingFromStatusRestoresTracking(t *testing.T) {
 		exp = st.expiry
 		cn = st.cn
 	}
-	activeCID := handler.cnToActiveCID["alice@example.com"]
+	activeCID := handler.identityToActiveCID["alice@example.com"]
 	handler.mu.Unlock()
 
 	if exp == nil {
@@ -1278,7 +1448,7 @@ func TestRebuildSessionTrackingFromStatusRestoresTracking(t *testing.T) {
 		t.Fatalf("cn = %q, want alice@example.com", cn)
 	}
 	if activeCID != "7" {
-		t.Fatalf("cnToActiveCID = %q, want 7", activeCID)
+		t.Fatalf("identityToActiveCID = %q, want 7", activeCID)
 	}
 }
 
@@ -1319,7 +1489,7 @@ func TestDuplicateEstablishedAfterBootstrapDoesNotResetExpiry(t *testing.T) {
 		t.Fatalf("connectedAt = %v, want %v", expBefore.connectedAt, connectedAt)
 	}
 
-	// Duplicate ESTABLISHED arrives (buffered by BootstrapStatus).
+	// Duplicate ESTABLISHED arrives after buffered bootstrap-event replay.
 	handler.HandleEvent(context.Background(), mgmt.Event{
 		Type: mgmt.EventEstablished, CID: "5",
 	}, sink)
@@ -1353,15 +1523,16 @@ func TestRebuildSessionTrackingFromStatusKillsAlreadyExpiredSession(t *testing.T
 	sink := &captureSink{}
 	handler.SetLiveSink(sink)
 
-	handler.RebuildSessionTrackingFromStatus([]mgmt.EstablishedSession{{
+	evictions := handler.RebuildSessionTrackingFromSnapshot(mgmt.StatusSnapshot{Clients: []mgmt.StatusClient{{
+		CID: "9", CommonName: "expired@example.com", ConnectedAt: time.Now().Add(-time.Hour), Established: true,
+	}}, Established: []mgmt.EstablishedSession{{
 		CID:         "9",
 		CommonName:  "expired@example.com",
 		ConnectedAt: time.Now().Add(-time.Hour),
-	}})
-	time.Sleep(10 * time.Millisecond)
+	}}})
 
 	var kills int
-	for _, d := range sink.snapshot() {
+	for _, d := range evictions {
 		if d.Type == DecisionKill && d.CID == "9" {
 			kills++
 		}

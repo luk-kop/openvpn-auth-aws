@@ -200,7 +200,7 @@ variable "alb_auth_session_timeout" {
 variable "openvpn_version" {
   description = "Pinned OpenVPN CE version for apt install from the official 2.7 repo. The Ubuntu Noble package suffix is appended automatically."
   type        = string
-  default     = "2.7.4"
+  default     = "2.7.5"
 }
 
 # --- EC2 ---

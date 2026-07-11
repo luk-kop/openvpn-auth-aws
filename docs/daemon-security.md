@@ -43,13 +43,17 @@ Key properties:
 - **Client profile possession is required.** The generated client profile includes a TLS client certificate and private key. The server expects a certificate-derived `common_name`; certificate-less connects are denied by the daemon.
 - **`tls-crypt` protects the OpenVPN control channel.** It encrypts and authenticates the TLS control channel with a shared static key, reducing unauthenticated exposure before the TLS/auth flow.
 - **No static VPN password is required.** The server uses `auth-user-pass-optional` so clients do not need `auth-user-pass`; identity comes from the certificate CN and authorization comes from OIDC.
+- **OpenVPN username/password fields are not authentication factors.** When a client omits `auth-user-pass`, OpenVPN reports empty `username` and `password` values to the management client. The daemon deliberately ignores `password`, including non-empty values supplied by a client, and requires every initial connection to complete WebAuth/OIDC before sending `client-auth`.
 - **Certificate CN must not be replaced by username.** Do not enable OpenVPN `username-as-common-name`. This project does not require an OpenVPN username, so replacing CN with username can produce `UNDEF` Common Names and break session recovery/diagnostics.
 - **OpenVPN cannot complete auth without the daemon.** `management-client-auth` puts the client into pending authentication, and the daemon must send `client-auth <cid> <kid>` before the tunnel is established.
 - **The WebAuth callback is bound to daemon state.** The `state` parameter in the `WEB_AUTH::` URL is HMAC-signed and expires after the configured handshake window.
 - **The callback must be authenticated by ALB/Cognito.** The daemon verifies the ALB-signed OIDC JWT before accepting a callback.
 - **Certificate identity is bound to browser identity.** With `--cn-cross-check=true`, the certificate CN must match the OIDC `email` claim.
 - **Authorization is separate from authentication.** `--required-group` restricts access to a Cognito group, and optional reauth group checks can remove access after group membership changes.
-- **Session controls limit stale access.** Pending sessions expire, optional maximum session duration can kill long-lived tunnels, and OpenVPN duplicate-CN protection prevents concurrent sessions for the same CN within one server process.
+- **Session controls limit stale access.** Pending sessions expire, optional
+  maximum session duration can kill long-lived tunnels, OpenVPN replaces exact
+  duplicate CNs, and the daemon extends local new-wins to case-only CN variants
+  after the replacement is established.
 
 This is deliberately more conservative than an SSO-only or certificate-less OpenVPN design. The certificate gates entry into the OpenVPN auth flow, while OIDC decides whether the human using that certificate may establish the tunnel.
 
@@ -169,9 +173,24 @@ By default, the group check only runs at initial authentication. When this flag 
 
 **OpenVPN config:** `duplicate-cn` must be absent.
 
-OpenVPN rejects duplicate certificate CNs by default within a single server process. The `duplicate-cn` directive disables that protection and is unsupported for production deployments of this project.
+Without `duplicate-cn`, OpenVPN uses a **new-wins** policy within a single
+server process: after accepting a new client with the same certificate CN, it
+disconnects the previous active client rather than rejecting the newcomer. The
+`duplicate-cn` directive disables that replacement behavior and is unsupported
+for production deployments of this project.
 
-The daemon keeps local `CN -> CID` tracking only as defensive cleanup for stale local state. It is not a replacement for OpenVPN's default duplicate-CN behavior and is not a global single-session security control across UDP/TCP daemons or multiple EC2 instances.
+The daemon extends OpenVPN's exact, case-sensitive replacement behavior to a
+case-insensitive normalized CN within the same OpenVPN process. A replacement
+CONNECT does not remove the current active session. The new CID becomes active
+only after successful `client-auth` acknowledgement and establishment; only
+then does the daemon request removal of a case-only predecessor. Exact raw-CN
+duplicates continue to use OpenVPN's native new-wins path.
+
+The old CID remains tracked until `CLIENT:DISCONNECT` or an authoritative
+`status 3` snapshot confirms absence. `SUCCESS:` from `client-kill` means only
+that OpenVPN accepted the command. This local control does not extend across
+independent OpenVPN processes or hosts; that boundary requires the planned
+DynamoDB ownership mechanism.
 
 ---
 

@@ -2,12 +2,10 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,12 +39,6 @@ type decisionSink struct {
 	done  <-chan struct{}
 }
 
-type directDecisionSink struct {
-	client *mgmt.Client
-	mu     *sync.Mutex
-	done   <-chan struct{}
-}
-
 type queuedCommand struct {
 	cmd string
 	ack chan error
@@ -78,6 +70,27 @@ func (s decisionSink) Send(d auth.Decision) error {
 	return s.sendOne(cmd)
 }
 
+func (s decisionSink) SendAck(d auth.Decision) error {
+	cmd := decisionToCommand(d)
+	if cmd == "" {
+		return nil
+	}
+	ack := make(chan error, 1)
+	select {
+	case s.cmdCh <- queuedCommand{cmd: cmd, ack: ack}:
+	case <-s.done:
+		return fmt.Errorf("command dropped: connection closed")
+	}
+	select {
+	case err := <-ack:
+		return err
+	case <-s.done:
+		return fmt.Errorf("command acknowledgement lost: connection closed")
+	case <-time.After(bootstrapReadTimeout):
+		return fmt.Errorf("command acknowledgement timed out after %s", bootstrapReadTimeout)
+	}
+}
+
 func (s decisionSink) sendOne(cmd string) error {
 	select {
 	case s.cmdCh <- queuedCommand{cmd: cmd}:
@@ -85,28 +98,6 @@ func (s decisionSink) sendOne(cmd string) error {
 	case <-s.done:
 		return fmt.Errorf("command dropped: connection closed")
 	}
-}
-
-func (s directDecisionSink) Send(d auth.Decision) error {
-	cmd := decisionToCommand(d)
-	if cmd == "" {
-		return nil
-	}
-
-	select {
-	case <-s.done:
-		return fmt.Errorf("command dropped: connection closed")
-	default:
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	select {
-	case <-s.done:
-		return fmt.Errorf("command dropped: connection closed")
-	default:
-	}
-	return s.client.WriteLine(cmd)
 }
 
 // DaemonSink is the DecisionSink backed by the daemon-level cmdCh.
@@ -275,106 +266,128 @@ func (d *Daemon) Run(ctx context.Context) error {
 // is responsible for calling connCancel after any post-connection work
 // (e.g. gracefulShutdown) is complete.
 func (d *Daemon) handleConnection(ctx context.Context, client *mgmt.Client) (context.CancelFunc, error) {
-	// connCtx is cancelled when this connection ends (normal disconnect or
-	// process shutdown). The goroutine below uses it instead of the
-	// process-level ctx so it does not leak across reconnections.
-	// NOTE: connCancel is NOT deferred here — the caller owns its lifetime
-	// so that commandWriter stays alive until gracefulShutdown completes.
 	connCtx, connCancel := context.WithCancel(ctx)
 
-	// Unblock scanner.Scan() when the connection context is cancelled
-	// (either process shutdown or connection lost). The read deadline
-	// expires immediately, but the socket stays writable for graceful shutdown.
 	go func() {
 		<-connCtx.Done()
 		_ = client.SetReadDeadline(time.Now())
 	}()
 
-	connMu := &sync.Mutex{}
+	rawLog := d.managementRawLogger()
 	cmdDone := make(chan struct{})
-	scanner := client.Scanner()
 	sink := decisionSink{cmdCh: d.cmdCh, done: cmdDone}
-	liveSink := directDecisionSink{client: client, mu: connMu, done: cmdDone}
+	notifications := make(chan readerNotification, 256)
+	readErr := make(chan error, 1)
+	broker := newManagementBroker(client)
+	go broker.run(connCtx)
+	go readManagement(connCtx, client, rawLog, broker, notifications, readErr)
 
 	slog.Info("management bootstrap start")
-	if err := client.SetReadDeadline(time.Now().Add(bootstrapReadTimeout)); err != nil {
+	if _, err := broker.request(connCtx, "hold release"); err != nil {
 		connCancel()
-		return connCancel, fmt.Errorf("set bootstrap read deadline: %w", err)
+		return connCancel, fmt.Errorf("bootstrap hold release: %w", err)
 	}
-	rawLog := d.managementRawLogger()
-	snapshot, bufferedEvents, err := mgmt.BootstrapStatusWithRawLog(client, rawLog)
-	if clearErr := client.SetReadDeadline(time.Time{}); clearErr != nil && err == nil {
-		connCancel()
-		return connCancel, fmt.Errorf("clear bootstrap read deadline: %w", clearErr)
-	}
+	statusResponse, err := broker.request(connCtx, "status 3")
 	if err != nil {
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			err = fmt.Errorf("bootstrap status 3 timeout after %s: %w", bootstrapReadTimeout, err)
-		}
 		slog.Warn("management bootstrap failed", "error", err)
 		connCancel()
 		return connCancel, err
 	}
+
+	var bufferedEvents []mgmt.Event
+	for draining := true; draining; {
+		select {
+		case notification := <-notifications:
+			if notification.event != nil {
+				bufferedEvents = append(bufferedEvents, *notification.event)
+			}
+		default:
+			draining = false
+		}
+	}
 	slog.Info("management bootstrap complete",
-		"established_sessions", len(snapshot),
+		"established_sessions", len(statusResponse.snapshot.Established),
 		"buffered_events", len(bufferedEvents),
 	)
 
-	d.handler.SetLiveSink(liveSink)
+	d.handler.SetLiveSink(sink)
 	defer d.handler.ClearLiveSink()
-	d.handler.RebuildSessionTrackingFromStatus(snapshot)
+	d.handler.SetStatusProvider(brokerStatusProvider{broker: broker})
+	defer d.handler.ClearStatusProvider()
+	evictions := d.handler.RebuildSessionTrackingFromSnapshot(statusResponse.snapshot)
 
 	go func() {
 		defer close(cmdDone)
-		d.commandWriter(connCtx, client, connMu)
+		d.commandBrokerForwarder(connCtx, broker)
 	}()
 
 	for _, event := range bufferedEvents {
 		d.handler.HandleEvent(d.shutdownCtx, event, sink)
 	}
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if rawLog != nil {
-			rawLog(line)
+	sentEvictions := make(map[string]struct{}, len(evictions))
+	for _, eviction := range evictions {
+		if _, sent := sentEvictions[eviction.CID]; sent {
+			continue
 		}
-		switch {
-		case strings.HasPrefix(line, ">CLIENT:"):
-			event, err := mgmt.ReadEventWithRawLog(scanner, line, rawLog)
-			if err != nil {
+		if !d.handler.ReconciledEvictionNeeded(eviction.CID) {
+			continue
+		}
+		sentEvictions[eviction.CID] = struct{}{}
+		if err := sink.SendAck(eviction); err != nil {
+			slog.Warn("bootstrap eviction failed", "cid", eviction.CID, "error", err)
+			snapshot, statusErr := brokerStatusProvider{broker: broker}.Status(connCtx)
+			if statusErr != nil {
 				connCancel()
-				return connCancel, err
+				return connCancel, fmt.Errorf("bootstrap eviction reconciliation: %w", statusErr)
 			}
-			d.handler.HandleEvent(d.shutdownCtx, event, sink)
-		case strings.HasPrefix(line, ">HOLD:"):
-			select {
-			case d.cmdCh <- queuedCommand{cmd: "hold release"}:
-			case <-cmdDone:
-				connCancel()
-				return connCancel, nil
+			if _, present := snapshot.ClientByCID(eviction.CID); !present {
+				d.handler.HandleEvent(d.shutdownCtx, mgmt.Event{Type: mgmt.EventDisconnect, CID: eviction.CID}, sink)
 			}
 		}
 	}
-	connCancel()
-	return connCancel, scanner.Err()
+
+	for {
+		select {
+		case <-connCtx.Done():
+			return connCancel, connCtx.Err()
+		case err := <-readErr:
+			connCancel()
+			return connCancel, err
+		case <-broker.done:
+			connCancel()
+			return connCancel, broker.terminalError()
+		case notification := <-notifications:
+			if notification.hold {
+				select {
+				case d.cmdCh <- queuedCommand{cmd: "hold release"}:
+				case <-cmdDone:
+					connCancel()
+					return connCancel, nil
+				}
+				continue
+			}
+			if notification.event != nil {
+				d.handler.HandleEvent(d.shutdownCtx, *notification.event, sink)
+			}
+		}
+	}
 }
 
-func (d *Daemon) commandWriter(ctx context.Context, client *mgmt.Client, mu *sync.Mutex) {
+func (d *Daemon) commandBrokerForwarder(ctx context.Context, broker *managementBroker) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case queued := <-d.cmdCh:
-			mu.Lock()
-			err := client.WriteLine(queued.cmd)
-			mu.Unlock()
+			response, err := broker.request(ctx, queued.cmd)
+			if err == nil {
+				err = response.err
+			}
 			if queued.ack != nil {
 				queued.ack <- err
 			}
 			if err != nil {
-				slog.Error("management write failed", "cmd", queued.cmd, "error", err)
-				return
+				slog.Error("management command failed", "cmd", queued.cmd, "error", err)
 			}
 		}
 	}

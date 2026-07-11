@@ -266,7 +266,19 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Step 7: CN cross-check.
 	if sess.CNCrossCheck && sess.CommonName != "" {
-		if !strings.EqualFold(claims.Email, sess.CommonName) {
+		normalizedEmail, emailErr := auth.NormalizeIdentity(claims.Email)
+		normalizedCN, cnErr := auth.NormalizeIdentity(sess.CommonName)
+		if emailErr != nil || cnErr != nil {
+			slog.Warn("callback: invalid identity for CN cross-check",
+				"sid", sess.SessionID,
+				"cn", sess.CommonName,
+				"email", claims.Email)
+			s.denySession(sess, "invalid identity", "invalid_identity")
+			s.metrics.CallbackRejected("invalid_identity")
+			s.renderError(w, http.StatusForbidden, "Authentication Failed", "Identity verification failed.", sess.SessionID)
+			return
+		}
+		if normalizedEmail != normalizedCN {
 			slog.Warn("callback: CN cross-check failed",
 				"sid", sess.SessionID,
 				"cn", sess.CommonName,
@@ -312,8 +324,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 9: All checks passed — write allow decision first, only then mark done.
-	// Production daemon sinks acknowledge the management socket write so the
-	// session is not promoted if the socket drops before client-auth is sent.
+	// Production daemon sinks wait for OpenVPN's command response so the session
+	// is not promoted unless client-auth is accepted.
 	if err := sendAllowDecision(s.sink, auth.Decision{
 		Type: auth.DecisionAllow,
 		CID:  sess.CID,

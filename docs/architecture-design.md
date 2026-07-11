@@ -92,7 +92,15 @@ sequenceDiagram
     A->>D: GET /callback?state=... (with x-amzn-oidc-data JWT)
     Note over D: Validate state HMAC, JWT, CN, groups
     D->>V: client-auth (CID, KID)
+    V-->>D: SUCCESS: client-auth
     V->>C: Tunnel up
+    V->>D: >CLIENT:ESTABLISHED (CID)
+    D->>D: Select normalized identity winner
+    opt Previous case-only CN
+        D->>V: client-kill old-CID HALT
+        V-->>D: SUCCESS: kill accepted
+        V->>D: >CLIENT:DISCONNECT (old CID)
+    end
 ```
 
 1. VPN client connects → OpenVPN sends `>CLIENT:CONNECT` via management socket
@@ -102,7 +110,11 @@ sequenceDiagram
 5. After login, Cognito redirects back to ALB's internal `/oauth2/idpresponse` endpoint
 6. ALB validates the token, restores the **original URL** (`/callback/01/udp?state=...`), adds OIDC headers, forwards to the correct daemon via path-based routing
 7. Daemon validates state HMAC, extracts user identity from ALB headers, resolves group membership via Cognito API
-8. Daemon sends `client-auth` or `client-deny` to OpenVPN
+8. Daemon sends `client-auth` or `client-deny` and consumes the real management
+   response
+9. After `CLIENT:ESTABLISHED`, the daemon selects the normalized-identity
+   winner. Exact-CN replacement is native to OpenVPN; case-only replacement
+   uses `client-kill` and retains old tracking until confirmed removal
 
 ### WEB_AUTH URL
 

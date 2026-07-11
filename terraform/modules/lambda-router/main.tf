@@ -110,10 +110,11 @@ resource "aws_lambda_function" "router" {
 
   environment {
     variables = {
-      VPC_CIDR         = var.vpc_cidr
-      DAEMON_PORT_UDP  = tostring(var.daemon_ports["udp"])
-      DAEMON_PORT_TCP  = tostring(var.daemon_ports["tcp"])
-      UPSTREAM_TIMEOUT = var.upstream_timeout
+      VPC_CIDR                 = var.vpc_cidr
+      DAEMON_PORT_UDP          = tostring(var.daemon_ports["udp"])
+      DAEMON_PORT_TCP          = tostring(var.daemon_ports["tcp"])
+      UPSTREAM_TIMEOUT         = var.upstream_timeout
+      UPSTREAM_CONNECT_TIMEOUT = var.upstream_connect_timeout
     }
   }
 

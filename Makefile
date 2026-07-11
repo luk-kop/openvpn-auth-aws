@@ -1,6 +1,7 @@
-.PHONY: test setup setup-multisocket build build-release build-lambda clean \
+.PHONY: test tidy update-patch update-minor tidy-lambda update-lambda-patch update-lambda-minor \
+	setup setup-multisocket build build-release build-lambda clean \
 	stack-up stack-down stack-rebuild \
-	stack-up-multisocket stack-down-multisocket stack-rebuild-multisocket verify-multisocket \
+	stack-up-multisocket stack-down-multisocket stack-rebuild-multisocket verify-multisocket verify-local-new-wins \
 	run-daemon run-alb-mock run-mgmt-mock \
 	pki-init pki-tls-crypt pki-client pki-upload pki-client-config
 
@@ -8,6 +9,7 @@ BINARY := openvpn-auth-daemon
 BINDIR := bin
 RELEASE_TMP := $(BINDIR)/release
 GO_BUILD_CACHE := $(CURDIR)/.cache/go-build
+GO ?= go
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 VERSION_NO_V := $(VERSION:v%=%)
 REVISION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -20,6 +22,28 @@ LDFLAGS := -s -w \
 # Unit tests (fast, no AWS)
 test:
 	go test -v -short ./...
+
+tidy:
+	$(GO) mod tidy
+
+update-patch:
+	$(GO) get -u=patch ./...
+	$(GO) mod tidy
+
+update-minor:
+	$(GO) get -u ./...
+	$(GO) mod tidy
+
+tidy-lambda:
+	cd lambda-router && $(GO) mod tidy
+
+update-lambda-patch:
+	cd lambda-router && $(GO) get -u=patch ./...
+	cd lambda-router && $(GO) mod tidy
+
+update-lambda-minor:
+	cd lambda-router && $(GO) get -u ./...
+	cd lambda-router && $(GO) mod tidy
 
 # Local dev test: mgmt-mock + daemon + alb-mock (no Docker, no OpenVPN)
 # Terminal 1: make run-daemon
@@ -121,6 +145,10 @@ stack-rebuild-multisocket:
 
 verify-multisocket:
 	./lab/run-multisocket-verification.sh
+
+verify-local-new-wins:
+	./lab/run-pending-status-probe.sh
+	./lab/run-local-new-wins-verification.sh
 
 # Build all binaries
 build:

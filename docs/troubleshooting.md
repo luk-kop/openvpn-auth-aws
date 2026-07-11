@@ -6,6 +6,7 @@
   - [Cloud-init](#cloud-init)
   - [OpenVPN](#openvpn)
   - [OpenVPN Management Interface](#openvpn-management-interface)
+  - [Replacement established but old session is still visible](#replacement-established-but-old-session-is-still-visible)
   - [Auth Daemon](#auth-daemon)
   - [AWS CLI](#aws-cli)
   - [ALB & Target Groups](#alb--target-groups)
@@ -136,6 +137,34 @@ END
 ```
 
 Be careful: the management interface is not read-only. Some commands can disconnect clients or alter server behavior. Use diagnostic commands only unless you intentionally want to modify live state.
+
+### Replacement established but old session is still visible
+
+Local single-session enforcement is availability-first. A replacement
+`CLIENT:CONNECT` does not disconnect the established client. The expected
+sequence is:
+
+```text
+CLIENT:CONNECT(new)
+client-auth(new) -> SUCCESS
+CLIENT:ESTABLISHED(new)
+client-kill(old) -> SUCCESS       # case-only CN variant
+CLIENT:DISCONNECT(old)            # may arrive several seconds later
+```
+
+For the exact same CN, OpenVPN performs native replacement and the old
+`CLIENT:DISCONNECT` can arrive immediately before the new
+`CLIENT:ESTABLISHED`; the daemon does not send `client-kill`. For a case-only
+variant, the daemon normalizes both CNs to lowercase and requests the kill only
+after the new client is established.
+
+`SUCCESS:` from `client-kill` means OpenVPN accepted the command. It does not
+mean that DISCONNECT has already been emitted, so a short overlap is expected.
+If the old CID remains visible, check daemon logs for `active eviction
+requested`, the command response, management reconnects, and subsequent
+`status 3` snapshots. A command timeout or socket failure triggers reconnect
+and snapshot reconciliation; do not diagnose the session as removed from the
+socket write alone.
 
 ### Auth Daemon
 
