@@ -27,6 +27,7 @@ docker run --rm \
   EASYRSA_EXTRA_EXTS='subjectAltName=DNS:server,IP:127.0.0.1' \
     /usr/share/easy-rsa/easyrsa sign-req server server
   /usr/share/easy-rsa/easyrsa build-client-full udp-user@example.com nopass
+  /usr/share/easy-rsa/easyrsa build-client-full UDP-USER@example.com nopass
   /usr/share/easy-rsa/easyrsa build-client-full tcp-user@example.com nopass
   openvpn --genkey tls-crypt /etc/openvpn/tls-crypt.key
   chown -R $(id -u):$(id -g) /etc/openvpn/pki
@@ -38,6 +39,8 @@ SERVER_CERT=$(openssl x509 -in "$OVPN_DATA/pki/issued/server.crt")
 SERVER_KEY=$(cat "$OVPN_DATA/pki/private/server.key")
 UDP_CLIENT_CERT=$(openssl x509 -in "$OVPN_DATA/pki/issued/udp-user@example.com.crt")
 UDP_CLIENT_KEY=$(cat "$OVPN_DATA/pki/private/udp-user@example.com.key")
+UDP_CASE_CLIENT_CERT=$(openssl x509 -in "$OVPN_DATA/pki/issued/UDP-USER@example.com.crt")
+UDP_CASE_CLIENT_KEY=$(cat "$OVPN_DATA/pki/private/UDP-USER@example.com.key")
 TCP_CLIENT_CERT=$(openssl x509 -in "$OVPN_DATA/pki/issued/tcp-user@example.com.crt")
 TCP_CLIENT_KEY=$(cat "$OVPN_DATA/pki/private/tcp-user@example.com.key")
 TLS_CRYPT_KEY=$(cat "$OVPN_DATA/tls-crypt.key")
@@ -60,6 +63,8 @@ cipher AES-256-GCM
 data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
 tls-version-min 1.2
 verb 3
+status-version 2
+status /var/log/openvpn/status.log
 
 # TLS renegotiation interval — use RENEG_SEC=30 for faster lab REAUTH capture.
 reneg-sec $RENEG_SEC
@@ -70,8 +75,7 @@ management-hold
 auth-user-pass-optional
 hand-window 300
 
-# Keep duplicate-cn disabled. This lab uses different CNs so listener behavior
-# can be observed without duplicate-session eviction noise.
+# Keep duplicate-cn disabled so exact-CN new-wins remains active.
 
 dh none
 tls-crypt /etc/openvpn/tls-crypt.key
@@ -133,13 +137,19 @@ EOF
 
 echo "==> Creating UDP and TCP client configs..."
 write_client_config client-udp.ovpn udp 1194 "$UDP_CLIENT_CERT" "$UDP_CLIENT_KEY"
+write_client_config client-udp-case.ovpn udp 1194 "$UDP_CASE_CLIENT_CERT" "$UDP_CASE_CLIENT_KEY"
+write_client_config client-tcp-same.ovpn tcp-client 1195 "$UDP_CLIENT_CERT" "$UDP_CLIENT_KEY"
+write_client_config client-tcp-case.ovpn tcp-client 1195 "$UDP_CASE_CLIENT_CERT" "$UDP_CASE_CLIENT_KEY"
 write_client_config client-tcp.ovpn tcp-client 1195 "$TCP_CLIENT_CERT" "$TCP_CLIENT_KEY"
 
 echo ""
 echo "==> Done"
 echo "    Server config: $OVPN_DATA/openvpn.conf"
 echo "    UDP client:    client-udp.ovpn"
+echo "    UDP case-only: client-udp-case.ovpn"
 echo "    TCP client:    client-tcp.ovpn"
+echo "    TCP same-CN:   client-tcp-same.ovpn"
+echo "    TCP case-only: client-tcp-case.ovpn"
 echo ""
 echo "Start:  docker compose -f docker-compose.multisocket.yml up -d"
 echo "Verify: ./run-multisocket-verification.sh"

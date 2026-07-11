@@ -134,6 +134,7 @@ func baseValidConfigWithPort(port int) Config {
 		CognitoUserPoolID:      "eu-west-1_TestPool",
 		CognitoIssuerURL:       "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_TestPool",
 		HandWindow:             300 * time.Second,
+		AuthTimeout:            270 * time.Second,
 		ReconnectMaxInterval:   5 * time.Second,
 		LogFormat:              "text",
 		CallbackPort:           port,

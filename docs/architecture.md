@@ -33,33 +33,44 @@ sequenceDiagram
     C->>V: TLS connect
     V->>D: >CLIENT:CONNECT (CID, KID, ENV)
 
-    note over D: Pre-checks (IV_SSO, CN, local stale-state cleanup)
+    note over D: Pre-checks + normalized identity<br/>Existing active session remains connected
 
     alt IV_SSO missing WebAuth or CN empty
         D->>V: client-deny
     end
 
-    D->>D: create session, sign state blob</br>(sid, iat, exp)
-    D->>V: client-pending-auth</br>+ WEB_AUTH URL
+    D->>D: create session, sign state blob<br/>(sid, iat, exp)
+    D->>V: client-pending-auth<br/>+ WEB_AUTH URL
     V->>C: WEB_AUTH URL
 
     C->>A: open browser → GET /callback?state=...
     A->>Co: Cognito authenticate action (OIDC)
     C->>Co: login (username + password)
     Co->>A: auth code
-    A->>A: token exchange,</br>add x-amzn-oidc-* headers
-    A->>D: GET /callback?state=...</br>(with x-amzn-oidc-data JWT)
+    A->>A: token exchange,<br/>add x-amzn-oidc-* headers
+    A->>D: GET /callback?state=...<br/>(with x-amzn-oidc-data JWT)
 
     note over D: Callback verification chain (see below)
 
     alt verification passed
         D->>V: client-auth (CID, KID)
-        D->>D: mark session authenticated, start expiry timer (if enabled)
+        V-->>D: SUCCESS: client-auth
+        D->>D: mark attempt PROMOTED
         V->>C: tunnel up
-        V->>D: >CLIENT:ESTABLISHED (CID)
-        D->>D: idempotent promotion / cleanup if ESTABLISHED arrives later
+        alt Exact raw CN
+            V->>D: >CLIENT:DISCONNECT (old CID)<br/>native OpenVPN new-wins
+            V->>D: >CLIENT:ESTABLISHED (new CID)
+            D->>D: select new active CID<br/>start expiry timer
+        else Case-only CN variant
+            V->>D: >CLIENT:ESTABLISHED (new CID)
+            D->>D: select new active CID<br/>start expiry timer
+            D->>V: client-kill old-CID HALT
+            V-->>D: SUCCESS: kill accepted
+            V->>D: >CLIENT:DISCONNECT (old CID)
+        end
     else verification failed
         D->>V: client-deny (CID, KID, reason)
+        note over C,V: Existing active session is unchanged
     end
 ```
 
@@ -69,7 +80,12 @@ Before starting the OIDC flow, the daemon validates the `CLIENT:CONNECT` event:
 
 - **IV_SSO check** — client must advertise `webauth` or `openurl` in the `IV_SSO` env variable; otherwise `client-deny` with reason `"client does not support WebAuth"`
 - **Common Name** — certificate CN must be non-empty; otherwise `client-deny` with reason `"missing common name"`
-- **Local stale-state cleanup** — if daemon memory still contains an older CID for the same CN, the old local entry is evicted (`client-deny` for pending, `client-kill ... HALT` for established) before creating a new one. This is defensive bookkeeping; OpenVPN itself rejects duplicate CNs per server process by default when `duplicate-cn` is absent.
+- **Normalized identity** — the CN is lowercased for ownership indexes without
+  changing the raw certificate CN reported to OpenVPN. Leading/trailing
+  whitespace and invalid identities are rejected.
+- **Attempt conflict** — a new CONNECT never evicts an established session.
+  It may supersede a PENDING attempt atomically; PROCESSING or live PROMOTED
+  conflicts are denied with `auth_in_progress`.
 
 ### Steps
 
@@ -79,6 +95,12 @@ Before starting the OIDC flow, the daemon validates the `CLIENT:CONNECT` event:
 4. ALB intercepts the request, runs the Cognito authenticate action (full OIDC flow), then forwards the authenticated request to the daemon's callback port with `x-amzn-oidc-*` headers
 5. Daemon runs the [callback verification chain](#callback-verification-chain) — state HMAC, session transition, ALB JWT signature (ES256), CN cross-check, group membership
 6. Daemon sends `client-auth` (success) or `client-deny` (failure) to OpenVPN
+7. Daemon waits for the real command response; a successful socket write alone
+   is not authentication success
+8. On `CLIENT:ESTABLISHED`, the new CID becomes active. OpenVPN removes an
+   exact-CN predecessor natively; the daemon sends `client-kill` for a
+   case-only predecessor and retains its tracking until DISCONNECT or status
+   confirms absence
 
 ## Two Daemons per EC2
 
@@ -92,11 +114,14 @@ Sequence:
 
 1. Connect to the OpenVPN management Unix socket
 2. Authenticate with the management password
-3. Send `hold release`
-4. Send `status 3`
-5. Parse the current OpenVPN snapshot (`HEADER`, `CLIENT_LIST`, `ROUTING_TABLE`, `GLOBAL_STATS`, `END`)
-6. Rebuild in-memory session tracking from the live OpenVPN state
-7. Enter the normal event loop and process new `>CLIENT:CONNECT`, `>CLIENT:REAUTH`, `>CLIENT:DISCONNECT`, `>CLIENT:ESTABLISHED` events
+3. Start the dedicated socket reader and serialized command broker
+4. Send `hold release` and consume its `SUCCESS:`/`ERROR:` response
+5. Send `status 3` and consume the complete response through `END`
+6. Classify `CLIENT_LIST` rows with a non-empty virtual address as established;
+   pending-auth rows remain neutral and receive no max-duration timer
+7. Apply the snapshot, replay buffered CLIENT events in arrival order, then
+   send any revalidated duplicate/expiry evictions
+8. Enter the normal event loop and process new `>CLIENT:CONNECT`, `>CLIENT:REAUTH`, `>CLIENT:DISCONNECT`, `>CLIENT:ESTABLISHED` events
 
 This happens not only at daemon startup, but also after any management reconnect, for example:
 
@@ -192,29 +217,29 @@ When the daemon receives `GET /callback` from the ALB, it runs a multi-step veri
 
 ```mermaid
 flowchart TD
-    A("GET /callback?state=...") --> B{"1. State HMAC</br>valid?"}
+    A("GET /callback?state=...") --> B{"1. State HMAC<br/>valid?"}
     B -- no --> R1("400 Bad Request")
-    B -- yes --> C{"2. Session exists</br>and PENDING?"}
+    B -- yes --> C{"2. Session exists<br/>and PENDING?"}
     C -- not found --> R2("404 Not Found")
     C -- not pending --> R3("409 Conflict")
     C -- yes --> D("Session → PROCESSING")
-    D --> E{"3. x-amzn-oidc-data</br>header present?"}
-    E -- no --> R4("403 missing oidc header</br>client-deny")
-    E -- yes --> F{"4. Parse JWT header</br>kid, signer"}
-    F -- error --> R5("403 invalid jwt header</br>client-deny")
-    F -- ok --> G{"--alb-arn</br>set?"}
-    G -- "yes (prod)" --> H("5. Fetch ALB public key</br>cache by kid")
-    H -- fetch error --> R6("503 retry</br>Session → PENDING")
-    H -- ok --> I{"6. Validate JWT</br>ES256 signature</br>signer == ALB ARN</br>exp not expired"}
-    I -- fail --> R7("403 jwt validation failed</br>client-deny")
-    I -- ok --> J{"7. CN cross-check</br>enabled?"}
-    G -- "no (dev)" --> P("Parse claims</br>without signature")
+    D --> E{"3. x-amzn-oidc-data<br/>header present?"}
+    E -- no --> R4("403 missing oidc header<br/>client-deny")
+    E -- yes --> F{"4. Parse JWT header<br/>kid, signer"}
+    F -- error --> R5("403 invalid jwt header<br/>client-deny")
+    F -- ok --> G{"--alb-arn<br/>set?"}
+    G -- "yes (prod)" --> H("5. Fetch ALB public key<br/>cache by kid")
+    H -- fetch error --> R6("503 retry<br/>Session → PENDING")
+    H -- ok --> I{"6. Validate JWT<br/>ES256 signature<br/>signer == ALB ARN<br/>exp not expired"}
+    I -- fail --> R7("403 jwt validation failed<br/>client-deny")
+    I -- ok --> J{"7. CN cross-check<br/>enabled?"}
+    G -- "no (dev)" --> P("Parse claims<br/>without signature")
     P --> J
-    J -- "yes: email ≠ CN" --> R8("403 cn mismatch</br>client-deny")
-    J -- "no / match" --> K{"8. Required group</br>configured?"}
-    K -- no --> L("9. Auth SUCCESS</br>Session → DONE</br>client-auth")
-    K -- yes --> M{"Check group</br>membership"}
-    M -- "not in group" --> R9("403 not in required group</br>client-deny")
+    J -- "yes: email ≠ CN" --> R8("403 cn mismatch<br/>client-deny")
+    J -- "no / match" --> K{"8. Required group<br/>configured?"}
+    K -- no --> L("9. Auth SUCCESS<br/>Session → DONE<br/>client-auth")
+    K -- yes --> M{"Check group<br/>membership"}
+    M -- "not in group" --> R9("403 not in required group<br/>client-deny")
     M -- "in group" --> L
 
     style L fill:#1e8449,stroke:#186a3b,color:#fff
@@ -366,17 +391,26 @@ Sessions that never reach `ESTABLISHED` have a TTL of `2 × hand-window` and are
 
 ### Management Socket Reconnect and Session Tracking
 
-On each management socket connect, the daemon sends `hold release` followed by `status 3`. OpenVPN responds with a snapshot of all currently established clients. The daemon uses this snapshot to rebuild its in-memory session tracking (`cids`, `cnToActiveCID`) — a process handled by `RebuildSessionTrackingFromStatus`.
+On each management socket connect, the command broker sends `hold release`,
+waits for its `SUCCESS:` response, then requests `status 3`. The reader keeps
+asynchronous management events separate from command responses. The full
+snapshot contains both pending and established clients; only rows with an
+assigned virtual address are classified as established. The daemon rebuilds
+its normalized active and attempt indexes from that classified snapshot,
+replays buffered events, revalidates eviction candidates, and only then sends
+any required commands.
 
 This covers three scenarios:
 
 | Scenario | What happens |
 | --- | --- |
-| **Daemon restart** (OpenVPN still running) | Daemon starts with empty maps. `status 3` returns all active clients. Maps are populated from scratch — local stale-state tracking and `max-session-duration` enforcement resume for existing sessions. |
+| **Daemon restart** (OpenVPN still running) | Daemon starts with empty maps. `status 3` returns pending and active clients. Classified established rows restore local normalized ownership and `max-session-duration`; pending rows restore attempt tracking without starting expiry timers. |
 | **Management socket drops** (both still running) | Daemon reconnects to the socket. Maps may contain stale entries for clients that disconnected while the socket was down. `status 3` returns the current state — stale entries are pruned, surviving sessions are kept or have their expiry timers restarted. |
 | **OpenVPN restart** | All VPN tunnels are terminated. `status 3` returns an empty list. All map entries and expiry timers are cleaned up. Clients must reconnect (new `CLIENT:CONNECT`), so tracking starts fresh. |
 
-When `--max-session-duration` is disabled (`0`), `RebuildSessionTrackingFromStatus` still rebuilds `cids` and `cnToActiveCID` for local stale-state cleanup. Expiry timer logic is simply skipped.
+When `--max-session-duration` is disabled (`0`), snapshot reconciliation still
+rebuilds normalized local ownership and attempt tracking. Only expiry timer
+creation is skipped.
 
 ## Auth Timeout vs Hand-Window
 
@@ -394,15 +428,27 @@ hand-window 300        # OpenVPN server config
 
 ## Duplicate CN and Local Cleanup
 
-OpenVPN rejects duplicate certificate CNs by default within a single server process. Do not set `duplicate-cn`; that directive disables OpenVPN's built-in per-process duplicate protection.
+Without `duplicate-cn`, OpenVPN uses a **new-wins** policy within a single
+server process: it accepts the new client with the same certificate CN and
+disconnects the previous active client. It does not reject the new client. Do
+not set `duplicate-cn`; that directive disables this built-in per-process
+replacement behavior and permits concurrent clients with the same CN.
 
-The daemon also tracks `CN -> CID` locally so it can clean up stale state after missed disconnects or management socket reconnects:
+The daemon maintains separate normalized-identity indexes for authentication
+attempts and established sessions:
 
 - **New connect with same CN while old local auth is pending** — old local pending session is cancelled and `client-deny` is sent for the old CID
-- **New connect with same CN while old local CID is established** — old local CID is removed and `client-kill ... HALT` is sent as defensive cleanup
-- **Disconnect** — session tracking is cleaned up and the CN slot is freed
+- **New connect while an old local CID is established** — the old session is
+  left untouched throughout OIDC; ownership changes only when the replacement
+  is established
+- **Replacement established with the exact same CN** — OpenVPN performs native
+  new-wins; the old DISCONNECT can arrive before the new ESTABLISHED event
+- **Replacement established with a case-only CN variant** — the daemon sends
+  `client-kill ... HALT`; `SUCCESS:` confirms command acceptance, while
+  tracking is retained until DISCONNECT or authoritative absence
+- **Disconnect** — session and normalized ownership tracking are cleaned up
 
-This is not a global single-session security control. UDP and TCP daemons have separate memory, and multi-instance deployments require a shared ownership mechanism if strict fleet-wide one-session-per-CN enforcement is required. See [Multi-Instance Single-Session Design](multi-instance-single-session.md).
+This is not a global single-session security control. UDP and TCP daemons have separate memory, and multi-instance deployments require a shared ownership mechanism if strict fleet-wide one-session-per-CN enforcement is required.
 
 ## Reauth Flow
 
@@ -440,9 +486,9 @@ graph LR
     end
 
     client -- "UDP :1194" --> ovpn_port
-    mgmt_sock -. "Unix socket</br>/run/openvpn" .-> daemon_cb
-    client -- "browser</br>GET /callback?state=..." --> alb_cb
-    alb_cb -- "GET /callback</br>+ x-amzn-oidc-data JWT" --> daemon_cb
+    mgmt_sock -. "Unix socket<br/>/run/openvpn" .-> daemon_cb
+    client -- "browser<br/>GET /callback?state=..." --> alb_cb
+    alb_cb -- "GET /callback<br/>+ x-amzn-oidc-data JWT" --> daemon_cb
 
     style openvpn fill:#1a5276,stroke:#154360,color:#fff
     style daemon fill:#1e8449,stroke:#186a3b,color:#fff

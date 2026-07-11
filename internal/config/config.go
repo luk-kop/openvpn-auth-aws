@@ -240,6 +240,9 @@ func (c Config) Validate() error {
 	if c.HandWindow <= 0 {
 		problems = append(problems, "hand-window must be > 0")
 	}
+	if c.AuthTimeout <= 0 {
+		problems = append(problems, "auth-timeout must be > 0")
+	}
 	if c.ReconnectMaxInterval <= 0 {
 		problems = append(problems, "reconnect-max-interval must be > 0")
 	}
@@ -247,7 +250,7 @@ func (c Config) Validate() error {
 		problems = append(problems, fmt.Sprintf("log-format must be 'text' or 'json', got %q", c.LogFormat))
 	}
 	if c.AuthTimeout >= c.HandWindow {
-		slog.Warn("auth-timeout should be less than hand-window to ensure AUTH_FAILED reaches the client before it self-restarts", "auth_timeout", c.AuthTimeout, "hand_window", c.HandWindow)
+		problems = append(problems, "auth-timeout must be less than hand-window")
 	}
 	if c.MaxSessionDuration != 0 && c.MaxSessionDuration < time.Minute {
 		problems = append(problems, "max-session-duration must be 0 (disabled) or >= 1m")

@@ -55,6 +55,7 @@ write_files:
       user nobody
       group nogroup
 
+      status-version 2
       status      /var/log/openvpn/status-udp.log
       syslog      openvpn-udp
       verb 3
@@ -67,8 +68,8 @@ write_files:
 
       hand-window ${hand_window}
 
-      # Do not add duplicate-cn. OpenVPN rejects duplicate certificate CNs by
-      # default; this project relies on that behavior per OpenVPN process.
+      # Do not add duplicate-cn. OpenVPN defaults to new-wins per process:
+      # accepting a new client with the same CN disconnects the previous one.
 
   # --- OpenVPN TCP server config ---
   - path: /etc/openvpn/server/tcp.conf
@@ -99,6 +100,7 @@ write_files:
       user nobody
       group nogroup
 
+      status-version 2
       status      /var/log/openvpn/status-tcp.log
       syslog      openvpn-tcp
       verb 3
@@ -111,8 +113,8 @@ write_files:
 
       hand-window ${hand_window}
 
-      # Do not add duplicate-cn. OpenVPN rejects duplicate certificate CNs by
-      # default; this project relies on that behavior per OpenVPN process.
+      # Do not add duplicate-cn. OpenVPN defaults to new-wins per process:
+      # accepting a new client with the same CN disconnects the previous one.
 
   # --- Daemon environment ---
   - path: /etc/openvpn-auth/env

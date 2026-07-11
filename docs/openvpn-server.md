@@ -16,16 +16,16 @@
 - [OpenVPN3 Linux GUI: openvpn3-indicator](#openvpn3-linux-gui-openvpn3-indicator)
 - [Management Interface Protocol](#management-interface-protocol)
 
-## Tested Version
+## Target Version
 
-This project targets **OpenVPN CE 2.7.4** (installed from the [official OpenVPN 2.7 repository](https://build.openvpn.net/debian/openvpn/release/2.7/)). The version is pinned and configurable:
+This project targets **OpenVPN CE 2.7.5** (installed from the [official OpenVPN 2.7 repository](https://build.openvpn.net/debian/openvpn/release/2.7/)). The version is pinned and configurable:
 
 | Environment | How to change | Default |
 |-------------|---------------|---------|
-| Docker lab | `OPENVPN_VERSION` build arg in `lab/Dockerfile.openvpn` | `2.7.4` |
-| Terraform | `openvpn_version` variable in `terraform/variables.tf` | `"2.7.4"` |
+| Docker lab | `OPENVPN_VERSION` build arg in `lab/Dockerfile.openvpn` | `2.7.5` |
+| Terraform | `openvpn_version` variable in `terraform/variables.tf` | `"2.7.5"` |
 
-**Minimum required:** OpenVPN 2.7.4 for the first release target. OpenVPN 2.6+ has the `IV_SSO webauth` mechanism used for browser-based authentication, but this project is migrating to 2.7.4 before release so multi-socket behavior can be tested against the supported target.
+**Minimum required:** OpenVPN 2.7.5 for the first release target. OpenVPN 2.6+ has the `IV_SSO webauth` mechanism used for browser-based authentication, but this project targets 2.7.5 before release so multi-socket behavior and the latest security fixes are tested against the supported version.
 
 ## OpenVPN 2.7 Multi-Socket Example
 
@@ -66,16 +66,21 @@ REAUTH_WAIT=35 make verify-multisocket
 make stack-down-multisocket
 ```
 
-Current verified behavior:
+Behavior verified on OpenVPN 2.7.5 by the multi-socket and local new-wins lab:
 
 - UDP and TCP clients both reach `AUTH_PENDING`, complete browser callback, and establish tunnels through one OpenVPN process.
 - Both listener types emit `CLIENT:CONNECT`, `CLIENT:ESTABLISHED`, `CLIENT:REAUTH`, and `CLIENT:DISCONNECT` through the same management socket.
 - `client-auth <cid> <kid>` works for UDP and TCP clients in the same OpenVPN process.
 - `status 3` after daemon reconnect can rebuild established sessions from `CLIENT_LIST`.
 
-Important limitation: OpenVPN 2.7.4 management events do not expose the exact local listener that accepted the client. `CLIENT:*` env includes the configured listener list, and `status 3` includes coarse protocol hints such as `udp4` or `tcp4-server`, but not the local bind address/port that accepted the client. Treat listener/protocol data as diagnostics only. Daemon routing and auth decisions use signed state plus `cid/kid`.
+Important limitation: captured OpenVPN 2.7.5 management events do not expose
+the exact local listener that accepted the client. `CLIENT:*` env includes the
+configured listener list, and `status 3` includes coarse protocol hints such as
+`udp4` or `tcp4-server`, but not the local bind address/port that accepted the
+specific client. Treat listener/protocol data as diagnostics only. Daemon
+routing and auth decisions use signed state plus `cid/kid`.
 
-The Terraform deployment may still use separate OpenVPN processes while the supervisor/runtime migration is in progress. See [OpenVPN 2.7 Migration Notes](openvpn-2.7-migration.md) for the full plan and raw lab findings.
+The Terraform deployment may still use separate OpenVPN processes while the supervisor/runtime migration is in progress.
 
 ## Required Directives
 
@@ -87,6 +92,7 @@ management-client-auth
 management-hold
 auth-user-pass-optional
 hand-window 300
+status-version 2
 tls-crypt /etc/openvpn/server/tls-crypt.key
 cipher AES-256-GCM
 data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
@@ -100,13 +106,47 @@ tls-version-min 1.2
 | `management-hold` | Holds OpenVPN startup until daemon sends `hold release` |
 | `auth-user-pass-optional` | Allows connection without username/password — identity comes from TLS certificate CN |
 | `hand-window` | Time (seconds) allowed for the full TLS handshake including browser-based auth. Must match `--hand-window` on the daemon. Default is 60s which is too short for browser auth — set to 300s or more |
+| `status-version` | Sets the operator status file format to v2: comma-separated `HEADER` / `CLIENT_LIST` / `ROUTING_TABLE` rows with client ID, username, peer ID, and cipher fields |
 | `tls-crypt` | Encrypts and authenticates the TLS control channel using a shared static key. This project uses plain `tls-crypt`, not `tls-auth`, for the first release target. |
 | `cipher` / `data-ciphers` | Pins AEAD data-channel negotiation and avoids legacy fallback behavior. |
 | `tls-version-min` | Sets the minimum TLS version explicitly. First release target is TLS 1.2 or newer. |
 
+`status-version 2` affects only the status file written by OpenVPN for operators. The daemon does not depend on that file for recovery; it connects to the management socket and explicitly requests `status 3` during bootstrap.
+
+## OpenVPN Common Name vs Username
+
+OpenVPN exposes two different identity fields that must not be treated as interchangeable:
+
+| Field | OpenVPN source | Project usage |
+|-------|----------------|---------------|
+| `common_name` / `Common Name` | TLS client certificate CN | Primary OpenVPN identity for this project |
+| `username` / `Username` | `auth-user-pass`, if the client sends it | Not used as the source of truth in the default flow |
+
+The daemon uses the certificate-derived `common_name` as the OpenVPN identity. It is checked during `CLIENT:CONNECT`, stored in daemon session state, compared with the OIDC `email` claim when `--cn-cross-check=true`, and used for duplicate-CN/session ownership diagnostics.
+
+The OpenVPN `username` field is separate. In the default profile generated by this project, clients do not include `auth-user-pass`, and the server uses `auth-user-pass-optional`; therefore `username` may be absent and `status 3` may show `Username=UNDEF`. That is expected and is not an authentication failure.
+
+Do not confuse OpenVPN `username` with Cognito `username` or `cognito:username` claims. Cognito usernames are provider-specific lookup identifiers used when calling Cognito APIs; they are not the OpenVPN tunnel identity.
+
+## Forbidden Directives
+
+Do not set these directives for the current release target:
+
+```text
+username-as-common-name
+```
+
+`username-as-common-name` is incompatible with this project's identity model. The daemon treats the TLS client certificate CN as the OpenVPN identity, and client profiles intentionally omit `auth-user-pass`. With `auth-user-pass-optional`, clients may connect without sending an OpenVPN username; if `username-as-common-name` is enabled, OpenVPN can rewrite the effective Common Name to `UNDEF`. That breaks `status 3` session recovery, duplicate-CN ownership diagnostics, and any operator workflow that relies on `CLIENT_LIST.Common Name`.
+
 ### `auth-user-pass-optional` Flow
 
 `auth-user-pass-optional` lets a client start the OpenVPN connection without an `auth-user-pass` directive and without entering a static VPN username/password. This project relies on that behavior: the client profile carries a TLS client certificate, and browser-based OIDC authorizes the human user.
+
+When the client omits `auth-user-pass`, OpenVPN exposes the management
+`username` and `password` values as empty strings. This is expected. The daemon
+does not use either field as an authentication factor and never accepts a
+connection merely because `password` is non-empty. Every initial connection
+must pass the WebAuth/OIDC flow before the daemon sends `client-auth`.
 
 For the detailed management-message and callback protocol, see [OpenVPN WebAuth Protocol](webauth-protocol.md).
 
@@ -130,9 +170,22 @@ sequenceDiagram
     B->>A: OIDC login
     A->>D: Callback with signed ALB OIDC JWT + state
     D->>D: Verify state, JWT, CN/email, group
-    D->>O: client-auth cid kid
-    O->>C: PUSH_REPLY
-    C->>O: Tunnel established
+    alt accepted
+        D->>O: client-auth cid kid
+        O-->>D: SUCCESS: client-auth
+        O->>C: PUSH_REPLY
+        C->>O: Tunnel established
+        O->>D: CLIENT:ESTABLISHED cid
+        D->>D: Select normalized identity winner
+        opt Previous case-only CN
+            D->>O: client-kill old-cid HALT
+            O-->>D: SUCCESS: kill accepted
+            O->>D: CLIENT:DISCONNECT old-cid
+        end
+    else rejected or abandoned
+        D->>O: client-deny cid kid reason
+        Note over C,O: Existing active session remains connected
+    end
 ```
 
 Security consequence: `auth-user-pass-optional` removes the static VPN password prompt, but it does not make the VPN anonymous or unauthenticated. A successful tunnel still requires a valid client certificate, WebAuth-capable client metadata, a valid signed callback state, a successful ALB/Cognito login, and any configured CN/group authorization checks.
@@ -141,15 +194,25 @@ Security consequence: `auth-user-pass-optional` removes the static VPN password 
 
 Do **not** set `duplicate-cn`.
 
-OpenVPN's default behavior is to allow only one active client instance per certificate common name within a single server process. The `duplicate-cn` directive disables that protection and allows multiple concurrent sessions using the same certificate/CN.
+OpenVPN's default behavior without `duplicate-cn` is **new-wins** within a
+single server process. When a new client with the same certificate common name
+is accepted, OpenVPN disconnects the previous active client; it does not reject
+the newcomer. The `duplicate-cn` directive disables that replacement behavior
+and allows multiple concurrent sessions using the same certificate/CN.
 
 This project assumes `duplicate-cn` is absent:
 
-- Single EC2 / single OpenVPN process: OpenVPN itself handles duplicate CN replacement.
+- Single OpenVPN process: OpenVPN handles exact raw-CN replacement; the daemon
+  additionally treats case-only CN variants as one normalized identity and
+  removes the older CID after the replacement establishes.
 - UDP + TCP on one EC2: each OpenVPN process enforces duplicate CN only for itself; there is no built-in cross-protocol guarantee.
 - Multi-instance deployments: duplicate-CN prevention requires a global ownership mechanism, not `duplicate-cn`.
 
-The daemon's local CN tracking is only defensive cleanup for stale local state. It must not be treated as a replacement for OpenVPN's default duplicate-CN behavior or for future global single-session enforcement.
+The daemon maintains separate normalized-identity indexes for active sessions
+and authentication attempts. It never kills the active CID on CONNECT. Failed
+or abandoned OIDC leaves the active session untouched; successful replacement
+may overlap temporarily until OpenVPN confirms removal of the old CID. This is
+local enforcement only and does not replace future global ownership.
 
 ## Recommended Settings
 
@@ -429,6 +492,7 @@ This project intentionally does not use that flow:
 - The initial identity signal is the certificate `common_name`, not a user-entered OpenVPN username.
 - The browser OIDC callback authorizes the human user, and `--cn-cross-check=true` binds the OIDC `email` claim back to the certificate CN.
 - Adding `auth-user-pass username-only` would introduce a second user-supplied identity field that must be reconciled with certificate CN and OIDC claims, without improving the current security model.
+- Adding `username-as-common-name` is also unsupported: in this flow there may be no OpenVPN username, so replacing the certificate CN with the username can turn active sessions into `Common Name=UNDEF` in `status 3`.
 
 Use `auth-user-pass username-only` only if the project later adds an explicit alternate mode where OpenVPN usernames are part of the trust model. For the current release target, client profiles should continue to omit `auth-user-pass`.
 

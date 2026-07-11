@@ -62,6 +62,22 @@ func (s *SessionStore) MarkFailed(sessionID string) {
 	}
 }
 
+// SupersedePending atomically marks a pending session failed. It races with
+// TryProcess: exactly one of replacement or callback processing can win.
+func (s *SessionStore) SupersedePending(sessionID string) (*PendingSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+	if sess.Status != SessionPending {
+		return nil, fmt.Errorf("%w: status %d", ErrSessionNotPending, sess.Status)
+	}
+	sess.Status = SessionFailed
+	return sess, nil
+}
+
 // MarkPending resets a session back to PENDING (e.g. after a retryable failure).
 func (s *SessionStore) MarkPending(sessionID string) {
 	s.mu.Lock()

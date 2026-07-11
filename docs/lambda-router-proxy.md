@@ -85,6 +85,7 @@ Processing steps in Lambda:
 | `VPC_CIDR` | yes | — | VPC CIDR used to validate target IPs (for example `10.0.0.0/16`) |
 | `DAEMON_PORT_UDP` | no | `8080` | UDP daemon port |
 | `DAEMON_PORT_TCP` | no | `8081` | TCP daemon port |
+| `UPSTREAM_CONNECT_TIMEOUT` | no | `3s` | TCP connection timeout to the target daemon; must be shorter than `UPSTREAM_TIMEOUT` (`time.ParseDuration` format) |
 | `UPSTREAM_TIMEOUT` | no | `10s` | HTTP timeout for the upstream request (`time.ParseDuration` format) |
 | `OIDC_HEADERS` | no | `["x-amzn-oidc-data","x-amzn-oidc-accesstoken","x-amzn-oidc-identity"]` | JSON array of OIDC header names to forward to the daemon |
 | `LOG_LEVEL` | no | `info` | Log level: `debug`, `info`, `warn`, `error` |
@@ -102,9 +103,16 @@ Lambda uses structured logging via `log/slog` with a JSON handler.
 | `info` (default) | Cold start configuration, proxied requests (IP, proto, port, status, duration), errors |
 | `debug` | Additionally: request path, presence or absence of OIDC headers (names only, never values) |
 
-**Cold start log** is emitted once per Lambda startup and includes configured values such as the VPC CIDR, ports, timeout, and OIDC header list.
+**Cold start log** is emitted once per Lambda startup and includes configured values such as the VPC CIDR, ports, connection and overall timeouts, and OIDC header list.
 
 **Upstream duration** is logged for both successful and failed HTTP requests to the daemon.
+
+When the target daemon is unavailable, Lambda emits
+`event=callback_upstream_unavailable` with `protocol`, a short `reference_id`,
+and one stable `reason`: `connect_timeout`, `connection_refused`,
+`request_timeout`, or `network_error`. The same reference ID is shown on the
+user-facing `503` page. This expected ASG replacement/rollback path is logged
+for diagnosis but does not emit a dedicated custom metric or alarm.
 
 **Log safety:**
 - OIDC header values such as the JWT and access token are never logged
@@ -198,12 +206,23 @@ Possible causes:
 - The daemon is not running on the EC2 instance due to a crash, restart, or initialization still in progress
 - A security group is blocking traffic because the daemon security group is missing the required ingress rule
 - The EC2 instance is unavailable because it is terminated, stopped, or unhealthy
+- The browser returned to a stale callback during an ASG rolling replacement or rollback
+- The TCP connection timeout `UPSTREAM_CONNECT_TIMEOUT` is too short
 - The upstream timeout `UPSTREAM_TIMEOUT` is too short
 
 **Diagnosis:**
 1. Check the daemon status on the instance: `systemctl status openvpn-auth-udp`
-2. Check Lambda logs in CloudWatch. `slog.Error` with `"upstream unreachable"` includes the URL and error
+2. Match the page's reference ID to the structured
+   `event=callback_upstream_unavailable` Lambda log and inspect its stable
+   `reason`. The signed state and upstream URL are not logged.
 3. Check security group rules. The daemon security group must allow TCP 8080/8081 ingress from the Lambda security group
 4. Check the daemon `/healthz` endpoint
 
-**Fix:** Restart the daemon or wait for the instance to be replaced by the ASG. If the issue is in the security group configuration, correct Terraform and run `terraform apply`.
+**User recovery:** Do not refresh the old callback page. Disconnect the VPN
+client, connect again through the NLB, and complete authentication using the new
+link.
+
+**Operator fix:** A stale callback during ASG replacement requires no repair.
+For persistent failures, restart the daemon or wait for ASG recovery. If the
+issue is in the security group or timeout configuration, correct Terraform and
+run `terraform apply`.

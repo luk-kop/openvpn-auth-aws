@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -54,6 +55,26 @@ func TestSessionStoreTryProcessNotPending(t *testing.T) {
 	_, err = store.TryProcess("sid-1")
 	if err == nil {
 		t.Fatal("expected error for non-pending session")
+	}
+}
+
+func TestSessionStoreSupersedePendingRacesProcessing(t *testing.T) {
+	store := NewSessionStore()
+	store.Put(&PendingSession{SessionID: "sid", Status: SessionPending})
+
+	if _, err := store.SupersedePending("sid"); err != nil {
+		t.Fatalf("SupersedePending: %v", err)
+	}
+	if _, err := store.TryProcess("sid"); !errors.Is(err, ErrSessionNotPending) {
+		t.Fatalf("TryProcess after supersede error = %v, want ErrSessionNotPending", err)
+	}
+
+	store.Put(&PendingSession{SessionID: "processing", Status: SessionPending})
+	if _, err := store.TryProcess("processing"); err != nil {
+		t.Fatalf("TryProcess: %v", err)
+	}
+	if _, err := store.SupersedePending("processing"); !errors.Is(err, ErrSessionNotPending) {
+		t.Fatalf("SupersedePending after processing error = %v, want ErrSessionNotPending", err)
 	}
 }
 

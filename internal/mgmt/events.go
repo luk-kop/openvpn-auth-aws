@@ -26,6 +26,32 @@ type EstablishedSession struct {
 	ConnectedAt time.Time
 }
 
+// StatusClient is a neutral CLIENT_LIST record. Presence in CLIENT_LIST does
+// not imply that OpenVPN has established the client.
+type StatusClient struct {
+	CID              string
+	CommonName       string
+	RealAddress      string
+	VirtualAddress   string
+	ConnectedAt      time.Time
+	Established      bool
+	RoutingConfirmed bool
+}
+
+type StatusSnapshot struct {
+	Clients     []StatusClient
+	Established []EstablishedSession
+}
+
+func (s StatusSnapshot) ClientByCID(cid string) (StatusClient, bool) {
+	for _, client := range s.Clients {
+		if client.CID == cid {
+			return client, true
+		}
+	}
+	return StatusClient{}, false
+}
+
 func (e Event) CommonName() string {
 	return e.Env["common_name"]
 }

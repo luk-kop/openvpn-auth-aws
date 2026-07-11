@@ -64,3 +64,9 @@ variable "upstream_timeout" {
   type        = string
   default     = "10s"
 }
+
+variable "upstream_connect_timeout" {
+  description = "TCP connection timeout for Lambda proxy requests to upstream daemon; must be shorter than upstream_timeout (time.ParseDuration format)"
+  type        = string
+  default     = "3s"
+}

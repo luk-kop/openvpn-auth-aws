@@ -45,7 +45,6 @@ Project-local references:
 - [OpenVPN Server Configuration](openvpn-server.md)
 - [Architecture](architecture.md)
 - [Daemon Security Features](daemon-security.md)
-- [OpenVPN 2.7 Migration Notes](openvpn-2.7-migration.md)
 
 ## Scope
 

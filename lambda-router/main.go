@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -48,6 +51,15 @@ var (
 	portMap    map[string]string
 	httpClient *http.Client
 )
+
+type dialContextFunc func(context.Context, string, string) (net.Conn, error)
+
+type upstreamConnectError struct {
+	err error
+}
+
+func (e *upstreamConnectError) Error() string { return "connect upstream: " + e.err.Error() }
+func (e *upstreamConnectError) Unwrap() error { return e.err }
 
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -86,8 +98,22 @@ func configure() {
 	if err != nil {
 		panic(fmt.Sprintf("UPSTREAM_TIMEOUT is not a valid duration: %s", err))
 	}
+	if timeout <= 0 {
+		panic("UPSTREAM_TIMEOUT must be greater than zero")
+	}
 
-	httpClient = &http.Client{Timeout: timeout}
+	connectTimeout, err := time.ParseDuration(getenv("UPSTREAM_CONNECT_TIMEOUT", "3s"))
+	if err != nil {
+		panic(fmt.Sprintf("UPSTREAM_CONNECT_TIMEOUT is not a valid duration: %s", err))
+	}
+	if connectTimeout <= 0 {
+		panic("UPSTREAM_CONNECT_TIMEOUT must be greater than zero")
+	}
+	if connectTimeout >= timeout {
+		panic("UPSTREAM_CONNECT_TIMEOUT must be less than UPSTREAM_TIMEOUT")
+	}
+
+	httpClient = newHTTPClient(timeout, connectTimeout)
 
 	// OIDC_HEADERS — optional JSON array override
 	defaultHeadersJSON, _ := json.Marshal([]string{
@@ -104,8 +130,60 @@ func configure() {
 		"vpc_cidr", vpcCIDR.String(),
 		"ports", portMap,
 		"timeout", httpClient.Timeout.String(),
+		"connect_timeout", connectTimeout.String(),
 		"oidc_headers", oidcHeaders,
 	)
+}
+
+func newHTTPClient(timeout, connectTimeout time.Duration) *http.Client {
+	dialer := &net.Dialer{KeepAlive: 30 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = withConnectTimeout(connectTimeout, dialer.DialContext)
+	return &http.Client{Transport: transport, Timeout: timeout}
+}
+
+func withConnectTimeout(timeout time.Duration, dial dialContextFunc) dialContextFunc {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		connectCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		conn, err := dial(connectCtx, network, address)
+		if err != nil {
+			return nil, &upstreamConnectError{err: err}
+		}
+		return conn, nil
+	}
+}
+
+func classifyUpstreamError(err error) string {
+	var connectErr *upstreamConnectError
+	if errors.As(err, &connectErr) {
+		if errors.Is(connectErr, syscall.ECONNREFUSED) {
+			return "connection_refused"
+		}
+		var netErr net.Error
+		if errors.As(connectErr, &netErr) && netErr.Timeout() {
+			return "connect_timeout"
+		}
+		return "network_error"
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request_timeout"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "request_timeout"
+	}
+	return "network_error"
+}
+
+func newReferenceID() string {
+	var raw [6]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		slog.Error("generate callback reference ID failed", "error", err)
+		return "unavailable"
+	}
+	return hex.EncodeToString(raw[:])
 }
 
 func parsePath(path string) (net.IP, string, error) {
@@ -173,28 +251,36 @@ func proxyToUpstream(ctx context.Context, upstreamURL string, headers map[string
 }
 
 type errorPageData struct {
-	Title      string
-	Message    string
-	StatusCode int
+	Title       string
+	Message     string
+	StatusCode  int
+	ReferenceID string
 }
 
-func errorPage(statusCode int, title, message string) events.ALBTargetGroupResponse {
+func errorPage(statusCode int, title, message, referenceID string) events.ALBTargetGroupResponse {
+	headers := map[string]string{
+		"content-type":  "text/html; charset=utf-8",
+		"cache-control": "no-store",
+		"pragma":        "no-cache",
+	}
 	var buf bytes.Buffer
 	if err := errorTmpl.ExecuteTemplate(&buf, "error.html", errorPageData{
-		Title:      title,
-		Message:    message,
-		StatusCode: statusCode,
+		Title:       title,
+		Message:     message,
+		StatusCode:  statusCode,
+		ReferenceID: referenceID,
 	}); err != nil {
 		slog.Error("render error template failed", "error", err)
+		headers["content-type"] = "text/plain; charset=utf-8"
 		return events.ALBTargetGroupResponse{
 			StatusCode: statusCode,
-			Headers:    map[string]string{"content-type": "text/plain; charset=utf-8"},
+			Headers:    headers,
 			Body:       message,
 		}
 	}
 	return events.ALBTargetGroupResponse{
 		StatusCode: statusCode,
-		Headers:    map[string]string{"content-type": "text/html; charset=utf-8"},
+		Headers:    headers,
 		Body:       buf.String(),
 	}
 }
@@ -206,13 +292,13 @@ func handler(ctx context.Context, req events.ALBTargetGroupRequest) (events.ALBT
 	ip, proto, err := parsePath(req.Path)
 	if err != nil {
 		slog.Error("invalid path", "path", req.Path, "error", err)
-		return errorPage(http.StatusBadRequest, "Bad Request", "Invalid callback path."), nil
+		return errorPage(http.StatusBadRequest, "Bad Request", "Invalid callback path.", ""), nil
 	}
 
 	// Step 2: Validate IP in VPC CIDR
 	if err := validateIP(ip, vpcCIDR); err != nil {
 		slog.Error("IP outside VPC CIDR", "ip", ip.String(), "cidr", vpcCIDR.String(), "error", err)
-		return errorPage(http.StatusForbidden, "Forbidden", "Invalid target."), nil
+		return errorPage(http.StatusForbidden, "Forbidden", "Invalid target.", ""), nil
 	}
 
 	// Step 3: Map proto → port
@@ -222,7 +308,7 @@ func handler(ctx context.Context, req events.ALBTargetGroupRequest) (events.ALBT
 	state := req.QueryStringParameters["state"]
 	if state == "" {
 		slog.Error("missing state parameter", "path", req.Path)
-		return errorPage(http.StatusBadRequest, "Bad Request", "Missing state parameter."), nil
+		return errorPage(http.StatusBadRequest, "Bad Request", "Missing state parameter.", ""), nil
 	}
 	// Trailing slash is required: the daemon registers GET /callback/{path...},
 	// and Go's ServeMux redirects /callback → /callback/ (307), adding a needless roundtrip.
@@ -252,9 +338,19 @@ func handler(ctx context.Context, req events.ALBTargetGroupRequest) (events.ALBT
 	resp, err := proxyToUpstream(ctx, upstreamURL, forwardHeaders)
 	duration := time.Since(start)
 	if err != nil {
-		slog.Error("upstream unreachable", "ip", ip.String(), "proto", proto, "port", port, "duration", duration.String(), "error", err)
+		referenceID := newReferenceID()
+		reason := classifyUpstreamError(err)
+		slog.Error("callback upstream unavailable",
+			"event", "callback_upstream_unavailable",
+			"protocol", proto,
+			"reason", reason,
+			"reference_id", referenceID,
+			"duration", duration.String(),
+			"error", err,
+		)
 		return errorPage(http.StatusServiceUnavailable, "Service Unavailable",
-			"VPN server is temporarily unavailable. Please try reconnecting."), nil
+			"VPN connection is no longer available. Do not refresh this page. Disconnect the VPN client, connect again, and complete authentication using the new link.",
+			referenceID), nil
 	}
 
 	slog.Info("proxied", "ip", ip.String(), "proto", proto, "port", port, "status", resp.StatusCode, "duration", duration.String())

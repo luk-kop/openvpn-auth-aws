@@ -906,6 +906,33 @@ func TestHandleCallback_CNMismatch(t *testing.T) {
 	assertDeniedReason(t, m, "cn_mismatch")
 }
 
+func TestHandleCallback_InvalidIdentity(t *testing.T) {
+	cfg := defaultCfg()
+	srv, sessions, sink, m := newTestServerWithSessions(cfg, nil)
+
+	sid := "invalid-identity-sid"
+	sess := addSessionPending(sessions, sid, "cid1", "kid1", "user@example.com")
+	sess.CNCrossCheck = true
+
+	oidcJWT := makeUnsignedJWT(" user@example.com", "sub123", nil, time.Now().Add(5*time.Minute).Unix())
+	state := validStateParam(t, sid)
+
+	req := httptest.NewRequest(http.MethodGet, "/callback/01/udp?state="+state, nil)
+	req.Header.Set("x-amzn-oidc-data", oidcJWT)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.decisions) == 0 || sink.decisions[0].Type != auth.DecisionDeny {
+		t.Fatalf("expected client-deny, got %+v", sink.decisions)
+	}
+	assertHTMLResponse(t, w, "Authentication Failed")
+	assertRejectedReason(t, m, "invalid_identity")
+	assertDeniedReason(t, m, "invalid_identity")
+}
+
 // ---------------------------------------------------------------------------
 // handleHealthz unit tests
 // ---------------------------------------------------------------------------

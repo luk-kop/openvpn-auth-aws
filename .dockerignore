@@ -17,6 +17,7 @@ LICENSE
 *.log
 
 # Build artifacts (local)
+.cache/
 openvpn-auth-daemon
 mgmt-mock
 alb-mock

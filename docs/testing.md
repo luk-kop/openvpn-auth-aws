@@ -24,7 +24,11 @@ Everything runs locally — no AWS credentials, no real OIDC flow, no domain or 
 **What is tested:**
 - State blob HMAC signing and verification
 - Session lifecycle (SessionPending → SessionProcessing → SessionDone/SessionFailed)
-- Single-session-per-user eviction logic
+- Availability-first local new-wins with separate normalized-identity active and
+  attempt indexes
+- Exact-CN native replacement and daemon-driven case-only replacement
+- Real management command acknowledgement and pending/established status
+  classification
 - Management socket protocol (connect, reauth, disconnect, established)
 - Callback server request handling
 - JWT claims parsing and group membership checks via `--groups-source=jwt-claim`
@@ -63,6 +67,24 @@ make stack-up              # auto-runs PKI setup if needed
 sudo openvpn --config lab/client.ovpn
 # Logs: docker compose -f lab/docker-compose.yml logs -f daemon
 ```
+
+OpenVPN 2.7.5 local new-wins acceptance:
+
+```bash
+make setup-multisocket
+VPN_AUTH_MANAGEMENT_RAW_LOG=true docker compose -f lab/docker-compose.multisocket.yml up -d
+./lab/run-pending-status-probe.sh
+./lab/run-local-new-wins-verification.sh
+```
+
+The probe stores raw management evidence below
+`lab/artifacts/pending-status-2.7.5/`. The replacement runner stores exact-CN
+and case-only transcripts for UDP-to-UDP and UDP-to-TCP replacement below
+`lab/artifacts/local-new-wins-2.7.5/`. Passing acceptance proves that the old
+session remains active during pending and after an abandoned replacement,
+exact-CN removal is native, case-only removal is daemon-driven after
+ESTABLISHED, `client-kill SUCCESS` is followed by a later DISCONNECT, and the
+final bootstrap snapshot contains exactly one established session.
 
 ### Mode 2: Full AWS (Terraform)
 
@@ -121,6 +143,7 @@ Terraform now exposes two high-level deployment toggles:
 make test
 # or
 go test -v -short ./...
+go test -race ./...
 ```
 
 Uses in-memory mocks via interfaces defined in `internal/auth/types.go`:

@@ -103,7 +103,10 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 		for scanner.Scan() {
 			line := scanner.Text()
 			cmds = append(cmds, line)
-			if strings.TrimSpace(line) == "status 3" {
+			switch strings.TrimSpace(line) {
+			case "hold release":
+				_, _ = fmt.Fprintf(conn, "SUCCESS: hold release succeeded\n")
+			case "status 3":
 				_, _ = fmt.Fprintf(conn, "TITLE,OpenVPN 2.6 mock\n")
 				_, _ = fmt.Fprintf(conn, "HEADER,CLIENT_LIST,Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since (time_t),Username,Client ID,Peer ID\n")
 				_, _ = fmt.Fprintf(conn, "END\n")
@@ -126,7 +129,10 @@ func TestReconnectWriterLifecycle(t *testing.T) {
 		for scanner2.Scan() {
 			line := scanner2.Text()
 			cmds2 = append(cmds2, line)
-			if strings.TrimSpace(line) == "status 3" {
+			switch strings.TrimSpace(line) {
+			case "hold release":
+				_, _ = fmt.Fprintf(conn2, "SUCCESS: hold release succeeded\n")
+			case "status 3":
 				_, _ = fmt.Fprintf(conn2, "TITLE,OpenVPN 2.6 mock\n")
 				_, _ = fmt.Fprintf(conn2, "HEADER,CLIENT_LIST,Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since (time_t),Username,Client ID,Peer ID\n")
 				_, _ = fmt.Fprintf(conn2, "END\n")

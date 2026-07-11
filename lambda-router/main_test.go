@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,15 +22,16 @@ import (
 func TestMain(m *testing.M) {
 	// Set required env vars before init() runs — but init() already ran
 	// when this package was loaded. We re-initialize globals for tests.
-	os.Setenv("VPC_CIDR", "10.0.0.0/16") //nolint:errcheck // test setup
-	os.Setenv("DAEMON_PORT_UDP", "8080") //nolint:errcheck // test setup
-	os.Setenv("DAEMON_PORT_TCP", "8081") //nolint:errcheck // test setup
-	os.Setenv("UPSTREAM_TIMEOUT", "2s")  //nolint:errcheck // test setup
+	os.Setenv("VPC_CIDR", "10.0.0.0/16")           //nolint:errcheck // test setup
+	os.Setenv("DAEMON_PORT_UDP", "8080")           //nolint:errcheck // test setup
+	os.Setenv("DAEMON_PORT_TCP", "8081")           //nolint:errcheck // test setup
+	os.Setenv("UPSTREAM_TIMEOUT", "2s")            //nolint:errcheck // test setup
+	os.Setenv("UPSTREAM_CONNECT_TIMEOUT", "100ms") //nolint:errcheck // test setup
 
 	_, parsed, _ := net.ParseCIDR("10.0.0.0/16")
 	vpcCIDR = parsed
 	portMap = map[string]string{"udp": "8080", "tcp": "8081"}
-	httpClient = &http.Client{Timeout: 2 * time.Second}
+	httpClient = newHTTPClient(2*time.Second, 100*time.Millisecond)
 	oidcHeaders = []string{"x-amzn-oidc-data", "x-amzn-oidc-accesstoken", "x-amzn-oidc-identity"}
 
 	os.Exit(m.Run())
@@ -134,13 +140,19 @@ func TestErrorPage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp := errorPage(tt.statusCode, tt.title, tt.message)
+			resp := errorPage(tt.statusCode, tt.title, tt.message, "")
 
 			if resp.StatusCode != tt.statusCode {
 				t.Errorf("StatusCode = %d, want %d", resp.StatusCode, tt.statusCode)
 			}
 			if ct := resp.Headers["content-type"]; ct != "text/html; charset=utf-8" {
 				t.Errorf("Content-Type = %q, want %q", ct, "text/html; charset=utf-8")
+			}
+			if got := resp.Headers["cache-control"]; got != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", got)
+			}
+			if got := resp.Headers["pragma"]; got != "no-cache" {
+				t.Errorf("Pragma = %q, want no-cache", got)
 			}
 			if !strings.Contains(resp.Body, tt.title) {
 				t.Error("body does not contain title")
@@ -157,7 +169,12 @@ func TestErrorPage(t *testing.T) {
 
 func TestErrorPage503NoInfoLeak(t *testing.T) {
 	resp := errorPage(503, "Service Unavailable",
-		"VPN server is temporarily unavailable. Please try reconnecting.")
+		"VPN connection is no longer available. Do not refresh this page. Disconnect the VPN client, connect again, and complete authentication using the new link.",
+		"a1b2c3d4e5f6")
+
+	if !strings.Contains(resp.Body, "Reference a1b2c3d4e5f6") {
+		t.Error("503 page does not contain callback reference ID")
+	}
 
 	leaks := []string{
 		"10.0.", "192.168.", "172.16.",
@@ -168,6 +185,58 @@ func TestErrorPage503NoInfoLeak(t *testing.T) {
 	for _, leak := range leaks {
 		if strings.Contains(resp.Body, leak) {
 			t.Errorf("503 page leaks infrastructure detail: %q", leak)
+		}
+	}
+}
+
+func TestWithConnectTimeout(t *testing.T) {
+	dial := withConnectTimeout(20*time.Millisecond, func(ctx context.Context, _, _ string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+
+	started := time.Now()
+	_, err := dial(context.Background(), "tcp", "example.invalid:443")
+	if err == nil {
+		t.Fatal("expected connect timeout")
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("connect timeout took %s, want less than 200ms", elapsed)
+	}
+	if got := classifyUpstreamError(err); got != "connect_timeout" {
+		t.Errorf("reason = %q, want connect_timeout", got)
+	}
+}
+
+func TestClassifyUpstreamError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"connection refused", &upstreamConnectError{err: syscall.ECONNREFUSED}, "connection_refused"},
+		{"connect network error", &upstreamConnectError{err: errors.New("no route")}, "network_error"},
+		{"request deadline", context.DeadlineExceeded, "request_timeout"},
+		{"other request error", errors.New("broken response"), "network_error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyUpstreamError(tt.err); got != tt.want {
+				t.Errorf("classifyUpstreamError() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewReferenceID(t *testing.T) {
+	got := newReferenceID()
+	if len(got) != 12 {
+		t.Fatalf("reference ID length = %d, want 12: %q", len(got), got)
+	}
+	for _, r := range got {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			t.Fatalf("reference ID is not lowercase hex: %q", got)
 		}
 	}
 }
@@ -297,19 +366,35 @@ func TestHandlerIPOutsideVPC(t *testing.T) {
 }
 
 func TestHandlerUpstreamConnectionRefused(t *testing.T) {
-	// Use a port that nothing is listening on
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve unused port: %v", err)
+	}
+	_, unusedPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("parse unused port: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release unused port: %v", err)
+	}
+
 	oldCIDR := vpcCIDR
 	_, cidr, _ := net.ParseCIDR("127.0.0.0/8")
 	vpcCIDR = cidr
 	defer func() { vpcCIDR = oldCIDR }()
 
 	oldPortMap := portMap
-	portMap = map[string]string{"udp": "19999", "tcp": "19999"}
+	portMap = map[string]string{"udp": unusedPort, "tcp": unusedPort}
 	defer func() { portMap = oldPortMap }()
+
+	var logOutput bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logOutput, nil)))
+	defer slog.SetDefault(oldLogger)
 
 	req := events.ALBTargetGroupRequest{
 		Path:                  "/callback/127.0.0.1/udp",
-		QueryStringParameters: map[string]string{"state": "s"},
+		QueryStringParameters: map[string]string{"state": "secret-state-must-not-leak"},
 		Headers:               map[string]string{},
 	}
 
@@ -320,12 +405,46 @@ func TestHandlerUpstreamConnectionRefused(t *testing.T) {
 	if resp.StatusCode != 503 {
 		t.Errorf("StatusCode = %d, want 503", resp.StatusCode)
 	}
+	if !strings.Contains(resp.Body, "Do not refresh this page") ||
+		!strings.Contains(resp.Body, "Disconnect the VPN client") {
+		t.Error("503 page does not contain reconnect instructions")
+	}
+	if got := resp.Headers["cache-control"]; got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := resp.Headers["pragma"]; got != "no-cache" {
+		t.Errorf("Pragma = %q, want no-cache", got)
+	}
+
+	var logEntry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logOutput.Bytes()), &logEntry); err != nil {
+		t.Fatalf("parse structured log: %v; log=%q", err, logOutput.String())
+	}
+	if got := logEntry["event"]; got != "callback_upstream_unavailable" {
+		t.Errorf("event = %v, want callback_upstream_unavailable", got)
+	}
+	if got := logEntry["protocol"]; got != "udp" {
+		t.Errorf("protocol = %v, want udp", got)
+	}
+	if got := logEntry["reason"]; got != "connection_refused" {
+		t.Errorf("reason = %v, want connection_refused", got)
+	}
+	referenceID, ok := logEntry["reference_id"].(string)
+	if !ok || referenceID == "" {
+		t.Fatalf("missing reference_id in log: %v", logEntry)
+	}
+	if !strings.Contains(resp.Body, "Reference "+referenceID) {
+		t.Errorf("page and log do not share reference ID %q", referenceID)
+	}
+	if strings.Contains(logOutput.String(), "secret-state-must-not-leak") {
+		t.Error("structured log leaks signed state")
+	}
 }
 
 func TestHandlerUpstreamTimeout(t *testing.T) {
-	// Slow server that exceeds the 2s test timeout
+	// Slow server that exceeds the overall request timeout after connecting.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Second)
+		time.Sleep(150 * time.Millisecond)
 		w.WriteHeader(200)
 	}))
 	defer upstream.Close()
@@ -340,6 +459,10 @@ func TestHandlerUpstreamTimeout(t *testing.T) {
 	vpcCIDR = cidr
 	defer func() { vpcCIDR = oldCIDR }()
 
+	oldHTTPClient := httpClient
+	httpClient = newHTTPClient(50*time.Millisecond, 20*time.Millisecond)
+	defer func() { httpClient = oldHTTPClient }()
+
 	req := events.ALBTargetGroupRequest{
 		Path:                  fmt.Sprintf("/callback/%s/udp", host),
 		QueryStringParameters: map[string]string{"state": "s"},
@@ -352,6 +475,46 @@ func TestHandlerUpstreamTimeout(t *testing.T) {
 	}
 	if resp.StatusCode != 503 {
 		t.Errorf("StatusCode = %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestHandlerSlowReachableUpstreamUsesOverallTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(75 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("slow success"))
+	}))
+	defer upstream.Close()
+
+	host, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	oldPortMap := portMap
+	portMap = map[string]string{"udp": port, "tcp": port}
+	defer func() { portMap = oldPortMap }()
+
+	oldCIDR := vpcCIDR
+	_, cidr, _ := net.ParseCIDR("127.0.0.0/8")
+	vpcCIDR = cidr
+	defer func() { vpcCIDR = oldCIDR }()
+
+	oldHTTPClient := httpClient
+	httpClient = newHTTPClient(500*time.Millisecond, 20*time.Millisecond)
+	defer func() { httpClient = oldHTTPClient }()
+
+	req := events.ALBTargetGroupRequest{
+		Path:                  fmt.Sprintf("/callback/%s/udp", host),
+		QueryStringParameters: map[string]string{"state": "s"},
+		Headers:               map[string]string{},
+	}
+
+	resp, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(resp.Body, "slow success") {
+		t.Error("body does not contain slow upstream response")
 	}
 }
 

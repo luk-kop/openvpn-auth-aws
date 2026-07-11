@@ -37,7 +37,7 @@ hr{border-top-color:#334155}
   <h1>{{.Title}}</h1>
   <p class="msg">{{.Message}}</p>
   <hr>
-  <p class="meta">{{.StatusCode}}</p>
+  <p class="meta">Error {{.StatusCode}}{{if .ReferenceID}} · Reference {{.ReferenceID}}{{end}}</p>
 </div>
 </body>
 </html>
