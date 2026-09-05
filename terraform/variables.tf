@@ -249,6 +249,27 @@ variable "lambda_router_zip_path" {
   default     = ""
 }
 
+variable "lambda_router_oidc_headers" {
+  description = "ALB OIDC headers forwarded by Lambda Router; keep unsigned legacy headers disabled outside short-lived diagnostics"
+  type        = list(string)
+  default     = ["x-amzn-oidc-data"]
+
+  validation {
+    condition = (
+      contains(var.lambda_router_oidc_headers, "x-amzn-oidc-data") &&
+      length(var.lambda_router_oidc_headers) == length(distinct(var.lambda_router_oidc_headers)) &&
+      alltrue([
+        for header in var.lambda_router_oidc_headers : contains([
+          "x-amzn-oidc-data",
+          "x-amzn-oidc-accesstoken",
+          "x-amzn-oidc-identity",
+        ], header)
+      ])
+    )
+    error_message = "lambda_router_oidc_headers must contain x-amzn-oidc-data and may contain each supported x-amzn-oidc-* header at most once."
+  }
+}
+
 # --- ASG ---
 
 variable "asg_desired_capacity" {

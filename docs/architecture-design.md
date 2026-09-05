@@ -140,9 +140,14 @@ After Cognito authentication, ALB adds these headers to the forwarded request:
 
 | Header                  | Content                                                      |
 |-------------------------|--------------------------------------------------------------|
-| `x-amzn-oidc-data`     | JWT signed by ALB (ES256). In the tested native-Cognito flow it contained `email`, `sub`, `username`, `exp`, `iss`. This is NOT the Cognito ID token. |
-| `x-amzn-oidc-identity` | The `sub` field from the user info endpoint (always `sub`, not email). |
-| `x-amzn-oidc-accesstoken` | Cognito access token (plain text). In the tested native-Cognito flow it contained `sub`, `username`, `scope`, `client_id`, `token_use`, `auth_time`, `exp`, `iat`, `iss`, `jti`, `origin_jti`, `version`. |
+| `x-amzn-oidc-data`     | JWT signed by ALB (ES256). In the tested native-Cognito flow it contained `email`, `sub`, `username`, `exp`, `iss`. This is not the Cognito ID token. It contains sensitive identity claims; signing provides integrity, not confidentiality. |
+| `x-amzn-oidc-identity` | The `sub` field from the user info endpoint (always `sub`, not email), forwarded in plaintext and unsigned by ALB. It is potentially sensitive personal data and must not be used without the verified claims header. |
+| `x-amzn-oidc-accesstoken` | Cognito access token forwarded in plaintext and unsigned by ALB. It is a sensitive bearer credential. In the tested native-Cognito flow it contained `sub`, `username`, `scope`, `client_id`, `token_use`, `auth_time`, `exp`, `iat`, `iss`, `jti`, `origin_jti`, `version`. |
+
+AWS documents the two unsigned values as legacy headers and requires applications
+to verify `x-amzn-oidc-data`; see [User claims encoding and signature verification](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-authenticate-users.html#user-claims-encoding).
+Lambda Router forwards only `x-amzn-oidc-data` by default. The other headers can
+be explicitly enabled through `OIDC_HEADERS` for short-lived diagnostics.
 
 ### JWT Validation
 

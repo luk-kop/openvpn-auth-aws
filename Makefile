@@ -1,4 +1,4 @@
-.PHONY: test tidy update-patch update-minor tidy-lambda update-lambda-patch update-lambda-minor \
+.PHONY: test help lint race-test vulncheck fuzz tidy update-patch update-minor tidy-lambda update-lambda-patch update-lambda-minor \
 	setup setup-multisocket build build-release build-lambda clean \
 	stack-up stack-down stack-rebuild \
 	stack-up-multisocket stack-down-multisocket stack-rebuild-multisocket verify-multisocket verify-local-new-wins \
@@ -10,6 +10,9 @@ BINDIR := bin
 RELEASE_TMP := $(BINDIR)/release
 GO_BUILD_CACHE := $(CURDIR)/.cache/go-build
 GO ?= go
+GOLANGCI_LINT ?= golangci-lint
+GOVULNCHECK_VERSION ?= v1.7.0
+FUZZ_TIME ?= 30s
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 VERSION_NO_V := $(VERSION:v%=%)
 REVISION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -22,6 +25,77 @@ LDFLAGS := -s -w \
 # Unit tests (fast, no AWS)
 test:
 	go test -v -short ./...
+
+help:
+	@printf '%s\n' \
+		'Testing and checks:' \
+		'  make test                         Run fast daemon tests' \
+		'  make lint                         Run golangci-lint and go vet for both Go modules' \
+		'  make race-test                    Run race tests for both Go modules' \
+		'  make vulncheck                    Scan both Go modules for reachable vulnerabilities' \
+		'  make fuzz [FUZZ_TIME=30s]         Actively fuzz all parser targets' \
+		'' \
+		'Build:' \
+		'  make build                        Build daemon and local mocks' \
+		'  make build-lambda                 Build Lambda Router archives' \
+		'  make build-release                Build all release artifacts and checksums' \
+		'  make clean                        Remove generated local build artifacts' \
+		'' \
+		'Dependencies:' \
+		'  make tidy                         Tidy the daemon module' \
+		'  make tidy-lambda                  Tidy the Lambda Router module' \
+		'  make update-patch                 Update daemon dependencies within patch versions' \
+		'  make update-minor                 Update daemon dependencies within minor versions' \
+		'  make update-lambda-patch          Update Lambda dependencies within patch versions' \
+		'  make update-lambda-minor          Update Lambda dependencies within minor versions' \
+		'' \
+		'Local development:' \
+		'  make run-daemon                   Run the daemon in local mock mode' \
+		'  make run-alb-mock                 Run the ALB mock' \
+		'  make run-mgmt-mock                Run the management interface mock' \
+		'  make setup                        Prepare the standard Docker lab' \
+		'  make stack-up|stack-down          Start or stop the standard Docker lab' \
+		'  make stack-rebuild                Rebuild and start the standard Docker lab' \
+		'' \
+		'Multi-socket lab:' \
+		'  make setup-multisocket            Prepare the OpenVPN 2.7 multi-socket lab' \
+		'  make stack-up-multisocket         Start the multi-socket lab' \
+		'  make stack-down-multisocket       Stop the multi-socket lab' \
+		'  make stack-rebuild-multisocket    Rebuild and start the multi-socket lab' \
+		'  make verify-multisocket           Run multi-socket verification' \
+		'  make verify-local-new-wins        Run local replacement acceptance' \
+		'' \
+		'PKI:' \
+		'  make pki-init                     Initialize PKI material' \
+		'  make pki-tls-crypt                Generate the tls-crypt key' \
+		'  make pki-client CN=<name>         Generate a client certificate' \
+		'  make pki-upload [PKI_REGION=...]  Upload PKI secrets to AWS' \
+		'  make pki-client-config CN=<name> REMOTE=<host[:port]>' \
+		'                                    Generate an OpenVPN client configuration'
+
+lint:
+	$(GOLANGCI_LINT) run ./...
+	$(GO) vet ./...
+	cd lambda-router && $(GOLANGCI_LINT) run ./...
+	cd lambda-router && $(GO) vet ./...
+
+# Race detector for both Go modules.
+race-test:
+	$(GO) test -race -short ./...
+	cd lambda-router && $(GO) test -race -short ./...
+
+# Reachability-aware vulnerability scan for both Go modules.
+vulncheck:
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+	cd lambda-router && $(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+# Active, coverage-guided fuzzing; one target per go test invocation.
+fuzz:
+	$(GO) test -run='^$$' -fuzz='^FuzzDecodeState$$' -fuzztime=$(FUZZ_TIME) ./internal/auth
+	$(GO) test -run='^$$' -fuzz='^FuzzReadEvent$$' -fuzztime=$(FUZZ_TIME) ./internal/mgmt
+	$(GO) test -run='^$$' -fuzz='^FuzzParseJWTHeader$$' -fuzztime=$(FUZZ_TIME) ./internal/callback
+	$(GO) test -run='^$$' -fuzz='^FuzzParseGroupsClaim$$' -fuzztime=$(FUZZ_TIME) ./internal/callback
+	cd lambda-router && $(GO) test -run='^$$' -fuzz='^FuzzParsePath$$' -fuzztime=$(FUZZ_TIME) .
 
 tidy:
 	$(GO) mod tidy

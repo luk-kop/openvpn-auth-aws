@@ -67,6 +67,7 @@ func (c *Client) WriteLine(line string) error {
 }
 
 func (c *Client) authenticate(passwordFile string) error {
+	// #nosec G304 -- path comes from operator-controlled daemon configuration.
 	passwordBytes, err := os.ReadFile(passwordFile)
 	if err != nil {
 		return fmt.Errorf("read management password: %w", err)

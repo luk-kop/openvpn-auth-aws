@@ -5,6 +5,7 @@
 - [Architecture](#architecture)
 - [Request Flow](#request-flow)
 - [Configuration](#configuration)
+- [Forwarded OIDC Headers](#forwarded-oidc-headers)
 - [Logging](#logging)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
@@ -87,10 +88,47 @@ Processing steps in Lambda:
 | `DAEMON_PORT_TCP` | no | `8081` | TCP daemon port |
 | `UPSTREAM_CONNECT_TIMEOUT` | no | `3s` | TCP connection timeout to the target daemon; must be shorter than `UPSTREAM_TIMEOUT` (`time.ParseDuration` format) |
 | `UPSTREAM_TIMEOUT` | no | `10s` | HTTP timeout for the upstream request (`time.ParseDuration` format) |
-| `OIDC_HEADERS` | no | `["x-amzn-oidc-data","x-amzn-oidc-accesstoken","x-amzn-oidc-identity"]` | JSON array of OIDC header names to forward to the daemon |
+| `OIDC_HEADERS` | no | `["x-amzn-oidc-data"]` | JSON array of OIDC header names to forward to the daemon. Forwarding the unsigned legacy headers requires an explicit opt-in. |
 | `LOG_LEVEL` | no | `info` | Log level: `debug`, `info`, `warn`, `error` |
 
 These variables are set by the Terraform module and passed to the Lambda function. Invalid configuration causes a startup `panic` in Lambda as a fail-fast behavior.
+
+## Forwarded OIDC Headers
+
+ALB supplies three `x-amzn-oidc-*` headers to Lambda, but Lambda Router forwards
+only `x-amzn-oidc-data` by default. The daemon's production authentication and
+authorization path does not require the other two headers.
+
+| Header | Content and verification | Sensitivity and use |
+|---|---|---|
+| `x-amzn-oidc-data` | UserInfo claims encoded as a JWT and signed by ALB with ES256. The daemon verifies the signature, expected ALB ARN in `signer`, and expiry before using its claims. | Contains identity and profile claims, so treat it as sensitive authentication data. The signature provides integrity and origin authentication, not confidentiality. Required by the daemon. |
+| `x-amzn-oidc-accesstoken` | Access token returned by the IdP token endpoint. ALB forwards it in plaintext and does not sign it; AWS describes this legacy header as not independently verifiable by the application. | Highly sensitive bearer credential that may authorize access to server resources. The daemon does not use it for production decisions; decoding it is available only for explicit diagnostics. |
+| `x-amzn-oidc-identity` | Plaintext copy of the `sub` value returned by the UserInfo endpoint. It is not signed by ALB and is not independently trustworthy. | A stable user identifier and therefore potentially sensitive personal data, although not a bearer credential. The daemon relies on verified claims from `x-amzn-oidc-data` instead of this header. |
+
+See AWS's [User claims encoding and signature verification](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-authenticate-users.html#user-claims-encoding)
+documentation for the authoritative header definitions and verification
+requirements.
+
+For short-lived diagnostics, the legacy headers can still be enabled explicitly
+through Terraform:
+
+```hcl
+lambda_router_oidc_headers = [
+  "x-amzn-oidc-data",
+  "x-amzn-oidc-accesstoken",
+  "x-amzn-oidc-identity",
+]
+```
+
+For a Lambda deployed without this repository's Terraform, set `OIDC_HEADERS`
+to the equivalent JSON array. The configuration accepts only the three headers
+listed above, requires `x-amzn-oidc-data`, rejects duplicates, and fails fast on
+invalid values.
+
+This expands the credential-handling boundary and sends the access token over
+the Lambda-to-daemon HTTP hop. Enable it only when required, keep
+`--oidc-debug-claims` disabled in production, and restore the default after the
+diagnostic session.
 
 ## Logging
 

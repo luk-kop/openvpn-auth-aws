@@ -1,6 +1,6 @@
 # OpenVPN Auth Daemon for AWS
 
-![Go](https://img.shields.io/badge/Go-1.26.5-00ADD8?logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.27.1-00ADD8?logo=go&logoColor=white)
 ![OpenVPN](https://img.shields.io/badge/OpenVPN_CE-2.7.5-EA7E20?logo=openvpn&logoColor=white)
 ![AWS](https://img.shields.io/badge/AWS-Cognito-FF9900?logo=amazonaws&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -21,7 +21,7 @@ Go daemon that authenticates OpenVPN clients via browser-based OIDC (AWS Cognito
 ## Features
 
 - Browser-based OIDC authentication via WebAuth (`WEB_AUTH::` URL)
-- ALB JWT validation (ES256) — ALB handles the full OIDC flow and forwards signed `x-amzn-oidc-*` headers
+- ALB JWT validation (ES256) — ALB handles the full OIDC flow and the daemon verifies the ALB-signed `x-amzn-oidc-data` claims header
 - Two independent daemons per EC2 (UDP + TCP), each with its own callback port and session store
 - OpenVPN CE 2.7.5 target with a verified multi-socket lab path: one OpenVPN
   process listens on UDP and TCP through one management socket; local new-wins
@@ -105,9 +105,14 @@ Expected result: the daemon emits a `WEB_AUTH` URL, the browser callback is proc
 ## Build & Test
 
 ```bash
+make help           # list available development targets
 make build          # build all binaries (daemon, mgmt-mock, alb-mock)
 make build-lambda   # build Lambda Router package (outputs lambda-router/lambda-arm64.zip + lambda-amd64.zip)
 make test           # unit tests (go test -v -short ./...)
+make lint           # golangci-lint and go vet for both Go modules
+make race-test      # race detector for daemon and Lambda Router
+make vulncheck      # reachable vulnerability scan for both Go modules
+make fuzz           # active fuzzing, 30 seconds per target
 make verify-local-new-wins # OpenVPN 2.7.5 exact-CN and case-only acceptance
 ./openvpn-auth-daemon --version
 ```
