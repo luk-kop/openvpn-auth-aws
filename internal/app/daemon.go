@@ -192,7 +192,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// Start callback server — bind the port synchronously so we fail fast
 	// if the port is already in use or the process lacks permission.
 	callbackAddr := fmt.Sprintf(":%d", d.cfg.CallbackPort)
-	ln, err := net.Listen("tcp", callbackAddr)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", callbackAddr)
 	if err != nil {
 		return fmt.Errorf("callback server listen %s: %w", callbackAddr, err)
 	}

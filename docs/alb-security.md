@@ -111,10 +111,10 @@ The first hop (browser → ALB) is encrypted. The ALB-to-Lambda leg is not HTTP 
 
 The two unencrypted hops are both VPC-internal:
 
-- `lambda-router/main.go` constructs `http://{ec2-ip}:{port}/callback/` — OIDC headers (`x-amzn-oidc-data`, `x-amzn-oidc-accesstoken`) are forwarded over plain HTTP from Lambda to the daemon.
-- `terraform/modules/vpn-server/main.tf` defines the ALB target group with `protocol = "HTTP"` — in single-instance mode the ALB forwards the callback directly to the daemon over plain HTTP.
+- `lambda-router/main.go` constructs `http://{ec2-ip}:{port}/callback/` — by default only `x-amzn-oidc-data` is forwarded over plain HTTP from Lambda to the daemon. The sensitive access token and unsigned identity header can be enabled only through an explicit diagnostic `OIDC_HEADERS` override.
+- `terraform/modules/vpn-server/main.tf` defines the ALB target group with `protocol = "HTTP"` — in single-instance mode the ALB forwards the callback and its complete ALB-generated OIDC header set directly to the daemon over plain HTTP.
 
-In both cases the `x-amzn-oidc-data` JWT is already ES256-signed by the ALB's EC key, so a network-level attacker cannot forge or replay it. The confidentiality of the token (not its integrity) is the concern.
+In both cases the `x-amzn-oidc-data` JWT is already ES256-signed by the ALB's EC key, so a network-level attacker cannot forge or modify it. A signature does not provide confidentiality or by itself prevent replay; the daemon's signed, expiring, single-use callback state supplies the replay control for this flow.
 
 ### Why this is acceptable for now
 

@@ -143,7 +143,11 @@ Terraform now exposes two high-level deployment toggles:
 make test
 # or
 go test -v -short ./...
-go test -race ./...
+
+# Both the daemon and Lambda Router modules
+make lint
+make race-test
+make vulncheck
 ```
 
 Uses in-memory mocks via interfaces defined in `internal/auth/types.go`:
@@ -169,6 +173,8 @@ Each package provides a real AWS implementation and a mock for testing (e.g., `c
 - Callback server (claim validation, state HMAC verification)
 - Session store (TTL reaper, atomic state transitions)
 - State blob signing/verification
+- Fuzz seed corpora for signed state, management events, JWT/group parsing,
+  and Lambda callback paths
 
 ### Adding New Tests
 
@@ -193,12 +199,19 @@ func TestMyFeature(t *testing.T) {
 
 ## CI/CD Recommendations
 
-```yaml
-# .github/workflows/ci.yml
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - run: go test -v -short ./...
-      - run: cd lambda-router && go test -v -short ./...
+Pull requests run unit tests, lint/vet, builds, the race detector, and
+`govulncheck` for both Go modules. The build job depends on all of those checks,
+so a failure prevents a successful CI result.
+
+Go executes every fuzz seed as part of the ordinary unit test suite. Active,
+coverage-guided fuzzing is intentionally not scheduled in CI; run it manually
+after changing a parser or before a release:
+
+```bash
+make fuzz                 # 30 seconds per target
+make fuzz FUZZ_TIME=2m    # longer run
 ```
+
+When fuzzing finds a failure, Go writes a minimized input under the package's
+`testdata/fuzz/<FuzzTarget>/` directory. Keep that input after fixing the bug so
+it remains a regression test in the ordinary unit test suite.

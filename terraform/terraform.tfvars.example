@@ -25,6 +25,8 @@ route53_hosted_zone_id = "ZXXXXXXXXXXXXXXXXXXXXX"
 # vpc_cidr             = "10.0.0.0/16"
 # lambda_subnet_ids    = ["subnet-priv-aaa", "subnet-priv-bbb"]
 # lambda_router_zip_path = "lambda-router/lambda-arm64.zip"
+# Diagnostic opt-in only; x-amzn-oidc-accesstoken is a sensitive bearer credential.
+# lambda_router_oidc_headers = ["x-amzn-oidc-data", "x-amzn-oidc-accesstoken", "x-amzn-oidc-identity"]
 
 # --- Optional overrides ---
 # aws_region             = "eu-west-1"

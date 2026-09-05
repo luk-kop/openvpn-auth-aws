@@ -115,6 +115,7 @@ resource "aws_lambda_function" "router" {
       DAEMON_PORT_TCP          = tostring(var.daemon_ports["tcp"])
       UPSTREAM_TIMEOUT         = var.upstream_timeout
       UPSTREAM_CONNECT_TIMEOUT = var.upstream_connect_timeout
+      OIDC_HEADERS             = jsonencode(var.oidc_headers)
     }
   }
 

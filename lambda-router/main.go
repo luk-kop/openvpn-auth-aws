@@ -58,6 +58,14 @@ type upstreamConnectError struct {
 	err error
 }
 
+var allowedOIDCHeaders = map[string]struct{}{
+	"x-amzn-oidc-data":        {},
+	"x-amzn-oidc-accesstoken": {},
+	"x-amzn-oidc-identity":    {},
+}
+
+const defaultOIDCHeadersJSON = `["x-amzn-oidc-data"]`
+
 func (e *upstreamConnectError) Error() string { return "connect upstream: " + e.err.Error() }
 func (e *upstreamConnectError) Unwrap() error { return e.err }
 
@@ -66,6 +74,32 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func parseOIDCHeaders(raw string) ([]string, error) {
+	var headers []string
+	if err := json.Unmarshal([]byte(raw), &headers); err != nil {
+		return nil, fmt.Errorf("not a valid JSON array: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(headers))
+	hasData := false
+	for i, header := range headers {
+		header = strings.ToLower(header)
+		if _, ok := allowedOIDCHeaders[header]; !ok {
+			return nil, fmt.Errorf("unsupported header %q", headers[i])
+		}
+		if _, ok := seen[header]; ok {
+			return nil, fmt.Errorf("duplicate header %q", headers[i])
+		}
+		seen[header] = struct{}{}
+		headers[i] = header
+		hasData = hasData || header == "x-amzn-oidc-data"
+	}
+	if !hasData {
+		return nil, errors.New("x-amzn-oidc-data is required")
+	}
+	return headers, nil
 }
 
 // configure parses environment variables and sets package-level globals.
@@ -116,14 +150,10 @@ func configure() {
 	httpClient = newHTTPClient(timeout, connectTimeout)
 
 	// OIDC_HEADERS — optional JSON array override
-	defaultHeadersJSON, _ := json.Marshal([]string{
-		"x-amzn-oidc-data",
-		"x-amzn-oidc-accesstoken",
-		"x-amzn-oidc-identity",
-	})
-	headersJSON := getenv("OIDC_HEADERS", string(defaultHeadersJSON))
-	if err := json.Unmarshal([]byte(headersJSON), &oidcHeaders); err != nil {
-		panic(fmt.Sprintf("OIDC_HEADERS is not a valid JSON array: %s", err))
+	headersJSON := getenv("OIDC_HEADERS", defaultOIDCHeadersJSON)
+	oidcHeaders, err = parseOIDCHeaders(headersJSON)
+	if err != nil {
+		panic(fmt.Sprintf("OIDC_HEADERS is invalid: %s", err))
 	}
 
 	slog.Info("cold start",

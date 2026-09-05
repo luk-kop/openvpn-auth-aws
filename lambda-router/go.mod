@@ -1,5 +1,5 @@
 module lambda-router
 
-go 1.26.5
+go 1.27.1
 
-require github.com/aws/aws-lambda-go v1.54.0
+require github.com/aws/aws-lambda-go v1.55.0

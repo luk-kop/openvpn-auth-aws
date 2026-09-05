@@ -18,7 +18,7 @@ OpenVPN Community Edition can delegate connection decisions to the management in
 
 - OpenVPN client certificate authentication as the first factor.
 - OpenVPN WebAuth (`WEB_AUTH::`) to send the user to a browser login.
-- ALB `authenticate-cognito` to run the OIDC flow and forward signed identity headers.
+- ALB `authenticate-cognito` to run the OIDC flow and forward an ALB-signed claims header.
 - A Go daemon that verifies the callback, checks certificate CN vs identity, and accepts or rejects the OpenVPN client.
 - Local availability-first single-session enforcement keyed by a case-insensitive
   normalized certificate CN.
@@ -32,7 +32,7 @@ The intended deployment target is Linux on EC2, with local Docker and mock-based
 |---|---|
 | OpenVPN server | Terminates VPN client TLS, emits management events, and waits in `AUTH_PENDING` during browser auth. |
 | Auth daemon | Owns pending sessions, signs callback state, validates ALB JWTs, checks CN/email/groups, and sends `client-auth` or `client-deny`. |
-| ALB | Handles HTTPS callbacks and Cognito authentication, then forwards signed `x-amzn-oidc-*` headers to the daemon. |
+| ALB | Handles HTTPS callbacks and Cognito authentication, then forwards the ALB-signed `x-amzn-oidc-data` claims header and legacy unsigned OIDC headers. |
 | Cognito | User pool and optional federation layer for the browser login flow. |
 | Lambda Router | Optional multi-instance callback proxy that routes browser callbacks to the correct EC2 daemon by private IP. |
 | Terraform | Builds the AWS deployment, including networking, ALB, Cognito, EC2, NLB, IAM, and secrets wiring. |

@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 	vpcCIDR = parsed
 	portMap = map[string]string{"udp": "8080", "tcp": "8081"}
 	httpClient = newHTTPClient(2*time.Second, 100*time.Millisecond)
-	oidcHeaders = []string{"x-amzn-oidc-data", "x-amzn-oidc-accesstoken", "x-amzn-oidc-identity"}
+	oidcHeaders, _ = parseOIDCHeaders(defaultOIDCHeadersJSON)
 
 	os.Exit(m.Run())
 }
@@ -241,19 +241,66 @@ func TestNewReferenceID(t *testing.T) {
 	}
 }
 
+func TestParseOIDCHeaders(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name: "safe default",
+			raw:  defaultOIDCHeadersJSON,
+			want: []string{"x-amzn-oidc-data"},
+		},
+		{
+			name: "legacy diagnostic opt-in",
+			raw:  `["x-amzn-oidc-data","x-amzn-oidc-accesstoken","x-amzn-oidc-identity"]`,
+			want: []string{"x-amzn-oidc-data", "x-amzn-oidc-accesstoken", "x-amzn-oidc-identity"},
+		},
+		{
+			name: "case normalized",
+			raw:  `["X-Amzn-Oidc-Data"]`,
+			want: []string{"x-amzn-oidc-data"},
+		},
+		{name: "invalid JSON", raw: `x-amzn-oidc-data`, wantErr: true},
+		{name: "missing required data header", raw: `["x-amzn-oidc-identity"]`, wantErr: true},
+		{name: "unsupported header", raw: `["x-amzn-oidc-data","authorization"]`, wantErr: true},
+		{name: "duplicate header", raw: `["x-amzn-oidc-data","X-Amzn-Oidc-Data"]`, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseOIDCHeaders(tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseOIDCHeaders(%q) returned no error", tt.raw)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseOIDCHeaders(%q): %v", tt.raw, err)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+				t.Errorf("parseOIDCHeaders(%q) = %v, want %v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 // --- handler tests (with httptest mock upstream) ---
 
 func TestHandlerValidCallbackUDP(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify OIDC headers are forwarded
+		// Only the signed claims header is forwarded by default.
 		if r.Header.Get("x-amzn-oidc-data") != "jwt-token" {
 			t.Error("missing x-amzn-oidc-data header")
 		}
-		if r.Header.Get("x-amzn-oidc-accesstoken") != "access-token" {
-			t.Error("missing x-amzn-oidc-accesstoken header")
+		if r.Header.Get("x-amzn-oidc-accesstoken") != "" {
+			t.Error("x-amzn-oidc-accesstoken should not be forwarded by default")
 		}
-		if r.Header.Get("x-amzn-oidc-identity") != "user@example.com" {
-			t.Error("missing x-amzn-oidc-identity header")
+		if r.Header.Get("x-amzn-oidc-identity") != "" {
+			t.Error("x-amzn-oidc-identity should not be forwarded by default")
 		}
 		// Verify state param
 		if r.URL.Query().Get("state") != "abc123" {
@@ -518,7 +565,7 @@ func TestHandlerSlowReachableUpstreamUsesOverallTimeout(t *testing.T) {
 	}
 }
 
-func TestHandlerOIDCHeadersForwarded(t *testing.T) {
+func TestHandlerDefaultOIDCHeaderFiltering(t *testing.T) {
 	var receivedHeaders http.Header
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedHeaders = r.Header.Clone()
@@ -552,10 +599,12 @@ func TestHandlerOIDCHeadersForwarded(t *testing.T) {
 		t.Fatalf("handler returned error: %v", err)
 	}
 
-	// Verify OIDC headers were forwarded
-	for _, h := range []string{"X-Amzn-Oidc-Data", "X-Amzn-Oidc-Accesstoken", "X-Amzn-Oidc-Identity"} {
-		if receivedHeaders.Get(h) == "" {
-			t.Errorf("OIDC header %q was not forwarded", h)
+	if receivedHeaders.Get("X-Amzn-Oidc-Data") == "" {
+		t.Error("x-amzn-oidc-data was not forwarded")
+	}
+	for _, h := range []string{"X-Amzn-Oidc-Accesstoken", "X-Amzn-Oidc-Identity"} {
+		if receivedHeaders.Get(h) != "" {
+			t.Errorf("OIDC header %q should not be forwarded by default", h)
 		}
 	}
 	// Verify non-OIDC headers were NOT forwarded
@@ -598,9 +647,12 @@ func TestHandlerOIDCHeadersCaseInsensitive(t *testing.T) {
 		t.Fatalf("handler returned error: %v", err)
 	}
 
-	for _, h := range []string{"X-Amzn-Oidc-Data", "X-Amzn-Oidc-Accesstoken", "X-Amzn-Oidc-Identity"} {
-		if receivedHeaders.Get(h) == "" {
-			t.Errorf("OIDC header %q was not forwarded (mixed-case input)", h)
+	if receivedHeaders.Get("X-Amzn-Oidc-Data") == "" {
+		t.Error("x-amzn-oidc-data was not forwarded (mixed-case input)")
+	}
+	for _, h := range []string{"X-Amzn-Oidc-Accesstoken", "X-Amzn-Oidc-Identity"} {
+		if receivedHeaders.Get(h) != "" {
+			t.Errorf("OIDC header %q should not be forwarded by default", h)
 		}
 	}
 }
@@ -615,9 +667,9 @@ func TestOIDCHeadersEnvOverride(t *testing.T) {
 
 	host, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
-	// Override to forward only x-amzn-oidc-data
+	// Explicitly opt in to forwarding the legacy unsigned headers.
 	oldHeaders := oidcHeaders
-	os.Setenv("OIDC_HEADERS", `["x-amzn-oidc-data"]`) //nolint:errcheck // test setup
+	os.Setenv("OIDC_HEADERS", `["x-amzn-oidc-data","x-amzn-oidc-accesstoken","x-amzn-oidc-identity"]`) //nolint:errcheck // test setup
 	configure()
 	defer func() {
 		os.Unsetenv("OIDC_HEADERS") //nolint:errcheck // test cleanup
@@ -652,11 +704,11 @@ func TestOIDCHeadersEnvOverride(t *testing.T) {
 	if receivedHeaders.Get("X-Amzn-Oidc-Data") == "" {
 		t.Error("x-amzn-oidc-data should be forwarded")
 	}
-	if receivedHeaders.Get("X-Amzn-Oidc-Accesstoken") != "" {
-		t.Error("x-amzn-oidc-accesstoken should NOT be forwarded when overridden")
+	if receivedHeaders.Get("X-Amzn-Oidc-Accesstoken") == "" {
+		t.Error("x-amzn-oidc-accesstoken should be forwarded when explicitly configured")
 	}
-	if receivedHeaders.Get("X-Amzn-Oidc-Identity") != "" {
-		t.Error("x-amzn-oidc-identity should NOT be forwarded when overridden")
+	if receivedHeaders.Get("X-Amzn-Oidc-Identity") == "" {
+		t.Error("x-amzn-oidc-identity should be forwarded when explicitly configured")
 	}
 }
 

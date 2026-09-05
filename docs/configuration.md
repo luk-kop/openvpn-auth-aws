@@ -83,6 +83,13 @@ The flag affects structured logs only. It does not emit EMF metrics and should s
 
 `--oidc-debug-claims` produces structured diagnostics for the ALB-forwarded OIDC headers on every callback. It is a lab/debug tool and must remain disabled in production.
 
+In multi-instance mode, Lambda Router forwards only `x-amzn-oidc-data` by
+default. To inspect the access-token or identity diagnostics, temporarily opt in
+with `lambda_router_oidc_headers`; see
+[Forwarded OIDC Headers](lambda-router-proxy.md#forwarded-oidc-headers). This
+forwards a sensitive bearer credential to the daemon and should be reverted
+after the investigation.
+
 When enabled, it logs:
 
 - Whether `x-amzn-oidc-data`, `x-amzn-oidc-accesstoken`, and `x-amzn-oidc-identity` are present, plus their lengths.
@@ -217,10 +224,12 @@ The Lambda Router (used in multi-instance mode) is configured via environment va
 | `DAEMON_PORT_TCP` | no | `8081` | Daemon port for TCP listeners |
 | `UPSTREAM_CONNECT_TIMEOUT` | no | `3s` | TCP connection timeout to the target daemon; must be shorter than `UPSTREAM_TIMEOUT` (`time.ParseDuration` format) |
 | `UPSTREAM_TIMEOUT` | no | `10s` | HTTP timeout to upstream daemon (`time.ParseDuration` format) |
-| `OIDC_HEADERS` | no | `["x-amzn-oidc-data","x-amzn-oidc-accesstoken","x-amzn-oidc-identity"]` | JSON array of OIDC header names to forward to daemon |
+| `OIDC_HEADERS` | no | `["x-amzn-oidc-data"]` | JSON array of OIDC header names to forward to daemon. The unsigned access-token and identity headers are sensitive legacy headers and require explicit opt-in. |
 | `LOG_LEVEL` | no | `info` | Log level: `debug`, `info`, `warn`, `error` |
 
-See [Lambda Router](lambda-router-proxy.md) for architecture, security model, and troubleshooting.
+See [Lambda Router: Forwarded OIDC Headers](lambda-router-proxy.md#forwarded-oidc-headers)
+for each header's contents, verification properties, sensitivity, the AWS
+reference, and the diagnostic opt-in configuration.
 
 ## Dev vs Production Flag Matrix
 

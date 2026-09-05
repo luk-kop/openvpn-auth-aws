@@ -6,10 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-
-env:
-  GO_VERSION: "1.26.5"
+  contents: read
 
 jobs:
   lint:
@@ -19,7 +16,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: 'go.mod'
 
       - name: Format Check
         run: |
@@ -34,6 +31,8 @@ jobs:
 
       - name: Lint daemon
         uses: golangci/golangci-lint-action@v9
+        with:
+          version-file: .golangci-lint-version
 
       - name: Vet daemon
         run: go vet ./...
@@ -44,6 +43,8 @@ jobs:
       - name: Lint Lambda Router
         uses: golangci/golangci-lint-action@v9
         with:
+          # Relative to working-directory, not the repository root.
+          version-file: ../.golangci-lint-version
           working-directory: lambda-router
 
       - name: Vet Lambda Router
@@ -56,7 +57,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: 'go.mod'
 
       - name: Test daemon
         run: go test -v -short ./...
@@ -71,17 +72,28 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: 'go.mod'
 
-      - name: Race Test daemon
-        run: go test -race -short ./...
+      - name: Race test both Go modules
+        run: make race-test
 
-      - name: Race Test Lambda Router
-        run: cd lambda-router && go test -race -short ./...
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Scan both Go modules for reachable vulnerabilities
+        run: make vulncheck
 
   release:
     runs-on: ubuntu-latest
-    needs: [lint, test, race-test]
+    needs: [lint, test, race-test, vulncheck]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -89,7 +101,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: 'go.mod'
 
       - name: Build release artifacts
         env:

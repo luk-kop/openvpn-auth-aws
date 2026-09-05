@@ -70,3 +70,24 @@ variable "upstream_connect_timeout" {
   type        = string
   default     = "3s"
 }
+
+variable "oidc_headers" {
+  description = "ALB OIDC headers forwarded by Lambda Router; unsigned legacy headers should be enabled only for diagnostics"
+  type        = list(string)
+  default     = ["x-amzn-oidc-data"]
+
+  validation {
+    condition = (
+      contains(var.oidc_headers, "x-amzn-oidc-data") &&
+      length(var.oidc_headers) == length(distinct(var.oidc_headers)) &&
+      alltrue([
+        for header in var.oidc_headers : contains([
+          "x-amzn-oidc-data",
+          "x-amzn-oidc-accesstoken",
+          "x-amzn-oidc-identity",
+        ], header)
+      ])
+    )
+    error_message = "oidc_headers must contain x-amzn-oidc-data and may contain each supported x-amzn-oidc-* header at most once."
+  }
+}

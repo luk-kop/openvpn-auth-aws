@@ -115,6 +115,7 @@ module "lambda_router" {
   vpc_cidr          = var.vpc_cidr
   lambda_subnet_ids = var.lambda_subnet_ids
   lambda_zip_path   = var.lambda_router_zip_path
+  oidc_headers      = var.lambda_router_oidc_headers
 
   alb_listener_arn         = module.alb[0].listener_arn
   lambda_security_group_id = aws_security_group.lambda.id

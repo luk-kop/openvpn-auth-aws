@@ -605,16 +605,6 @@ func (s *Server) checkGroup(ctx context.Context, sess *auth.PendingSession, clai
 	return result.InGroup, nil
 }
 
-// Start starts the HTTP server on the given address.
-func (s *Server) Start(addr string) error {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
-	}
-	slog.Info("callback server listening", "addr", addr)
-	return s.Serve(ln)
-}
-
 // Serve accepts connections on the given listener. The caller is responsible
 // for binding the port (e.g. via net.Listen) so that bind errors are detected
 // synchronously before the daemon enters the event loop.

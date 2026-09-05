@@ -1,0 +1,32 @@
+version: "2"
+
+linters:
+  # Standard set: errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    # Security checks (weak crypto, file permissions, path traversal, ...).
+    - gosec
+    # Correct error wrapping and errors.Is/As usage.
+    - errorlint
+    # Unclosed HTTP response bodies.
+    - bodyclose
+    # HTTP requests and listeners created without context.
+    - noctx
+  settings:
+    gosec:
+      excludes:
+        # G104 (unhandled errors) duplicates errcheck from the standard set.
+        - G104
+  exclusions:
+    rules:
+      # Tests intentionally use fixed secrets, permissive file modes, and
+      # context-free helpers such as httptest.NewRequest.
+      - path: _test\.go
+        linters:
+          - gosec
+          - noctx
+      # Local development mocks; never deployed.
+      - path: ^cmd/(alb-mock|mgmt-mock)/
+        linters:
+          - gosec
+          - noctx

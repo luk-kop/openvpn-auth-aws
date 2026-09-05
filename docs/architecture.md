@@ -285,9 +285,14 @@ See [AWS docs: Authenticate users using an Application Load Balancer](https://do
 
 Before the daemon sees a normal callback request, the ALB's `authenticate-cognito` action performs the browser login flow with Cognito and stores its own session in `AWSELBAuthSessionCookie-*` cookies. In the currently tested setup with native Cognito users (`supported_identity_providers = ["COGNITO"]`), the forwarded request contained these headers:
 
-- `x-amzn-oidc-data` — ES256-signed JWT from ALB. In the tested Cognito flow its payload contained `email`, `sub`, `username`, `exp`, `iss`.
-- `x-amzn-oidc-identity` — plain-text copy of the user `sub`.
-- `x-amzn-oidc-accesstoken` — raw Cognito access token. In the tested flow its payload contained `sub`, `username`, `scope`, `client_id`, `token_use`, `auth_time`, `exp`, `iat`, `iss`, `jti`, `origin_jti`, `version`.
+- `x-amzn-oidc-data` — ES256-signed JWT from ALB. In the tested Cognito flow its payload contained `email`, `sub`, `username`, `exp`, `iss`. Its identity claims are sensitive; the signature protects integrity and origin, not confidentiality.
+- `x-amzn-oidc-identity` — plaintext, ALB-unsigned copy of the user `sub`. It is potentially sensitive personal data and is not independently trustworthy.
+- `x-amzn-oidc-accesstoken` — raw access token forwarded in plaintext and unsigned by ALB. It is a sensitive bearer credential. In the tested flow its payload contained `sub`, `username`, `scope`, `client_id`, `token_use`, `auth_time`, `exp`, `iat`, `iss`, `jti`, `origin_jti`, `version`.
+
+AWS classifies the access-token and identity values as legacy unsigned headers;
+see [User claims encoding and signature verification](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-authenticate-users.html#user-claims-encoding).
+In multi-instance mode, Lambda Router forwards only `x-amzn-oidc-data` by
+default; the legacy headers remain available as an explicit diagnostic opt-in.
 
 Important details from production logs for the native-Cognito flow:
 
